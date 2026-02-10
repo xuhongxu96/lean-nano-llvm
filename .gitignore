@@ -1,0 +1,12 @@
+/.lake
+.DS_Store
+*.fdb_latexmk
+*.fls
+*.log
+*.aux
+*.out
+*.toc
+*.synctex.gz
+*.bbl
+*.blg
+*.cut

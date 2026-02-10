@@ -1,0 +1,10 @@
+name = "lean-nano-llvm"
+version = "0.1.0"
+defaultTargets = ["lean-nano-llvm"]
+
+[[lean_lib]]
+name = "LeanNanoLlvm"
+
+[[lean_exe]]
+name = "lean-nano-llvm"
+root = "Main"

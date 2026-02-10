@@ -1,0 +1,9 @@
+Formal methods have been increasingly applied to verify the correctness of compiler optimizations,
+ensuring that transformations preserve program semantics.
+This proposal outlines a project to formalize LLVM peephole optimizations in Lean4,
+a powerful proof assistant.
+By encoding the semantics of LLVM IR and the transformations performed by peephole optimizations,
+we aim to create a framework for verifying the correctness of these optimizations.
+Specifically, we will focus on a subset of LLVM IR which includes integer arithmetic and memory operations, and formalize a selection of common peephole optimizations.
+Control flow is out of scope for this project, as we will focus on local tranformations within basic blocks.
+This work will contribute to the reliability of compiler optimizations and provide insights into the design of future optimization passes.
