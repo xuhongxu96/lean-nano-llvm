@@ -1,0 +1,32 @@
+We plan to complete this project in four phases over eight weeks.
+
+\myparagraph{Phase 1: Foundations (Week 1--2)}
+Goal: A working interpreter.
+\begin{itemize}
+    \item Define Inductive Instruction and State.
+    \item Implement eval : \texttt{List Instruction → State → Option State}.
+    \item Write unit tests in Lean to confirm eval works for simple programs.
+\end{itemize}
+
+\myparagraph{Phase 2: The Optimizer (Week 3--4)}
+Goal: A working transformation function.
+\begin{itemize}
+    \item Implement optimize function focusing on one pattern first: (X + C1) + C2.
+    \item Verify experimentally that optimize produces cleaner code on test inputs.
+\end{itemize}
+
+\myparagraph{Phase 3: Verification (Week 5--7)}
+Goal: The Green Checkmark.
+\begin{itemize}
+    \item Prove simple lemmas about BitVec addition (e.g., associativity).
+    \item Define the main theorem: theorem soundness : \(\forall p\ s,\ \texttt{eval}\ (\texttt{optimize}\ p)\ s = \texttt{eval}\ p\ s\).
+    \item Prove the theorem for the single implemented pattern.
+    \item Stretch goal: Add nsw flag support and prove optimizations do not drop flags incorrectly.
+\end{itemize}
+
+\myparagraph{Phase 4: Final Polish (Week 8)}
+Goal: Submission.
+\begin{itemize}
+    \item Clean up code and add comments explaining the design rationale.
+    \item Final tests, documentation, and prepare submission materials.
+\end{itemize}

@@ -1,0 +1,24 @@
+Peephole optimization is a key class of compiler optimizations that
+targets small instruction sequences, typically within a basic block,
+to improve performance and reduce code size. These optimizations are
+usually implemented as pattern-matching rules that identify specific
+instruction sequences and replace them with more efficient alternatives.
+Ensuring the correctness of these transformations is critical, as any
+incorrect optimization can cause erroneous program behavior.
+
+In \llvm, a widely used compiler infrastructure, peephole optimizations
+are mainly implemented in the \instcombine pass. As of this writing,
+\instcombine contains over 50{,}000 lines of code—double its size from
+ten years ago. Its growing complexity makes maintenance and correctness
+verification increasingly difficult.
+Yang \etal found \instcombine to be among the most bug-prone components
+in \llvm~\cite{yang2011finding}.
+This underscores the need for more rigorous correctness guarantees
+for peephole optimizations in \llvm.
+
+\alive is a formal verification framework based on \smt solvers,
+specifically designed to verify \llvm optimizations. However, \alive
+has several limitations, including timeouts for complex optimizations
+and lack of support for multi-width bit vectors, which are common in
+\llvm optimizations.
+

@@ -1,0 +1,64 @@
+In this proposal, we aim to formalize a subset of \llvm \ir
+and a selection of peephole optimizations in \lean~\cite{moura2021lean},
+a proof assistant.
+\cref{tab:formalization-scope} lists the scope of the proposed formalization.
+
+\begin{table}[ht]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}\renewcommand{\arraystretch}{1}
+\caption{Scope of the Proposed Formalization in \lean}
+\label{tab:formalization-scope}
+\begin{tabular}{@{}l p{0.8\linewidth}@{}}
+\toprule
+\textbf{Category} & \textbf{Target functionalities and concepts} \\
+\midrule
+Instructions & \texttt{add}, \texttt{sub}, \texttt{mul}, \texttt{div},
+\texttt{select}, \texttt{load}, \texttt{store}; flags: \texttt{nsw},
+\texttt{nuw} \\
+Data types & Arbitrary-width integers (\eg \texttt{i32}, \texttt{i64}),
+pointer types; special values: \poison, \vundef \\
+Memory model & Basic locations/addresses; operational semantics of
+\texttt{load}/\texttt{store}; no aliasing or complex hierarchies \\
+Optimizations & Arithmetic identities (e.g. \texttt{add x,0} $\to$
+\texttt{x}); constant folding (e.g. \texttt{select true,x,y} $\to$
+\texttt{x}) \\
+Properties & Refinement: $P_{opt}\sqsubseteq P_{orig}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Instructions}
+
+We focus on a subset of \llvm \ir with integer arithmetic and memory
+operations that are typical targets for peephole transforms. This subset
+includes \texttt{add}, \texttt{sub}, \texttt{mul}, \texttt{div},
+\texttt{select}, \texttt{load}, and \texttt{store}, together with
+relevant flags (\eg \texttt{nuw}, \texttt{nsw}) that affect semantics.
+
+\subsection{Data Types}
+
+We formalize integer types of varying widths (\eg, \texttt{i32},
+\texttt{i64}) and pointer types, and model \poison and \vundef to capture
+\llvm's semantics relevant to optimization correctness.
+
+\subsection{Memory Model}
+
+The memory model captures basic locations, addresses, and the operational
+effects of \texttt{load} and \texttt{store}. We omit aliasing and complex
+hierarchies in this initial formalization.
+
+
+\subsection{Peephole Optimizations}
+
+We formalize common peephole optimizations that target arithmetic and
+memory patterns, e.g. \texttt{add x,0} $\rightarrow$ \texttt{x} and
+constant folding of \texttt{select} when the condition is constant.
+
+\subsection{Properties to Verify}
+
+For each optimization we prove a refinement property: the optimized
+program refines the original ($P_{opt}\sqsubseteq P_{orig}$), i.e. it is
+semantically equivalent or more defined where the original may yield
+\poison{} or \vundef.
+
