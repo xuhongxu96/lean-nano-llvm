@@ -19,7 +19,7 @@ Goal: A working transformation function.
 Goal: The Green Checkmark.
 \begin{itemize}
     \item Prove simple lemmas about BitVec addition (e.g., associativity).
-    \item Define the main theorem: theorem soundness : \(\forall p\ s,\ \texttt{eval}\ (\texttt{optimize}\ p)\ s = \texttt{eval}\ p\ s\).
+    \item Define the main theorem: theorem soundness : \(\forall p\ s,\ \texttt{eval}\ (\texttt{optimize}\ p)\ s \sqsubseteq \texttt{eval}\ p\ s\).
     \item Prove the theorem for the single implemented pattern.
     \item Stretch goal: Add nsw flag support and prove optimizations do not drop flags incorrectly.
 \end{itemize}
