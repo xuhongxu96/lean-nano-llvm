@@ -117,7 +117,7 @@ inductive Terminator : Type where
 
 
 structure Global where
-  (identifier : GlobalId)
+  (id : GlobalId)
   (type : LlvmType φ)
   (isConstant : Bool)
   (exp : Option Exp)
