@@ -25,19 +25,35 @@ instance : ToString RawId where
 
 inductive Identifier : Type where
   | global_id (id : RawId) -- @id
-  | local_id (id: RawId) -- %id
+  | local_id (id : RawId) -- %id
 deriving Repr, DecidableEq
 
 
-/--
-  `void` is omitted because it is only used as return type, which should be mutually defined
-  See https://github.com/vellvm/vellvm/blob/42b6b6578a3867a69aa68d576d576c10be9014c0/src/rocq/Syntax/LLVMAst.v#L297
---/
-inductive LlvmType (φ : Nat := 0) : Type where
+abbrev LocalId := RawId
+abbrev GlobalId := RawId
+abbrev BlockId := RawId
+abbrev FunctionId := GlobalId
+
+inductive InstructionId
+  | id (id : RawId)
+  | void (n : Nat) -- give unique ids to instructions that have void return type, such as `store`, terminators, etc.
+deriving Repr, DecidableEq
+
+
+mutual
+
+inductive LlvmRetType φ : Type where
+  | void
+  | ret (type : LlvmType φ)
+
+inductive LlvmType φ : Type where
   | int (w : Width φ)
-  | pointer
   | identifier (id:Identifier)
-deriving Repr, DecidableEq
+  | function (ret : LlvmRetType φ) (args : List (LlvmType φ)) -- (vararg : Bool) is not supported
+deriving Repr
+
+end
+
 
 instance : ToFormat (Width φ) := ⟨repr⟩
 instance : ToFormat (LlvmType φ) := ⟨repr⟩
@@ -48,7 +64,7 @@ abbrev LlvmType.i1 : LlvmType φ := .i 1
 abbrev LlvmType.i32 : LlvmType φ := .i 1
 
 
-abbrev TypedIdentifier (φ := 0) := Identifier × (LlvmType φ)
+abbrev TypedIdentifier φ := Identifier × (LlvmType φ)
 
 
 inductive IntBinaryOp : Type where
@@ -72,5 +88,62 @@ inductive ConversionOp : Type where
   | zext (nneg : Bool)
   | sext
 deriving Repr, DecidableEq
+
+
+inductive Exp : Type where
+  | identifier (id : Identifier)
+  | bool       (b : Bool)
+  | int        (x : Int)
+  | null
+  | undef
+  | poison
+deriving Repr
+
+abbrev TypedExp φ := LlvmType φ × Exp
+
+
+variable {φ : Nat}
+
+
+inductive Instruction : Type where
+  | intBinaryOp   (op : IntBinaryOp) (t : LlvmType φ) (v1 : Exp) (v2 : Exp)
+  | conversionOp  (op : ConversionOp) (fromTy: LlvmType φ) (v : Exp) (toTy : LlvmType φ)
+  | freeze        (v : LlvmType φ × Exp)
+
+
+inductive Terminator : Type where
+  | retVoid
+  | ret (v : TypedExp φ)
+
+
+structure Global where
+  (identifier : GlobalId)
+  (type : LlvmType φ)
+  (isConstant : Bool)
+  (exp : Option Exp)
+
+structure Declaration where
+  (name : FunctionId)
+  (type : LlvmType φ)
+
+abbrev Code := List (InstructionId × @Instruction φ)
+
+structure Block where
+  (id : BlockId)
+  (code : @Code φ)
+  (terminator : InstructionId × @Terminator φ)
+
+structure Definition where
+  (prototype : @Declaration φ)
+  (args : List LocalId)
+  (body : @Block φ) -- FIXME: Only support a single block
+
+inductive TopLevelEntity where
+  | declaration (decl : @Declaration φ)
+  | definition  (defn : @Definition φ)
+  | global      (g : @Global φ)
+
+abbrev TopLevel := List (@TopLevelEntity φ)
+
 
 end LeanNanoLlvm.Syntax
