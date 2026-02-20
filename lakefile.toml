@@ -8,3 +8,8 @@ name = "LeanNanoLlvm"
 [[lean_exe]]
 name = "lean-nano-llvm"
 root = "Main"
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "v4.28.0"
