@@ -39,21 +39,25 @@ inductive InstructionId
   | void (n : Nat) -- give unique ids to instructions that have void return type, such as `store`, terminators, etc.
 deriving Repr, DecidableEq
 
+section
+
+variable (φ : Nat)
 
 mutual
 
-inductive LlvmRetType φ : Type where
+inductive LlvmRetType : Type where
   | void
-  | ret (type : LlvmType φ)
+  | ret (type : LlvmType)
 
-inductive LlvmType φ : Type where
+inductive LlvmType : Type where
   | int (w : Width φ)
-  | identifier (id:Identifier)
-  | function (ret : LlvmRetType φ) (args : List (LlvmType φ)) -- (vararg : Bool) is not supported
+  | identifier (id : Identifier)
+  | function (ret : LlvmRetType) (args : List LlvmType)
 deriving Repr
 
 end
 
+end
 
 instance : ToFormat (Width φ) := ⟨repr⟩
 instance : ToFormat (LlvmType φ) := ⟨repr⟩
@@ -116,12 +120,6 @@ inductive Terminator : Type where
   | ret (v : TypedExp φ)
 
 
-structure Global where
-  (id : GlobalId)
-  (type : LlvmType φ)
-  (isConstant : Bool)
-  (exp : Option Exp)
-
 structure Declaration where
   (name : FunctionId)
   (type : LlvmType φ)
@@ -141,9 +139,8 @@ structure Definition where
 inductive TopLevelEntity where
   | declaration (decl : @Declaration φ)
   | definition  (defn : @Definition φ)
-  | global      (g : @Global φ)
 
-abbrev TopLevel := List (@TopLevelEntity φ)
+abbrev TopLevel (φ : Nat) := List (@TopLevelEntity φ)
 
 
 end LeanNanoLlvm.Syntax
