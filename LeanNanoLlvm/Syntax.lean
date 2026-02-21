@@ -1,7 +1,5 @@
 import LeanNanoLlvm.Util.ConcreteOrMVar
 
-open Lean PrettyPrinter
-
 namespace LeanNanoLlvm.Syntax
 
 abbrev Width φ := ConcreteOrMVar Nat φ
@@ -59,9 +57,6 @@ end
 
 end
 
-instance : ToFormat (Width φ) := ⟨repr⟩
-instance : ToFormat (LlvmType φ) := ⟨repr⟩
-
 def LlvmType.i (w : Width φ) : LlvmType φ := .int w
 
 abbrev LlvmType.i1 : LlvmType φ := .i 1
@@ -105,6 +100,7 @@ deriving Repr
 
 abbrev TypedExp φ := LlvmType φ × Exp
 
+section
 
 variable {φ : Nat}
 
@@ -142,5 +138,6 @@ inductive TopLevelEntity where
 
 abbrev TopLevel (φ : Nat) := List (@TopLevelEntity φ)
 
+end
 
 end LeanNanoLlvm.Syntax
