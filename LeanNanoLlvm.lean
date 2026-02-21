@@ -3,5 +3,3 @@
 import LeanNanoLlvm.Syntax
 import LeanNanoLlvm.Print
 import LeanNanoLlvm.Util
-
-import LeanNanoLlvm.SyntaxTest

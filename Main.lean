@@ -1,4 +1,5 @@
 import LeanNanoLlvm
+import LeanNanoLlvm.SyntaxTest
 
 def main : IO Unit := do
   IO.println s!"Hello, LeanNanoLlvm!"
