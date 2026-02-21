@@ -1,6 +1,6 @@
 import LeanNanoLlvm.Util.ConcreteOrMVar
 
-namespace LeanNanoLlvm.Syntax
+namespace LeanNanoLlvm.AST
 
 abbrev Width φ := ConcreteOrMVar Nat φ
 abbrev Width.concrete : Nat -> Width φ := ConcreteOrMVar.concrete
@@ -140,4 +140,4 @@ abbrev TopLevel (φ : Nat) := List (@TopLevelEntity φ)
 
 end
 
-end LeanNanoLlvm.Syntax
+end LeanNanoLlvm.AST

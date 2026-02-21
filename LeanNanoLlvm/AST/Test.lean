@@ -1,7 +1,6 @@
-import LeanNanoLlvm.Syntax
-import LeanNanoLlvm.Print
+import LeanNanoLlvm.AST
 
-open LeanNanoLlvm.Syntax
+open LeanNanoLlvm.AST
 
 /-
 define i32 f() {

@@ -1,6 +1,6 @@
-import LeanNanoLlvm.Syntax
+import LeanNanoLlvm.AST.AST
 
-namespace LeanNanoLlvm.Syntax
+namespace LeanNanoLlvm.AST
 
 def Identifier.print : Identifier → String
   | .global_id id => s!"@{id.ToString}"
@@ -144,4 +144,4 @@ def TopLevel.print : TopLevel φ → String
   | .cons entity tail => entity.print ++ "\n" ++ TopLevel.print tail
 
 
-end LeanNanoLlvm.Syntax
+end LeanNanoLlvm.AST
