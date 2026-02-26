@@ -49,7 +49,6 @@ inductive LlvmRetType : Type where
 
 inductive LlvmType : Type where
   | int (w : Width φ)
-  | identifier (id : Identifier)
   | function (ret : LlvmRetType) (args : List LlvmType)
 deriving Repr
 

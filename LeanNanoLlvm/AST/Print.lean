@@ -8,7 +8,6 @@ def Identifier.print : Identifier → String
 
 def LlvmType.print : LlvmType φ → String
   | .int w => s!"{w}"
-  | .identifier id => id.print
   | .function .. => unreachable!
 
 def LlvmRetType.print : LlvmRetType φ → String
