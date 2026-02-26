@@ -56,7 +56,7 @@ partial def elabNanoLlvmType (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 partial def elabNanoLlvmRetType (φ : Nat) : Syntax → MetaM Expr
-  | `(nanollvm_type| void) => mkAppM ``LlvmRetType.void #[]
+  | `(nanollvm_type| void) => mkAppOptM ``LlvmRetType.void #[mkNatLit φ]
   | stx => do
     let ty ← elabNanoLlvmType φ stx
     mkAppM ``LlvmRetType.ret #[ty]

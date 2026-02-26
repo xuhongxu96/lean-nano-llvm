@@ -45,5 +45,6 @@ elab "test_elabNanoLlvmType " e:nanollvm_type : term => elabNanoLlvmType 64 e
 #reduce test_elabNanoLlvmType i8
 #reduce test_elabNanoLlvmType i8()
 #reduce test_elabNanoLlvmType i8(i32, i16)
+#reduce test_elabNanoLlvmType void(i32, i16)
 
 end
