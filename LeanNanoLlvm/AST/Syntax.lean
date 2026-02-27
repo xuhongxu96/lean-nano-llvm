@@ -62,4 +62,99 @@ partial def elabNanoLlvmRetType (φ : Nat) : Syntax → MetaM Expr
     mkAppM ``LlvmRetType.ret #[ty]
 end
 
+declare_syntax_cat nanollvm_exp
+syntax nanollvm_identifier : nanollvm_exp
+syntax "true" : nanollvm_exp
+syntax "false" : nanollvm_exp
+syntax num : nanollvm_exp -- TODO: negative ints
+syntax "null" : nanollvm_exp
+syntax "undef" : nanollvm_exp
+syntax "poison" : nanollvm_exp
+
+def elabNanoLlvmExp : Syntax → MetaM Expr
+  | `(nanollvm_exp| $id:nanollvm_identifier) => do
+    let id ← elabNanoLlvmIdentifier id
+    mkAppM ``Exp.identifier #[id]
+  | `(nanollvm_exp| true) => mkAppM ``Exp.bool #[(.const ``Bool.true [])]
+  | `(nanollvm_exp| false) => mkAppM ``Exp.bool #[(.const ``Bool.false [])]
+  | `(nanollvm_exp| $n:num) => do
+    let int ← mkAppM ``Int.ofNat #[mkNatLit n.getNat]
+    mkAppM ``Exp.int #[int]
+  | `(nanollvm_exp| null) => mkAppM ``Exp.null #[]
+  | `(nanollvm_exp| undef) => mkAppM ``Exp.undef #[]
+  | `(nanollvm_exp| poison) => mkAppM ``Exp.poison #[]
+  | _ => throwUnsupportedSyntax
+
+declare_syntax_cat nanollvm_int_bin_op
+syntax "add" " nuw "? " nsw"? : nanollvm_int_bin_op
+syntax "sub" " nuw "? " nsw"? : nanollvm_int_bin_op
+syntax "mul" " nuw "? " nsw"? : nanollvm_int_bin_op
+syntax "shl" " nuw "? " nsw"? : nanollvm_int_bin_op
+syntax "udiv" " exact "? : nanollvm_int_bin_op
+syntax "sdiv" " exact "? : nanollvm_int_bin_op
+syntax "lshr" " exact "? : nanollvm_int_bin_op
+syntax "ashr" " exact "? : nanollvm_int_bin_op
+syntax "urem" : nanollvm_int_bin_op
+syntax "srem" : nanollvm_int_bin_op
+syntax "and" : nanollvm_int_bin_op
+syntax "or" " disjoint "? : nanollvm_int_bin_op
+syntax "xor" : nanollvm_int_bin_op
+
+def elabNanoLlvmIntBinOp (stx : Syntax) : MetaM Expr := do
+  -- child i is "present" when it was actually written in source
+  let flag (i : Nat) : Bool := !stx[i].isNone
+  match stx[0].getAtomVal with
+  | "add"  => return mkAppN (mkConst ``IntBinaryOp.add)  #[toExpr (flag 1), toExpr (flag 2)]
+  | "sub"  => return mkAppN (mkConst ``IntBinaryOp.sub)  #[toExpr (flag 1), toExpr (flag 2)]
+  | "mul"  => return mkAppN (mkConst ``IntBinaryOp.mul)  #[toExpr (flag 1), toExpr (flag 2)]
+  | "shl"  => return mkAppN (mkConst ``IntBinaryOp.shl)  #[toExpr (flag 1), toExpr (flag 2)]
+  | "udiv" => return mkApp  (mkConst ``IntBinaryOp.udiv) (toExpr (flag 1))
+  | "sdiv" => return mkApp  (mkConst ``IntBinaryOp.sdiv) (toExpr (flag 1))
+  | "lshr" => return mkApp  (mkConst ``IntBinaryOp.lshr) (toExpr (flag 1))
+  | "ashr" => return mkApp  (mkConst ``IntBinaryOp.ashr) (toExpr (flag 1))
+  | "urem" => return mkConst ``IntBinaryOp.urem
+  | "srem" => return mkConst ``IntBinaryOp.srem
+  | "and"  => return mkConst ``IntBinaryOp.and
+  | "or"   => return mkApp  (mkConst ``IntBinaryOp.or)   (toExpr (flag 1))
+  | "xor"  => return mkConst ``IntBinaryOp.xor
+  | op     => throwErrorAt stx "unknown IntBinaryOp opcode: {op}"
+
+declare_syntax_cat nanollvm_conversion_op
+syntax "trunc" " nuw "? " nsw"? : nanollvm_conversion_op
+syntax "zext" " nneg "? : nanollvm_conversion_op
+syntax "sext" : nanollvm_conversion_op
+
+def elabNanoLlvmConversionOp (stx : Syntax) : MetaM Expr := do
+  let flag (i : Nat) : Bool := !stx[i].isNone
+  match stx[0].getAtomVal with
+  | "trunc"  => return mkAppN (mkConst ``ConversionOp.trunc)  #[toExpr (flag 1), toExpr (flag 2)]
+  | "zext"  => return mkAppN (mkConst ``ConversionOp.zext)  #[toExpr (flag 1)]
+  | "sext"  => return mkAppN (mkConst ``ConversionOp.sext)  #[]
+  | op     => throwErrorAt stx "unknown ConversionOp opcode: {op}"
+
+declare_syntax_cat nanollvm_instruction
+syntax nanollvm_int_bin_op nanollvm_type nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
+syntax nanollvm_conversion_op nanollvm_type nanollvm_exp " to " nanollvm_type : nanollvm_instruction
+syntax "freeze" nanollvm_type nanollvm_exp : nanollvm_instruction
+
+def elabNanoLlvmInstruction (φ: Nat) : Syntax → MetaM Expr
+  | `(nanollvm_instruction| $op:nanollvm_int_bin_op $ty:nanollvm_type $op1:nanollvm_exp, $op2:nanollvm_exp) => do
+    let op ← elabNanoLlvmIntBinOp op
+    let ty ← elabNanoLlvmType φ ty
+    let op1 ← elabNanoLlvmExp op1
+    let op2 ← elabNanoLlvmExp op2
+    mkAppM ``Instruction.intBinaryOp #[op, ty, op1, op2]
+  | `(nanollvm_instruction| $op:nanollvm_conversion_op $fromTy:nanollvm_type $v:nanollvm_exp to $toTy:nanollvm_type) => do
+    let op ← elabNanoLlvmConversionOp op
+    let fromTy ← elabNanoLlvmType φ fromTy
+    let v ← elabNanoLlvmExp v
+    let toTy ← elabNanoLlvmType φ toTy
+    mkAppM ``Instruction.conversionOp #[op, fromTy, v, toTy]
+  | `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp) => do
+    let ty ← elabNanoLlvmType φ ty
+    let v ← elabNanoLlvmExp v
+    let tv ← mkAppM ``Prod.mk #[ty, v]
+    mkAppM ``Instruction.freeze #[tv]
+  | _ => throwUnsupportedSyntax
+
 end LeanNanoLlvm.AST.Syntax
