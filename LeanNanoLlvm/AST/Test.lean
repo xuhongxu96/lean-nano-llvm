@@ -77,4 +77,15 @@ elab "test_elabNanoLlvmInstruction" e:nanollvm_instruction : term => elabNanoLlv
 #reduce test_elabNanoLlvmInstruction zext i8 %b to i16
 #reduce test_elabNanoLlvmInstruction freeze i8 %1
 
+elab "test_elabNanoLlvmTerminator" e:nanollvm_terminator : term => elabNanoLlvmTerminator 64 e
+#reduce test_elabNanoLlvmTerminator ret void
+#reduce test_elabNanoLlvmTerminator ret i8 %1
+
+elab "test_elabNanoLlvmDeclaration" e:nanollvm_declaration : term => elabNanoLlvmDeclaration 64 e
+#reduce test_elabNanoLlvmDeclaration declare i32 @puts(i8, i32)
+
+elab "test_elabNanoLlvmCodeline" e:nanollvm_codeline : term => elabNanoLlvmCodeline 64 1 e
+#reduce test_elabNanoLlvmCodeline %1 = add i8 %0, %a
+#reduce test_elabNanoLlvmCodeline freeze i8 %a
+
 end

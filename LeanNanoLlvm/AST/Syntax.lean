@@ -157,4 +157,48 @@ def elabNanoLlvmInstruction (φ: Nat) : Syntax → MetaM Expr
     mkAppM ``Instruction.freeze #[tv]
   | _ => throwUnsupportedSyntax
 
+declare_syntax_cat nanollvm_terminator
+syntax "ret " "void" : nanollvm_terminator
+syntax "ret " nanollvm_type nanollvm_exp : nanollvm_terminator
+
+def elabNanoLlvmTerminator (φ : Nat) : Syntax → MetaM Expr
+  | `(nanollvm_terminator| ret void) => mkAppM ``Terminator.retVoid #[]
+  | `(nanollvm_terminator| ret $ty:nanollvm_type $e:nanollvm_exp) => do
+    let ty ← elabNanoLlvmType φ ty
+    let e ← elabNanoLlvmExp e
+    let te ← mkAppM ``Prod.mk #[ty, e]
+    mkAppM ``Terminator.ret #[te]
+  | _ => throwUnsupportedSyntax
+
+declare_syntax_cat nanollvm_declaration
+syntax "declare " nanollvm_type "@" nanollvm_rawid "(" nanollvm_type,* ")" : nanollvm_declaration
+
+def elabNanoLlvmDeclaration (φ : Nat) : Syntax → MetaM Expr
+  | `(nanollvm_declaration| declare $retTy:nanollvm_type @$id:nanollvm_rawid($params:nanollvm_type,*)) => do
+    let id ← elabNanoLlvmRawId id
+    let ty ← mkAppM ``LlvmType #[mkNatLit φ]
+    let retTy ← elabNanoLlvmRetType φ retTy
+    let argVals ← params.getElems.mapM (elabNanoLlvmType φ)
+    let argList ← mkListLit (ty) argVals.toList
+    let fnTy ← mkAppM ``LlvmType.function #[retTy, argList]
+    mkAppM ``Declaration.mk #[id, fnTy]
+  | _ => throwUnsupportedSyntax
+
+declare_syntax_cat nanollvm_codeline
+syntax "%" nanollvm_rawid " = " nanollvm_instruction : nanollvm_codeline
+syntax nanollvm_instruction : nanollvm_codeline
+
+def elabNanoLlvmCodeline (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
+  | `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction) => do
+    let id ← elabNanoLlvmRawId id
+    let id ← mkAppM ``InstructionId.id #[id]
+    let instr ← elabNanoLlvmInstruction φ instr
+    mkAppM ``Prod.mk #[id, instr]
+  | `(nanollvm_codeline| $instr:nanollvm_instruction) => do
+    let id ← mkAppM ``InstructionId.void #[mkNatLit lineno]
+    let instr ← elabNanoLlvmInstruction φ instr
+    mkAppM ``Prod.mk #[id, instr]
+  | _ => throwUnsupportedSyntax
+
+
 end LeanNanoLlvm.AST.Syntax
