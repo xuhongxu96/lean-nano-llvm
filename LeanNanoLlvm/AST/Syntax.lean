@@ -162,12 +162,12 @@ syntax "ret " "void" : nanollvm_terminator
 syntax "ret " nanollvm_type nanollvm_exp : nanollvm_terminator
 
 def elabNanoLlvmTerminator (φ : Nat) : Syntax → MetaM Expr
-  | `(nanollvm_terminator| ret void) => mkAppM ``Terminator.retVoid #[]
+  | `(nanollvm_terminator| ret void) => mkAppOptM ``Terminator.retVoid #[mkNatLit φ]
   | `(nanollvm_terminator| ret $ty:nanollvm_type $e:nanollvm_exp) => do
     let ty ← elabNanoLlvmType φ ty
     let e ← elabNanoLlvmExp e
     let te ← mkAppM ``Prod.mk #[ty, e]
-    mkAppM ``Terminator.ret #[te]
+    mkAppOptM ``Terminator.ret #[mkNatLit φ, te]
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_declaration
@@ -181,24 +181,102 @@ def elabNanoLlvmDeclaration (φ : Nat) : Syntax → MetaM Expr
     let argVals ← params.getElems.mapM (elabNanoLlvmType φ)
     let argList ← mkListLit (ty) argVals.toList
     let fnTy ← mkAppM ``LlvmType.function #[retTy, argList]
-    mkAppM ``Declaration.mk #[id, fnTy]
+    mkAppOptM ``Declaration.mk #[mkNatLit φ, id, fnTy]
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_codeline
-syntax "%" nanollvm_rawid " = " nanollvm_instruction : nanollvm_codeline
-syntax nanollvm_instruction : nanollvm_codeline
+syntax "%" nanollvm_rawid " = " nanollvm_instruction linebreak : nanollvm_codeline
+syntax nanollvm_instruction linebreak : nanollvm_codeline
 
 def elabNanoLlvmCodeline (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
-  | `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction) => do
+  | `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction
+  ) => do
     let id ← elabNanoLlvmRawId id
     let id ← mkAppM ``InstructionId.id #[id]
     let instr ← elabNanoLlvmInstruction φ instr
     mkAppM ``Prod.mk #[id, instr]
-  | `(nanollvm_codeline| $instr:nanollvm_instruction) => do
+  | `(nanollvm_codeline| $instr:nanollvm_instruction
+  ) => do
     let id ← mkAppM ``InstructionId.void #[mkNatLit lineno]
     let instr ← elabNanoLlvmInstruction φ instr
     mkAppM ``Prod.mk #[id, instr]
   | _ => throwUnsupportedSyntax
 
+declare_syntax_cat nanollvm_code
+syntax nanollvm_codeline* : nanollvm_code
+
+def elabNanoLlvmCode (φ : Nat) (lineno: Nat) : Syntax → MetaM (Expr × Nat)
+  | `(nanollvm_code| $codelines:nanollvm_codeline*) => do
+    let instrTy ← mkAppOptM ``Instruction #[mkNatLit φ]
+    let ty ← mkAppM ``Prod #[mkConst ``InstructionId, instrTy]
+    let codelines ← codelines.mapIdxM (fun offset => elabNanoLlvmCodeline φ (lineno + offset))
+    pure (← mkListLit (ty) codelines.toList, codelines.size)
+  | _ => throwUnsupportedSyntax
+
+declare_syntax_cat nanollvm_block
+syntax nanollvm_rawid ": " linebreak nanollvm_code nanollvm_terminator : nanollvm_block
+
+def elabNanoLlvmBlock (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
+  | `(nanollvm_block| $id:nanollvm_rawid:
+  $code:nanollvm_code $term:nanollvm_terminator) => do
+    let id ← elabNanoLlvmRawId id
+    let ⟨code, nLines⟩ ← elabNanoLlvmCode φ lineno code
+    let term ← elabNanoLlvmTerminator φ term
+    let termId ← mkAppM ``RawId.anonymom #[mkNatLit (lineno + nLines)]
+    let termId ← mkAppM ``InstructionId.id #[termId]
+    let term ← mkAppM ``Prod.mk #[termId, term]
+    mkAppM ``Block.mk #[id, code, term]
+  | _ => throwUnsupportedSyntax
+
+declare_syntax_cat nanollvm_arg
+syntax nanollvm_type " %" nanollvm_rawid : nanollvm_arg
+
+def elabNanoLlvmArg (φ : Nat) : Syntax → MetaM (Expr × Expr)
+  | `(nanollvm_arg| $ty:nanollvm_type %$id:nanollvm_rawid) => do
+    let ty ← elabNanoLlvmType φ ty
+    let id ← elabNanoLlvmRawId id
+    pure (ty, id)
+  | _ => throwUnsupportedSyntax
+
+declare_syntax_cat nanollvm_definition
+syntax "define " nanollvm_type "@" nanollvm_rawid "(" nanollvm_arg,* ")" " {" nanollvm_block "}" : nanollvm_definition
+
+def elabNanoLlvmDefinition (φ : Nat) : Syntax → MetaM Expr
+  | `(nanollvm_definition| define $retTy:nanollvm_type @$id:nanollvm_rawid($args:nanollvm_arg,*) { $block:nanollvm_block }) => do
+    let id ← elabNanoLlvmRawId id
+    let argTy ← mkAppM ``LlvmType #[mkNatLit φ]
+    let retTy ← elabNanoLlvmRetType φ retTy
+    let argTys ← args.getElems.mapM (fun a => do pure (← elabNanoLlvmArg φ a).fst)
+    let argNames ← args.getElems.mapM (fun a => do pure (← elabNanoLlvmArg φ a).snd)
+    let argList ← mkListLit (argTy) argTys.toList
+    let argNameList ← mkListLit (mkConst ``RawId) argNames.toList
+    let fnTy ← mkAppM ``LlvmType.function #[retTy, argList]
+    let block ← elabNanoLlvmBlock φ 1 block
+    let decl ← mkAppOptM ``Declaration.mk #[mkNatLit φ, id, fnTy]
+    mkAppOptM ``Definition.mk #[mkNatLit φ, decl, argNameList, block]
+  | _ => throwUnsupportedSyntax
+
+declare_syntax_cat nanollvm_entity
+syntax nanollvm_declaration : nanollvm_entity
+syntax nanollvm_definition : nanollvm_entity
+
+def elabNanoLlvmEntity (φ : Nat) : Syntax → MetaM Expr
+  | `(nanollvm_entity| $decl:nanollvm_declaration) => do
+    let decl ← elabNanoLlvmDeclaration φ decl
+    mkAppOptM ``TopLevelEntity.declaration #[mkNatLit φ, decl]
+  | `(nanollvm_entity| $defn:nanollvm_definition) => do
+    let defn ← elabNanoLlvmDefinition φ defn
+    mkAppOptM ``TopLevelEntity.definition #[mkNatLit φ, defn]
+  | _ => throwUnsupportedSyntax
+
+declare_syntax_cat nanollvm
+syntax nanollvm_entity* : nanollvm
+
+def elabNanoLlvm (φ : Nat) : Syntax → MetaM Expr
+  | `(nanollvm| $entity:nanollvm_entity*) => do
+    let entity ← entity.mapM (elabNanoLlvmEntity φ)
+    let ty ← mkAppOptM ``TopLevelEntity #[mkNatLit φ]
+    mkListLit ty entity.toList
+  | _ => throwUnsupportedSyntax
 
 end LeanNanoLlvm.AST.Syntax

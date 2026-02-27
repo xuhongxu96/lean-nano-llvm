@@ -88,4 +88,45 @@ elab "test_elabNanoLlvmCodeline" e:nanollvm_codeline : term => elabNanoLlvmCodel
 #reduce test_elabNanoLlvmCodeline %1 = add i8 %0, %a
 #reduce test_elabNanoLlvmCodeline freeze i8 %a
 
+elab "test_elabNanoLlvmCode " e:nanollvm_code: term => do pure (← elabNanoLlvmCode 64 1 e).fst
+#reduce test_elabNanoLlvmCode %1 = add i8 %0, %a
+                              %d = add i8 %2, %b
+                              freeze i8 %1
+
+elab "test_elabNanoLlvmBlock " e:nanollvm_block: term => elabNanoLlvmBlock 64 1 e
+#reduce test_elabNanoLlvmBlock entry:
+                                %1 = add i8 %0, %a
+                                %d = add i8 %2, %b
+                                freeze i8 %1
+                                ret void
+
+elab "test_elabNanoLlvmDefinition " e:nanollvm_definition: term => elabNanoLlvmDefinition 64 e
+#reduce test_elabNanoLlvmDefinition
+define void @f() {
+entry:
+  %1 = add i8 %0, %a
+  %d = add i8 %2, %b
+  freeze i8 %1
+  ret void
+}
+
+elab "test_elabNanoLlvm " e:nanollvm : term => elabNanoLlvm 64 e
+#reduce test_elabNanoLlvm
+declare i32 @puts(i8, i32)
+define void @g(i8 %a) {
+entry:
+  %1 = add i8 %0, %a
+  %d = add i8 %2, %b
+  freeze i8 %1
+  ret void
+}
+declare i32 @gets(i8, i32)
+define void @f() {
+entry:
+  %1 = add i8 %0, %a
+  %d = add i8 %2, %b
+  freeze i8 %1
+  ret void
+}
+
 end
