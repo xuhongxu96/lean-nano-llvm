@@ -4,7 +4,8 @@ section
 open LeanNanoLlvm.AST
 
 /-
-define i32 f() {
+define i32 @f() {
+B:
   %i0 = add i32 0, 1
   ret i32 %i0
 } -/
@@ -128,5 +129,14 @@ entry:
   freeze i8 %1
   ret void
 }
+
+open LeanNanoLlvm.AST in
+#eval TopLevel.print >>[32]
+  define i32 @f() {
+  B:
+    %i0 = add i32 0, 1
+    ret i32 %i0
+  }
+<< = llvm_0_plus_1.print
 
 end

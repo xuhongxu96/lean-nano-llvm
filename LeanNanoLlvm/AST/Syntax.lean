@@ -222,8 +222,7 @@ def elabNanoLlvmBlock (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
     let id ← elabNanoLlvmRawId id
     let ⟨code, nLines⟩ ← elabNanoLlvmCode φ lineno code
     let term ← elabNanoLlvmTerminator φ term
-    let termId ← mkAppM ``RawId.anonymom #[mkNatLit (lineno + nLines)]
-    let termId ← mkAppM ``InstructionId.id #[termId]
+    let termId ← mkAppM ``InstructionId.void #[mkNatLit (lineno + nLines)]
     let term ← mkAppM ``Prod.mk #[termId, term]
     mkAppM ``Block.mk #[id, code, term]
   | _ => throwUnsupportedSyntax
@@ -278,5 +277,8 @@ def elabNanoLlvm (φ : Nat) : Syntax → MetaM Expr
     let ty ← mkAppOptM ``TopLevelEntity #[mkNatLit φ]
     mkListLit ty entity.toList
   | _ => throwUnsupportedSyntax
+
+elab ">>[" n:num "]" linebreak p:nanollvm "<<" : term => elabNanoLlvm n.getNat p
+
 
 end LeanNanoLlvm.AST.Syntax

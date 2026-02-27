@@ -59,7 +59,7 @@ end
 def LlvmType.i (w : Width φ) : LlvmType φ := .int w
 
 abbrev LlvmType.i1 : LlvmType φ := .i 1
-abbrev LlvmType.i32 : LlvmType φ := .i 1
+abbrev LlvmType.i32 : LlvmType φ := .i 32
 
 
 abbrev TypedIdentifier φ := Identifier × (LlvmType φ)
