@@ -278,7 +278,8 @@ def elabNanoLlvm (φ : Nat) : Syntax → MetaM Expr
     mkListLit ty entity.toList
   | _ => throwUnsupportedSyntax
 
-elab ">>[" n:num "]" linebreak p:nanollvm "<<" : term => elabNanoLlvm n.getNat p
+elab "[llvm-" n:num "|" linebreak p:nanollvm "]" : term => elabNanoLlvm n.getNat p
+elab "[llvm|" linebreak p:nanollvm "]" : term => elabNanoLlvm 512 p
 
 
 end LeanNanoLlvm.AST.Syntax

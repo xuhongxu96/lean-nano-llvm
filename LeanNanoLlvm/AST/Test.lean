@@ -131,13 +131,13 @@ entry:
 }
 
 open LeanNanoLlvm.AST in
-theorem example_syntax_correct : TopLevel.print >>[32]
+theorem example_syntax_correct : TopLevel.print [llvm|
   define i32 @f() {
   B:
     %i0 = add i32 0, 1
     ret i32 %i0
   }
-<< = llvm_0_plus_1.print := by
+] = llvm_0_plus_1.print := by
   rfl
 
 end
