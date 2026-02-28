@@ -138,7 +138,6 @@ theorem example_syntax_correct : TopLevel.print >>[32]
     ret i32 %i0
   }
 << = llvm_0_plus_1.print := by
-  simp [llvm_0_plus_1]
   rfl
 
 end
