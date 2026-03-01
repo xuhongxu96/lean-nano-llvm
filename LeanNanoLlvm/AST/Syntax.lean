@@ -11,7 +11,7 @@ syntax num : nanollvm_rawid
 
 def elabNanoLlvmRawId : Syntax → MetaM Expr
   | `(nanollvm_rawid| $s:ident) => mkAppM ``RawId.name #[mkStrLit s.getId.toString]
-  | `(nanollvm_rawid| $n:num) => mkAppM ``RawId.anonymom #[mkNatLit n.getNat]
+  | `(nanollvm_rawid| $n:num) => mkAppM ``RawId.anonymous #[mkNatLit n.getNat]
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_identifier
@@ -133,9 +133,9 @@ def elabNanoLlvmConversionOp (stx : Syntax) : MetaM Expr := do
   | op     => throwErrorAt stx "unknown ConversionOp opcode: {op}"
 
 declare_syntax_cat nanollvm_instruction
-syntax nanollvm_int_bin_op nanollvm_type nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
-syntax nanollvm_conversion_op nanollvm_type nanollvm_exp " to " nanollvm_type : nanollvm_instruction
-syntax "freeze" nanollvm_type nanollvm_exp : nanollvm_instruction
+syntax nanollvm_int_bin_op ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
+syntax nanollvm_conversion_op ppHardSpace nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type : nanollvm_instruction
+syntax "freeze" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
 
 def elabNanoLlvmInstruction (φ: Nat) : Syntax → MetaM Expr
   | `(nanollvm_instruction| $op:nanollvm_int_bin_op $ty:nanollvm_type $op1:nanollvm_exp, $op2:nanollvm_exp) => do
@@ -159,7 +159,7 @@ def elabNanoLlvmInstruction (φ: Nat) : Syntax → MetaM Expr
 
 declare_syntax_cat nanollvm_terminator
 syntax "ret " "void" : nanollvm_terminator
-syntax "ret " nanollvm_type nanollvm_exp : nanollvm_terminator
+syntax "ret " nanollvm_type ppHardSpace nanollvm_exp : nanollvm_terminator
 
 def elabNanoLlvmTerminator (φ : Nat) : Syntax → MetaM Expr
   | `(nanollvm_terminator| ret void) => mkAppOptM ``Terminator.retVoid #[mkNatLit φ]
@@ -171,7 +171,7 @@ def elabNanoLlvmTerminator (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_declaration
-syntax "declare " nanollvm_type "@" nanollvm_rawid "(" nanollvm_type,* ")" : nanollvm_declaration
+syntax "declare " nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_type,* ")" : nanollvm_declaration
 
 def elabNanoLlvmDeclaration (φ : Nat) : Syntax → MetaM Expr
   | `(nanollvm_declaration| declare $retTy:nanollvm_type @$id:nanollvm_rawid($params:nanollvm_type,*)) => do
@@ -185,8 +185,8 @@ def elabNanoLlvmDeclaration (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_codeline
-syntax "%" nanollvm_rawid " = " nanollvm_instruction linebreak : nanollvm_codeline
-syntax nanollvm_instruction linebreak : nanollvm_codeline
+syntax "%" nanollvm_rawid " = " nanollvm_instruction ppLine : nanollvm_codeline
+syntax nanollvm_instruction ppLine : nanollvm_codeline
 
 def elabNanoLlvmCodeline (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
   | `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction
@@ -238,10 +238,12 @@ def elabNanoLlvmArg (φ : Nat) : Syntax → MetaM (Expr × Expr)
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_definition
-syntax "define " nanollvm_type "@" nanollvm_rawid "(" nanollvm_arg,* ")" " {" nanollvm_block "}" : nanollvm_definition
+syntax "define " nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_arg,* ")" " { " linebreak nanollvm_block linebreak " }" : nanollvm_definition
 
 def elabNanoLlvmDefinition (φ : Nat) : Syntax → MetaM Expr
-  | `(nanollvm_definition| define $retTy:nanollvm_type @$id:nanollvm_rawid($args:nanollvm_arg,*) { $block:nanollvm_block }) => do
+  | `(nanollvm_definition| define $retTy:nanollvm_type @$id:nanollvm_rawid($args:nanollvm_arg,*) {
+    $block:nanollvm_block
+    }) => do
     let id ← elabNanoLlvmRawId id
     let argTy ← mkAppM ``LlvmType #[mkNatLit φ]
     let retTy ← elabNanoLlvmRetType φ retTy

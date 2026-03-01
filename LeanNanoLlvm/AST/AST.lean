@@ -9,13 +9,13 @@ abbrev Width.mvar : Fin φ -> Width φ := ConcreteOrMVar.mvar
 
 inductive RawId : Type where
   | name (s : String) -- Named identifiers: %arg, %val, %x
-  | anonymom (n : Nat) -- Anonymous identifiers: %0, %1
+  | anonymous (n : Nat) -- Anonymous identifiers: %0, %1
 deriving Repr, DecidableEq
 
 def RawId.ToString (s : RawId) : String :=
   match s with
   | .name str => str
-  | .anonymom i => s!"{i}"
+  | .anonymous i => s!"{i}"
 
 instance : ToString RawId where
   toString := RawId.ToString

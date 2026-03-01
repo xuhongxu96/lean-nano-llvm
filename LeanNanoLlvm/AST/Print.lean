@@ -23,11 +23,11 @@ def Exp.print : Exp → String
   | .poison => "poison"
 
 private def printBinOp (op : String) (flags : List String) (t : LlvmType φ) (v1 v2 : Exp) : String :=
-  let flagStr := String.join (flags.map (" " ++ ·))
+  let flagStr := if flags.isEmpty then "" else " " ++ String.intercalate " " flags
   s!"{op}{flagStr} {t.print} {v1.print}, {v2.print}"
 
 private def printConversionOp (op : String) (flags : List String) (fromTy : LlvmType φ) (v : Exp) (toTy : LlvmType φ) : String :=
-  let flagStr := String.join (flags.map (" " ++ ·))
+  let flagStr := if flags.isEmpty then "" else " " ++ String.intercalate " " flags
   s!"{op}{flagStr} {fromTy.print} {v.print} to {toTy.print}"
 
 -- Syntax: [?cond1 => val1, ?cond2 => val2]
@@ -37,10 +37,10 @@ local macro_rules
   | `([?]) => `(([] : List String))
   | `([? $id:ident, $[$ids:ident],*]) => do
     let flagName := id.getId.toString
-    `( (if $id then [" " ++ $(Lean.quote flagName)] else []) ++ [? $[$ids],* ] )
+    `( (if $id then [$(Lean.quote flagName)] else []) ++ [? $[$ids],* ] )
   | `([? $id:ident]) => do
     let flagName := id.getId.toString
-    `( if $id then [" " ++ $(Lean.quote flagName)] else [] )
+    `( if $id then [$(Lean.quote flagName)] else [] )
 
 def Instruction.print : @Instruction φ → String
   | .intBinaryOp op t v1 v2 =>
@@ -109,7 +109,7 @@ def Declaration.printSignature (decl : @Declaration φ) : String :=
   let id := Identifier.global_id decl.name
   match decl.type with
   | .function ret args =>
-    let argStr := String.join <| args.map (fun ty => s!" {ty.print}")
+    let argStr := String.intercalate ", " <| args.map (fun ty => ty.print)
     s!"{ret.print} {id.print}({argStr})"
   | _ => unreachable!
 
@@ -119,7 +119,7 @@ def Definition.printSignature (definition : @Definition φ) : String :=
   match decl.type with
   | .function ret args =>
     let args := args.zip (definition.args.map (Identifier.local_id ·))
-    let argStr := String.join <| args.map (fun ⟨ty, arg⟩ => s!" {ty.print} {arg.print}")
+    let argStr := String.intercalate ", " <| args.map (fun ⟨ty, arg⟩ => s!"{ty.print} {arg.print}")
     s!"{ret.print} {id.print}({argStr})"
   | _ => unreachable!
 
