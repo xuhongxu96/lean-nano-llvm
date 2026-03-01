@@ -185,8 +185,8 @@ def elabNanoLlvmDeclaration (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_codeline
-syntax "%" nanollvm_rawid " = " nanollvm_instruction ppLine : nanollvm_codeline
-syntax nanollvm_instruction ppLine : nanollvm_codeline
+syntax "%" nanollvm_rawid " = " nanollvm_instruction : nanollvm_codeline
+syntax nanollvm_instruction : nanollvm_codeline
 
 def elabNanoLlvmCodeline (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
   | `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction
@@ -203,7 +203,7 @@ def elabNanoLlvmCodeline (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_code
-syntax nanollvm_codeline* : nanollvm_code
+syntax (nanollvm_codeline ppLine)* : nanollvm_code
 
 def elabNanoLlvmCode (φ : Nat) (lineno: Nat) : Syntax → MetaM (Expr × Nat)
   | `(nanollvm_code| $codelines:nanollvm_codeline*) => do
@@ -214,7 +214,7 @@ def elabNanoLlvmCode (φ : Nat) (lineno: Nat) : Syntax → MetaM (Expr × Nat)
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_block
-syntax nanollvm_rawid ": " linebreak nanollvm_code nanollvm_terminator : nanollvm_block
+syntax nanollvm_rawid ": " ppLine nanollvm_code nanollvm_terminator : nanollvm_block
 
 def elabNanoLlvmBlock (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
   | `(nanollvm_block| $id:nanollvm_rawid:
@@ -238,7 +238,7 @@ def elabNanoLlvmArg (φ : Nat) : Syntax → MetaM (Expr × Expr)
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_definition
-syntax "define " nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_arg,* ")" " { " linebreak nanollvm_block linebreak " }" : nanollvm_definition
+syntax "define " nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_arg,* ")" " { " ppLine nanollvm_block ppLine " }" : nanollvm_definition
 
 def elabNanoLlvmDefinition (φ : Nat) : Syntax → MetaM Expr
   | `(nanollvm_definition| define $retTy:nanollvm_type @$id:nanollvm_rawid($args:nanollvm_arg,*) {
@@ -280,8 +280,8 @@ def elabNanoLlvm (φ : Nat) : Syntax → MetaM Expr
     mkListLit ty entity.toList
   | _ => throwUnsupportedSyntax
 
-elab "[llvm-" n:num "|" linebreak p:nanollvm "]" : term => elabNanoLlvm n.getNat p
-elab "[llvm|" linebreak p:nanollvm "]" : term => elabNanoLlvm 512 p
+elab "[llvm-" n:num "|" ppLine p:nanollvm "]" : term => elabNanoLlvm n.getNat p
+elab "[llvm|" ppLine p:nanollvm "]" : term => elabNanoLlvm 512 p
 
 
 end LeanNanoLlvm.AST.Syntax

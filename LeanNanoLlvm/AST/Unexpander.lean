@@ -258,8 +258,12 @@ def unexpandInstructionFreeze : Unexpander
     let v : TSyntax `nanollvm_exp := ⟨v⟩
     `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp)
   | `($_ $tv) =>
-    let tv : TSyntax `term := ⟨tv⟩
-    `(Instruction.freeze ($tv))
+    match tv with
+    | `(⟨$ty, $v⟩) | `(($ty, $v)) =>
+      let ty : TSyntax `nanollvm_type := ⟨ty⟩
+      let v : TSyntax `nanollvm_exp := ⟨v⟩
+      `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp)
+    | _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Terminator.retVoid]
@@ -347,6 +351,27 @@ def unexpandTopLevelEntityDefinition : Unexpander
     `(nanollvm_entity| $defn:nanollvm_definition)
   | _ => throw ()
 
+private partial def unexpandListTail : Syntax → UnexpandM (TSyntaxArray `nanollvm_entity)
+  | `(nanollvm_entity| $decl:nanollvm_declaration) => do
+    let e ← `(nanollvm_entity|$decl:nanollvm_declaration)
+    pure (#[e])
+  | `(nanollvm_entity| $decl:nanollvm_definition) => do
+    let e ← `(nanollvm_entity|$decl:nanollvm_definition)
+    pure (#[e])
+  | `($_ $h $t) => do
+    match h with
+    | `(nanollvm_entity| $decl:nanollvm_declaration) => do
+      let e ← `(nanollvm_entity|$decl:nanollvm_declaration)
+      let t ← unexpandListTail t
+      pure (#[e].append t)
+    | `(nanollvm_entity| $decl:nanollvm_definition) => do
+      let e ← `(nanollvm_entity|$decl:nanollvm_definition)
+      let t ← unexpandListTail t
+      pure (#[e].append t)
+    | _ => throw ()
+  | _ => throw ()
+
+
 @[app_unexpander List.cons]
 def unexpandListCons : Unexpander
   | `($_ $h []) =>
@@ -355,6 +380,14 @@ def unexpandListCons : Unexpander
       `(nanollvm|$decl:nanollvm_declaration)
     | `(nanollvm_entity| $decl:nanollvm_definition) =>
       `(nanollvm|$decl:nanollvm_definition)
+    | _ => throw ()
+  | `($_ $h $t) => do
+    let t ← unexpandListTail t
+    match h with
+    | `(nanollvm_entity| $decl:nanollvm_declaration) =>
+      `(nanollvm|$decl:nanollvm_declaration $t*)
+    | `(nanollvm_entity| $decl:nanollvm_definition) =>
+      `(nanollvm|$decl:nanollvm_definition $t*)
     | _ => throw ()
   | _ => throw ()
 
@@ -365,9 +398,12 @@ declare i32 @g(i32, i8)
 
 #check [llvm|
 declare i32 @g(i32, i8)
+-- declare i32 @g(i32, i8)
+-- declare i32 @g2(i32, i8)
 define i32 @f(i8 %a) {
 B:
   %i0 = add i32 0, 1
+  freeze i32 %i0
   %x = add nsw i32 %i0, %i0
   ret i32 %x
 }
