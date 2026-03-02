@@ -42,6 +42,10 @@ open LeanNanoLlvm.AST.Syntax
 #check [llvm-identifier| @abc]
 #check [llvm-identifier| %xyz]
 
+#check [llvm-instruction-id| %a]
+#check [llvm-instruction-id| %2]
+#check [llvm-instruction-id| void (3)]
+
 #check [llvm-64-type| i8]
 #check [llvm-64-type| i8()]
 #check [llvm-64-type| i8(i32, i16)]
@@ -78,11 +82,9 @@ open LeanNanoLlvm.AST.Syntax
 
 #check [llvm-64-declaration| declare i32 @puts(i8, i32)]
 
--- TODO: unexpand codeline
 #check [llvm-64-1-codeline| %1 = add i8 %0, %a]
 #check [llvm-64-1-codeline| freeze i8 %a]
 
--- TODO: unexpand code
 #check [llvm-64-1-code|
 %1 = add i8 %0, %a
 %d = add i8 %2, %b
@@ -98,6 +100,18 @@ entry:
 ]
 
 #check [llvm-64-definition|
+define void @f() {
+entry:
+  %1 = add i8 %0, %a
+  %d = add i8 %2, %b
+  freeze i8 %1
+  ret void
+}
+]
+
+#check [llvm-64-entity| declare i32 @puts(i8, i32)]
+
+#check [llvm-64-entity|
 define void @f() {
 entry:
   %1 = add i8 %0, %a

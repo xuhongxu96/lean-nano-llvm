@@ -15,6 +15,11 @@ private def asIdentifier? (stx : Syntax) : Option (TSyntax `nanollvm_identifier)
   | `([llvm-identifier| $id:nanollvm_identifier]) => some id
   | _ => none
 
+private def asInstructionId? (stx : Syntax) : Option (TSyntax `nanollvm_instruction_id) :=
+  match stx with
+  | `([llvm-instruction-id| $id:nanollvm_instruction_id]) => some id
+  | _ => none
+
 private def asType? (stx : Syntax) : Option (TSyntax `nanollvm_type) :=
   match stx with
   | `([llvm-type| $ty:nanollvm_type]) => some ty
@@ -65,6 +70,19 @@ private def asEntity? (stx : Syntax) : Option (TSyntax `nanollvm_entity) :=
   | `([llvm-entity| $entity:nanollvm_entity]) => some entity
   | _ => none
 
+private def asCodeline (stx : Syntax) : UnexpandM (TSyntax `nanollvm_codeline) := do
+  match stx with
+  | `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction) =>
+    `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction)
+  | `(nanollvm_codeline| $instr:nanollvm_instruction) =>
+    `(nanollvm_codeline| $instr:nanollvm_instruction)
+  | _ => throw ()
+
+private def asCode?(stx : Syntax) : Option (TSyntax `nanollvm_code) :=
+  match stx with
+  | `([llvm-code| $code:nanollvm_code]) => some ⟨code⟩
+  | _ => none
+
 @[app_unexpander RawId.name]
 def unexpandRawIdName : Unexpander
   | `($_ $s:str) =>
@@ -91,6 +109,20 @@ def unexpandIdentifierLocalId : Unexpander
     match asRawId? id with
     | some id => `([llvm-identifier| % $id:nanollvm_rawid])
     | none => throw ()
+  | _ => throw ()
+
+@[app_unexpander InstructionId.id]
+def unexpandLlvmInstructionIdId : Unexpander
+  | `($_ $id) =>
+    match asRawId? id with
+    | some id => `([llvm-instruction-id| % $id:nanollvm_rawid])
+    | none => throw ()
+  | _ => throw ()
+
+@[app_unexpander InstructionId.void]
+def unexpandLlvmInstructionIdVoid : Unexpander
+  | `($_ $n:num) =>
+    `([llvm-instruction-id| void ($n:num)])
   | _ => throw ()
 
 @[app_unexpander LlvmRetType.void]
@@ -365,28 +397,50 @@ def unexpandDeclarationMk : Unexpander
     | _, _ => throw ()
   | _ => throw ()
 
+-- Unexpander for nanollvm_codeline
+@[app_unexpander Prod.mk]
+def unexpandProdMk : Unexpander
+  | `($_ $id $instr) =>
+    match asInstructionId? id, asInstruction? instr with
+    | some id, some instr =>
+      match id with
+      | `(nanollvm_instruction_id| %$id:nanollvm_rawid) =>
+        `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction)
+      | `(nanollvm_instruction_id| void ($_:num)) =>
+        `(nanollvm_codeline| $instr:nanollvm_instruction)
+      | _ => throw ()
+    | _, _ => throw ()
+  | _ => throw ()
+
+-- Unexpander for nanollvm_code
+@[app_unexpander List.cons]
+def unexpandCodeListCons : Unexpander
+  | `($(_) $x $tail) => do
+    let x : TSyntax `nanollvm_codeline ← asCodeline x
+    let xs : Array (TSyntax `nanollvm_codeline) ←
+      match tail with
+      | `([llvm-code| $xs:nanollvm_codeline*]) =>
+        xs.mapM asCodeline
+      | `([]) =>
+        pure #[]
+      | `([$xs,*]) =>
+        xs.getElems.mapM asCodeline
+      | _ => throw ()
+    let code : Syntax.TSepArray `nanollvm_codeline "\n" := #[x] ++ xs
+    `([llvm-code| $code:nanollvm_codeline*])
+  | _ => throw ()
+
 @[app_unexpander Block.mk]
 def unexpandBlockMk : Unexpander
-  | `($_ $id [$code,*] $term) => do
+  | `($_ $id $code $term) => do
     let id ←
       match asRawId? id with
       | some id => pure id
       | none => throw ()
-    let code : Array (TSyntax `nanollvm_codeline) ← code.getElems.mapM (fun x => do
-      match x with
-      | `(($idOrLine, $instr)) =>
-        match asInstruction? instr with
-        | none => throw ()
-        | some instr =>
-          match idOrLine with
-          | `($_ $id) =>
-            match asRawId? id with
-            | some id => `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction)
-            | none => `(nanollvm_codeline| $instr:nanollvm_instruction)
-          | _ => throw ()
-      | _ => throw ()
-    )
-    let code : Syntax.TSepArray `nanollvm_codeline "\n" := code
+    let code : TSyntax `nanollvm_code ←
+      match asCode? code with
+      | some code => pure code
+      | none => throw ()
     let term : TSyntax `nanollvm_terminator ←
       match term with
       | `(($_, $term)) =>
@@ -395,7 +449,7 @@ def unexpandBlockMk : Unexpander
         | none => throw ()
       | _ => throw ()
     `([llvm-block| $id:nanollvm_rawid:
-$code:nanollvm_codeline*
+$code:nanollvm_code
 $term:nanollvm_terminator])
   | _ => throw ()
 
@@ -425,8 +479,7 @@ def unexpandDefinitionMk : Unexpander
 def unexpandTopLevelEntityDeclaration : Unexpander
   | `($_ $decl) =>
     match asDeclaration? decl with
-    | some decl => `([llvm-entity| $decl:nanollvm_declaration
-])
+    | some decl => `([llvm-entity| $decl:nanollvm_declaration])
     | none => throw ()
   | _ => throw ()
 
@@ -434,8 +487,7 @@ def unexpandTopLevelEntityDeclaration : Unexpander
 def unexpandTopLevelEntityDefinition : Unexpander
   | `($_ $defn) =>
     match asDefinition? defn with
-    | some defn => `([llvm-entity| $defn:nanollvm_definition
-])
+    | some defn => `([llvm-entity| $defn:nanollvm_definition])
     | none => throw ()
   | _ => throw ()
 
@@ -446,13 +498,9 @@ def unexpandTopLevelMk : Unexpander
     | some h =>
       match h with
       | `(nanollvm_entity| $entity:nanollvm_declaration) =>
-        `([llvm|
-  $entity:nanollvm_declaration
-])
+        `([llvm| $entity:nanollvm_declaration])
       | `(nanollvm_entity| $entity:nanollvm_definition) =>
-        `([llvm|
-  $entity:nanollvm_definition
-])
+        `([llvm| $entity:nanollvm_definition])
       | _ => throw ()
     | _ => throw ()
   | `($_ [$els,*]) => do
@@ -461,11 +509,9 @@ def unexpandTopLevelMk : Unexpander
       | some h =>
         match h with
         | `(nanollvm_entity| $entity:nanollvm_declaration) =>
-          `(nanollvm_entity| $entity:nanollvm_declaration
-)
+          `(nanollvm_entity| $entity:nanollvm_declaration)
         | `(nanollvm_entity| $entity:nanollvm_definition) =>
-          `(nanollvm_entity| $entity:nanollvm_definition
-)
+          `(nanollvm_entity| $entity:nanollvm_definition)
         | _ => throw ()
       | _ => throw ()
     )
@@ -473,23 +519,5 @@ def unexpandTopLevelMk : Unexpander
     `([llvm|
 $[$els]*])
   | _ => throw ()
-
-#check [llvm|
-declare i32 @g(i32, i8)
-]
-
-#check [llvm|
-declare i32 @g(i32, i8)
-declare i32 @g(i32, i8)
-declare i32 @g2(i32, i8)
-define i32 @f(i8 %a) {
-B:
-  %i0 = add i32 0, 1
-  freeze i32 %i0
-  %x = add nsw i32 %i0, %i0
-  ret i32 %x
-}
-]
-
 
 end LeanNanoLlvm.AST
