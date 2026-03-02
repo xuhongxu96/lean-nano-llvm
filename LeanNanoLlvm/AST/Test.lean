@@ -3,6 +3,8 @@ import LeanNanoLlvm.AST
 section
 open LeanNanoLlvm.AST
 
+set_option pp.rawOnError true
+
 /-
 define i32 @f() {
 B:
@@ -140,5 +142,23 @@ theorem example_syntax_correct : TopLevel.print [llvm|
 ] = llvm_0_plus_1.print := by
   simp [TopLevel.print, llvm_0_plus_1]
   rfl
+
+#check [llvm|
+declare i32 @g(i32, i8)
+]
+
+#check [llvm|
+declare i32 @g(i32, i8)
+declare i32 @g(i32, i8)
+declare i32 @g2(i32, i8)
+define i32 @f(i8 %a) {
+B:
+  %i0 = add i32 0, 1
+  freeze i32 %i0
+  %x = add nsw i32 %i0, %i0
+  ret i32 %x
+}
+]
+
 
 end

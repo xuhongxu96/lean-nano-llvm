@@ -281,20 +281,6 @@ def unexpandTerminatorRet : Unexpander
     | _ => throw ()
   | _ => throw ()
 
-@[app_unexpander Prod.mk]
-def unexpandProdMk : Unexpander
-  | `($_ $id $val) =>
-    match id with
-    | `(InstructionId.id $rid) =>
-      let rid : TSyntax `nanollvm_rawid := ⟨rid⟩
-      let instr : TSyntax `nanollvm_instruction := ⟨val⟩
-      `(nanollvm_codeline| %$rid:nanollvm_rawid = $instr:nanollvm_instruction)
-    | `(InstructionId.void $_) =>
-      let term : TSyntax `nanollvm_terminator := ⟨val⟩
-      `(nanollvm_terminator| $term:nanollvm_terminator)
-    | _ => throw ()
-  | _ => throw ()
-
 @[app_unexpander Declaration.mk]
 def unexpandDeclarationMk : Unexpander
   | `($_ $name $ty) =>
@@ -310,11 +296,25 @@ def unexpandDeclarationMk : Unexpander
 
 @[app_unexpander Block.mk]
 def unexpandBlockMk : Unexpander
-  | `($_ $id [$code,*] $term) =>
+  | `($_ $id [$code,*] $term) => do
     let id : TSyntax `nanollvm_rawid := ⟨id⟩
-    let code : Array (TSyntax `nanollvm_codeline) := code.getElems.map (fun x => ⟨x⟩)
+    let code : Array (TSyntax `nanollvm_codeline) ← code.getElems.mapM (fun x => do
+      match x with
+      | `(($idConstructor $id, $instr)) =>
+        let instr : TSyntax `nanollvm_instruction := ⟨instr⟩
+        if idConstructor.raw.getId = ``InstructionId.void then
+          `(nanollvm_codeline| $instr:nanollvm_instruction)
+        else
+          let id : TSyntax `nanollvm_rawid := ⟨id⟩
+          `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction)
+      | _ => throw ()
+    )
     let code : Syntax.TSepArray `nanollvm_codeline "\n" := code
-    let term : TSyntax `nanollvm_terminator := ⟨term⟩
+    let term : TSyntax `nanollvm_terminator ← match term with
+    | `(($_, $term)) =>
+      let term : TSyntax `nanollvm_terminator := ⟨term⟩
+      pure term
+    | _ => throw ()
     `(nanollvm_block| $id:nanollvm_rawid:
 $code:nanollvm_codeline*
 $term:nanollvm_terminator)
@@ -374,7 +374,6 @@ def unexpandTopLevelMk : Unexpander
     -- ⟨node⟩
   | _ => throw ()
 
-set_option pp.rawOnError true
 #check [llvm|
 declare i32 @g(i32, i8)
 ]
@@ -391,5 +390,6 @@ B:
   ret i32 %x
 }
 ]
+
 
 end LeanNanoLlvm.AST
