@@ -5,74 +5,144 @@ namespace LeanNanoLlvm.AST
 
 open Lean PrettyPrinter PrettyPrinter.Delaborator SubExpr
 
+private def asRawId? (stx : Syntax) : Option (TSyntax `nanollvm_rawid) :=
+  match stx with
+  | `([llvm-rawid| $id:nanollvm_rawid]) => some id
+  | _ => none
+
+private def asIdentifier? (stx : Syntax) : Option (TSyntax `nanollvm_identifier) :=
+  match stx with
+  | `([llvm-identifier| $id:nanollvm_identifier]) => some id
+  | _ => none
+
+private def asType? (stx : Syntax) : Option (TSyntax `nanollvm_type) :=
+  match stx with
+  | `([llvm-type| $ty:nanollvm_type]) => some ty
+  | _ => none
+
+private def asExp? (stx : Syntax) : Option (TSyntax `nanollvm_exp) :=
+  match stx with
+  | `([llvm-exp| $e:nanollvm_exp]) => some e
+  | _ => none
+
+private def asIntBinOp? (stx : Syntax) : Option (TSyntax `nanollvm_int_bin_op) :=
+  match stx with
+  | `([llvm-int-bin-op| $op:nanollvm_int_bin_op]) => some op
+  | _ => none
+
+private def asConversionOp? (stx : Syntax) : Option (TSyntax `nanollvm_conversion_op) :=
+  match stx with
+  | `([llvm-conversion-op| $op:nanollvm_conversion_op]) => some op
+  | _ => none
+
+private def asInstruction? (stx : Syntax) : Option (TSyntax `nanollvm_instruction) :=
+  match stx with
+  | `([llvm-instruction| $instr:nanollvm_instruction]) => some instr
+  | _ => none
+
+private def asTerminator? (stx : Syntax) : Option (TSyntax `nanollvm_terminator) :=
+  match stx with
+  | `([llvm-terminator| $term:nanollvm_terminator]) => some term
+  | _ => none
+
+private def asDeclaration? (stx : Syntax) : Option (TSyntax `nanollvm_declaration) :=
+  match stx with
+  | `([llvm-declaration| $decl:nanollvm_declaration]) => some decl
+  | _ => none
+
+private def asDefinition? (stx : Syntax) : Option (TSyntax `nanollvm_definition) :=
+  match stx with
+  | `([llvm-definition| $defn:nanollvm_definition]) => some defn
+  | _ => none
+
+private def asBlock? (stx : Syntax) : Option (TSyntax `nanollvm_block) :=
+  match stx with
+  | `([llvm-block| $blk:nanollvm_block]) => some blk
+  | _ => none
+
+private def asEntity? (stx : Syntax) : Option (TSyntax `nanollvm_entity) :=
+  match stx with
+  | `([llvm-entity| $entity:nanollvm_entity]) => some entity
+  | _ => none
+
 @[app_unexpander RawId.name]
 def unexpandRawIdName : Unexpander
   | `($_ $s:str) =>
     let name := mkIdent $ Name.mkSimple s.getString
-    `(nanollvm_rawid| $name:ident)
+    `([llvm-rawid| $name:ident])
   | _ => throw ()
 
 @[app_unexpander RawId.anonymous]
 def unexpandRawIdAnonymous : Unexpander
-  | `($_ $n:num) => `(nanollvm_rawid| $n:num)
+  | `($_ $n:num) => `([llvm-rawid| $n:num])
   | _ => throw ()
 
 @[app_unexpander Identifier.global_id]
 def unexpandIdentifierGlobalId : Unexpander
   | `($_ $id) =>
-    let id : TSyntax `nanollvm_rawid := ⟨id⟩
-    `(nanollvm_identifier| @ $id:nanollvm_rawid)
+    match asRawId? id with
+    | some id => `([llvm-identifier| @ $id:nanollvm_rawid])
+    | none => throw ()
   | _ => throw ()
 
 @[app_unexpander Identifier.local_id]
 def unexpandIdentifierLocalId : Unexpander
   | `($_ $id) =>
-    let id : TSyntax `nanollvm_rawid := ⟨id⟩
-    `(nanollvm_identifier| % $id:nanollvm_rawid)
+    match asRawId? id with
+    | some id => `([llvm-identifier| % $id:nanollvm_rawid])
+    | none => throw ()
   | _ => throw ()
 
 @[app_unexpander LlvmRetType.void]
 def unexpandLlvmRetTypeVoid : Unexpander
-  | `($_) => `(nanollvm_type| void)
+  | `($_) => `([llvm-type| void])
 
 @[app_unexpander LlvmRetType.ret]
 def unexpandLlvmRetTypeRet : Unexpander
   | `($_ $ty) =>
-    let ty : TSyntax `nanollvm_type := ⟨ty⟩
-    `(nanollvm_type| $ty)
+    match asType? ty with
+    | some ty => `([llvm-type| $ty:nanollvm_type])
+    | none => throw ()
   | _ => throw ()
 
 @[app_unexpander Width.concrete]
 def unexpandWidthConcrete : Unexpander
   | `($_ $w:num) =>
     let w := mkIdent $ Name.mkSimple s!"i{w.getNat}"
-    `(nanollvm_type| $w:ident)
+    `([llvm-type| $w:ident])
   | _ => throw ()
 
 @[app_unexpander LlvmType.int]
 def unexpandLlvmTypeInt : Unexpander
   | `($_ $w) =>
-    let w : TSyntax `nanollvm_type := ⟨w⟩
-    `(nanollvm_type| $w)
+    match asType? w with
+    | some w => `([llvm-type| $w:nanollvm_type])
+    | none => throw ()
   | _ => throw ()
 
 @[app_unexpander LlvmType.function]
 def unexpandLlvmTypeFunction : Unexpander
   | `($_ $retTy [$args,*]) =>
-    let retTy : TSyntax `nanollvm_type := ⟨retTy⟩
-    let args : Array (TSyntax `nanollvm_type) := args.getElems.map (fun x => ⟨x⟩)
-    let args : Syntax.TSepArray `nanollvm_type "," := args
-    `(nanollvm_type| $retTy($args,*))
+    match asType? retTy with
+    | none => throw ()
+    | some retTy =>
+      let args : Option (Array (TSyntax `nanollvm_type)) :=
+        args.getElems.mapM asType?
+      match args with
+      | none => throw ()
+      | some args =>
+        let args : Syntax.TSepArray `nanollvm_type "," := args
+        `([llvm-type| $retTy:nanollvm_type($args,*)])
   | _ => throw ()
 
 @[app_unexpander IntBinaryOp.add]
 def unexpandIntBinaryOpAdd : Unexpander
   | `($_ $a:ident $b:ident) =>
     match a.getId, b.getId with
-    | `true, `true => `(nanollvm_int_bin_op| add nuw nsw)
-    | `true, `false => `(nanollvm_int_bin_op| add nuw)
-    | `false, `true => `(nanollvm_int_bin_op| add nsw)
-    | `false, `false => `(nanollvm_int_bin_op| add)
+    | `true, `true => `([llvm-int-bin-op| add nuw nsw])
+    | `true, `false => `([llvm-int-bin-op| add nuw])
+    | `false, `true => `([llvm-int-bin-op| add nsw])
+    | `false, `false => `([llvm-int-bin-op| add])
     | _, _ => throw ()
   | _ => throw ()
 
@@ -80,10 +150,10 @@ def unexpandIntBinaryOpAdd : Unexpander
 def unexpandIntBinaryOpSub : Unexpander
   | `($_ $a:ident $b:ident) =>
     match a.getId, b.getId with
-    | `true, `true => `(nanollvm_int_bin_op| sub nuw nsw)
-    | `true, `false => `(nanollvm_int_bin_op| sub nuw)
-    | `false, `true => `(nanollvm_int_bin_op| sub nsw)
-    | `false, `false => `(nanollvm_int_bin_op| sub)
+    | `true, `true => `([llvm-int-bin-op| sub nuw nsw])
+    | `true, `false => `([llvm-int-bin-op| sub nuw])
+    | `false, `true => `([llvm-int-bin-op| sub nsw])
+    | `false, `false => `([llvm-int-bin-op| sub])
     | _, _ => throw ()
   | _ => throw ()
 
@@ -91,10 +161,10 @@ def unexpandIntBinaryOpSub : Unexpander
 def unexpandIntBinaryOpMul : Unexpander
   | `($_ $a:ident $b:ident) =>
     match a.getId, b.getId with
-    | `true, `true => `(nanollvm_int_bin_op| mul nuw nsw)
-    | `true, `false => `(nanollvm_int_bin_op| mul nuw)
-    | `false, `true => `(nanollvm_int_bin_op| mul nsw)
-    | `false, `false => `(nanollvm_int_bin_op| mul)
+    | `true, `true => `([llvm-int-bin-op| mul nuw nsw])
+    | `true, `false => `([llvm-int-bin-op| mul nuw])
+    | `false, `true => `([llvm-int-bin-op| mul nsw])
+    | `false, `false => `([llvm-int-bin-op| mul])
     | _, _ => throw ()
   | _ => throw ()
 
@@ -102,10 +172,10 @@ def unexpandIntBinaryOpMul : Unexpander
 def unexpandIntBinaryOpShl : Unexpander
   | `($_ $a:ident $b:ident) =>
     match a.getId, b.getId with
-    | `true, `true => `(nanollvm_int_bin_op| shl nuw nsw)
-    | `true, `false => `(nanollvm_int_bin_op| shl nuw)
-    | `false, `true => `(nanollvm_int_bin_op| shl nsw)
-    | `false, `false => `(nanollvm_int_bin_op| shl)
+    | `true, `true => `([llvm-int-bin-op| shl nuw nsw])
+    | `true, `false => `([llvm-int-bin-op| shl nuw])
+    | `false, `true => `([llvm-int-bin-op| shl nsw])
+    | `false, `false => `([llvm-int-bin-op| shl])
     | _, _ => throw ()
   | _ => throw ()
 
@@ -113,8 +183,8 @@ def unexpandIntBinaryOpShl : Unexpander
 def unexpandIntBinaryOpUdiv : Unexpander
   | `($_ $a:ident) =>
     match a.getId with
-    | `true => `(nanollvm_int_bin_op| udiv exact)
-    | `false => `(nanollvm_int_bin_op| udiv)
+    | `true => `([llvm-int-bin-op| udiv exact])
+    | `false => `([llvm-int-bin-op| udiv])
     | _ => throw ()
   | _ => throw ()
 
@@ -122,8 +192,8 @@ def unexpandIntBinaryOpUdiv : Unexpander
 def unexpandIntBinaryOpSdiv : Unexpander
   | `($_ $a:ident) =>
     match a.getId with
-    | `true => `(nanollvm_int_bin_op| sdiv exact)
-    | `false => `(nanollvm_int_bin_op| sdiv)
+    | `true => `([llvm-int-bin-op| sdiv exact])
+    | `false => `([llvm-int-bin-op| sdiv])
     | _ => throw ()
   | _ => throw ()
 
@@ -131,8 +201,8 @@ def unexpandIntBinaryOpSdiv : Unexpander
 def unexpandIntBinaryOpLshr : Unexpander
   | `($_ $a:ident) =>
     match a.getId with
-    | `true => `(nanollvm_int_bin_op| lshr exact)
-    | `false => `(nanollvm_int_bin_op| lshr)
+    | `true => `([llvm-int-bin-op| lshr exact])
+    | `false => `([llvm-int-bin-op| lshr])
     | _ => throw ()
   | _ => throw ()
 
@@ -140,44 +210,44 @@ def unexpandIntBinaryOpLshr : Unexpander
 def unexpandIntBinaryOpAshr : Unexpander
   | `($_ $a:ident) =>
     match a.getId with
-    | `true => `(nanollvm_int_bin_op| ashr exact)
-    | `false => `(nanollvm_int_bin_op| ashr)
+    | `true => `([llvm-int-bin-op| ashr exact])
+    | `false => `([llvm-int-bin-op| ashr])
     | _ => throw ()
   | _ => throw ()
 
 @[app_unexpander IntBinaryOp.urem]
 def unexpandIntBinaryOpUrem : Unexpander
-  | `($_) => `(nanollvm_int_bin_op| urem)
+  | `($_) => `([llvm-int-bin-op| urem])
 
 @[app_unexpander IntBinaryOp.srem]
 def unexpandIntBinaryOpSrem : Unexpander
-  | `($_) => `(nanollvm_int_bin_op| srem)
+  | `($_) => `([llvm-int-bin-op| srem])
 
 @[app_unexpander IntBinaryOp.and]
 def unexpandIntBinaryOpAnd : Unexpander
-  | `($_) => `(nanollvm_int_bin_op| and)
+  | `($_) => `([llvm-int-bin-op| and])
 
 @[app_unexpander IntBinaryOp.or]
 def unexpandIntBinaryOpOr : Unexpander
   | `($_ $a:ident) =>
     match a.getId with
-    | `true => `(nanollvm_int_bin_op| or disjoint)
-    | `false => `(nanollvm_int_bin_op| or)
+    | `true => `([llvm-int-bin-op| or disjoint])
+    | `false => `([llvm-int-bin-op| or])
     | _ => throw ()
   | _ => throw ()
 
 @[app_unexpander IntBinaryOp.xor]
 def unexpandIntBinaryOpXor : Unexpander
-  | `($_) => `(nanollvm_int_bin_op| xor)
+  | `($_) => `([llvm-int-bin-op| xor])
 
 @[app_unexpander ConversionOp.trunc]
 def unexpandConversionOpTrunc : Unexpander
   | `($_ $a:ident $b:ident) =>
     match a.getId, b.getId with
-    | `true, `true => `(nanollvm_conversion_op| trunc nuw nsw)
-    | `true, `false => `(nanollvm_conversion_op| trunc nuw)
-    | `false, `true => `(nanollvm_conversion_op| trunc nsw)
-    | `false, `false => `(nanollvm_conversion_op| trunc)
+    | `true, `true => `([llvm-conversion-op| trunc nuw nsw])
+    | `true, `false => `([llvm-conversion-op| trunc nuw])
+    | `false, `true => `([llvm-conversion-op| trunc nsw])
+    | `false, `false => `([llvm-conversion-op| trunc])
     | _, _ => throw ()
   | _ => throw ()
 
@@ -185,193 +255,223 @@ def unexpandConversionOpTrunc : Unexpander
 def unexpandConversionOpZext : Unexpander
   | `($_ $a:ident) =>
     match a.getId with
-    | `true => `(nanollvm_conversion_op| zext nneg)
-    | `false => `(nanollvm_conversion_op| zext)
+    | `true => `([llvm-conversion-op| zext nneg])
+    | `false => `([llvm-conversion-op| zext])
     | _ => throw ()
   | _ => throw ()
 
 @[app_unexpander ConversionOp.sext]
 def unexpandConversionOpSext : Unexpander
-  | `($_) => `(nanollvm_conversion_op| sext)
+  | `($_) => `([llvm-conversion-op| sext])
 
 @[app_unexpander Exp.identifier]
 def unexpandExpIdentifier : Unexpander
   | `($_ $id) =>
-    let id : TSyntax `nanollvm_identifier := ⟨id⟩
-    `(nanollvm_exp| $id:nanollvm_identifier)
+    match asIdentifier? id with
+    | some id => `([llvm-exp| $id:nanollvm_identifier])
+    | none => throw ()
   | _ => throw ()
 
 @[app_unexpander Exp.bool]
 def unexpandExpBool : Unexpander
   | `($_ $a:ident) =>
     match a.getId with
-    | `true => `(nanollvm_exp| true)
-    | `false => `(nanollvm_exp| false)
+    | `true => `([llvm-exp| true])
+    | `false => `([llvm-exp| false])
     | _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Exp.int]
 def unexpandExpInt : Unexpander
-  | `($_ (Int.ofNat $n:num)) => `(nanollvm_exp| $n:num)
+  | `($_ (Int.ofNat $n:num)) => `([llvm-exp| $n:num])
   | `($_ $n) =>
     match n with
-    | `($_ $n:num) => `(nanollvm_exp| $n:num)
+    | `($_ $n:num) => `([llvm-exp| $n:num])
     | _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Exp.null]
 def unexpandExpNull : Unexpander
-  | `($_) => `(nanollvm_exp| null)
+  | `($_) => `([llvm-exp| null])
 
 @[app_unexpander Exp.undef]
 def unexpandExpUndef : Unexpander
-  | `($_) => `(nanollvm_exp| undef)
+  | `($_) => `([llvm-exp| undef])
 
 @[app_unexpander Exp.poison]
 def unexpandExpPoison : Unexpander
-  | `($_) => `(nanollvm_exp| poison)
+  | `($_) => `([llvm-exp| poison])
 
 @[app_unexpander Instruction.intBinaryOp]
 def unexpandInstructionIntBinaryOp : Unexpander
-  | `($_ $op $ty $v1 $v2) => do
-    let op : TSyntax `nanollvm_int_bin_op := ⟨op⟩
-    let ty : TSyntax `nanollvm_type := ⟨ty⟩
-    let v1 : TSyntax `nanollvm_exp := ⟨v1⟩
-    let v2 : TSyntax `nanollvm_exp := ⟨v2⟩
-    `(nanollvm_instruction| $op:nanollvm_int_bin_op $ty:nanollvm_type $v1:nanollvm_exp, $v2:nanollvm_exp)
+  | `($_ $op $ty $v1 $v2) =>
+    match asIntBinOp? op, asType? ty, asExp? v1, asExp? v2 with
+    | some op, some ty, some v1, some v2 =>
+      `([llvm-instruction| $op:nanollvm_int_bin_op $ty:nanollvm_type $v1:nanollvm_exp, $v2:nanollvm_exp])
+    | _, _, _, _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Instruction.conversionOp]
 def unexpandInstructionConversionOp : Unexpander
   | `($_ $op $fromTy $v $toTy) =>
-    let op : TSyntax `nanollvm_conversion_op := ⟨op⟩
-    let fromTy : TSyntax `nanollvm_type := ⟨fromTy⟩
-    let v : TSyntax `nanollvm_exp := ⟨v⟩
-    let toTy : TSyntax `nanollvm_type := ⟨toTy⟩
-    `(nanollvm_instruction| $op:nanollvm_conversion_op $fromTy:nanollvm_type $v:nanollvm_exp to $toTy:nanollvm_type)
+    match asConversionOp? op, asType? fromTy, asExp? v, asType? toTy with
+    | some op, some fromTy, some v, some toTy =>
+      `([llvm-instruction| $op:nanollvm_conversion_op $fromTy:nanollvm_type $v:nanollvm_exp to $toTy:nanollvm_type])
+    | _, _, _, _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Instruction.freeze]
 def unexpandInstructionFreeze : Unexpander
-  | `($_ ⟨$ty, $v⟩) | `($_ (($ty, $v)))   =>
-    let ty : TSyntax `nanollvm_type := ⟨ty⟩
-    let v : TSyntax `nanollvm_exp := ⟨v⟩
-    `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp)
+  | `($_ ⟨$ty, $v⟩) | `($_ (($ty, $v))) =>
+    match asType? ty, asExp? v with
+    | some ty, some v => `([llvm-instruction| freeze $ty:nanollvm_type $v:nanollvm_exp])
+    | _, _ => throw ()
   | `($_ $tv) =>
     match tv with
     | `(⟨$ty, $v⟩) | `(($ty, $v)) =>
-      let ty : TSyntax `nanollvm_type := ⟨ty⟩
-      let v : TSyntax `nanollvm_exp := ⟨v⟩
-      `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp)
+      match asType? ty, asExp? v with
+      | some ty, some v => `([llvm-instruction| freeze $ty:nanollvm_type $v:nanollvm_exp])
+      | _, _ => throw ()
     | _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Terminator.retVoid]
 def unexpandTerminatorRetVoid : Unexpander
-  | `($_) => `(nanollvm_terminator| ret void)
+  | `($_) => `([llvm-terminator| ret void])
 
 @[app_unexpander Terminator.ret]
 def unexpandTerminatorRet : Unexpander
   | `($_ $tv) =>
     match tv with
     | `(($ty, $v)) =>
-      let ty : TSyntax `nanollvm_type := ⟨ty⟩
-      let v : TSyntax `nanollvm_exp := ⟨v⟩
-      `(nanollvm_terminator| ret $ty:nanollvm_type $v:nanollvm_exp)
+      match asType? ty, asExp? v with
+      | some ty, some v => `([llvm-terminator| ret $ty:nanollvm_type $v:nanollvm_exp])
+      | _, _ => throw ()
     | _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Declaration.mk]
 def unexpandDeclarationMk : Unexpander
   | `($_ $name $ty) =>
-      let name : TSyntax `nanollvm_rawid := ⟨name⟩
+    match asRawId? name, asType? ty with
+    | some name, some ty =>
       match ty with
       | `(nanollvm_type| $retTy($args,*)) =>
         let retTy : TSyntax `nanollvm_type := ⟨retTy⟩
         let args : Array (TSyntax `nanollvm_type) := args.getElems.map (fun x => ⟨x⟩)
         let args : Syntax.TSepArray `nanollvm_type "," := args
-        `(nanollvm_declaration| declare $retTy:nanollvm_type @$name:nanollvm_rawid($args,*))
+        `([llvm-declaration| declare $retTy:nanollvm_type @$name:nanollvm_rawid($args,*)])
       | _ => throw ()
+    | _, _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Block.mk]
 def unexpandBlockMk : Unexpander
   | `($_ $id [$code,*] $term) => do
-    let id : TSyntax `nanollvm_rawid := ⟨id⟩
+    let id ←
+      match asRawId? id with
+      | some id => pure id
+      | none => throw ()
     let code : Array (TSyntax `nanollvm_codeline) ← code.getElems.mapM (fun x => do
       match x with
-      | `(($idConstructor $id, $instr)) =>
-        let instr : TSyntax `nanollvm_instruction := ⟨instr⟩
-        if idConstructor.raw.getId = ``InstructionId.void then
-          `(nanollvm_codeline| $instr:nanollvm_instruction)
-        else
-          let id : TSyntax `nanollvm_rawid := ⟨id⟩
-          `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction)
+      | `(($idOrLine, $instr)) =>
+        match asInstruction? instr with
+        | none => throw ()
+        | some instr =>
+          match idOrLine with
+          | `($_ $id) =>
+            match asRawId? id with
+            | some id => `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction)
+            | none => `(nanollvm_codeline| $instr:nanollvm_instruction)
+          | _ => throw ()
       | _ => throw ()
     )
     let code : Syntax.TSepArray `nanollvm_codeline "\n" := code
-    let term : TSyntax `nanollvm_terminator ← match term with
-    | `(($_, $term)) =>
-      let term : TSyntax `nanollvm_terminator := ⟨term⟩
-      pure term
-    | _ => throw ()
-    `(nanollvm_block| $id:nanollvm_rawid:
+    let term : TSyntax `nanollvm_terminator ←
+      match term with
+      | `(($_, $term)) =>
+        match asTerminator? term with
+        | some term => pure term
+        | none => throw ()
+      | _ => throw ()
+    `([llvm-block| $id:nanollvm_rawid:
 $code:nanollvm_codeline*
-$term:nanollvm_terminator)
+$term:nanollvm_terminator])
   | _ => throw ()
 
 @[app_unexpander Definition.mk]
 def unexpandDefinitionMk : Unexpander
-  | `($_ $proto [$argVals,*] $body) =>
-    let body : TSyntax `term := ⟨body⟩
-    match proto with
-    | `(nanollvm_declaration| declare $retTy:nanollvm_type @$name:nanollvm_rawid($args,*)) => do
-      let body : TSyntax `nanollvm_block := ⟨body⟩
-      let argVals : Array (TSyntax `nanollvm_rawid) := argVals.getElems.map (fun x => ⟨x⟩)
-      let args : Array (TSyntax `nanollvm_type) := args.getElems.map (fun x => ⟨x⟩)
-      let args : Array (TSyntax `nanollvm_arg) ← args.zip argVals |>.mapM (fun ⟨t, v⟩ => `(nanollvm_arg| $t:nanollvm_type %$v:nanollvm_rawid))
-      let args : Syntax.TSepArray `nanollvm_arg "," := args
-      `(nanollvm_definition| define $retTy:nanollvm_type @$name:nanollvm_rawid($args,*) {
-        $body:nanollvm_block
-      })
-    | _ => throw ()
+  | `($_ $proto [$argVals,*] $body) => do
+    match asDeclaration? proto, asBlock? body with
+    | some proto, some body =>
+      match proto with
+      | `(nanollvm_declaration| declare $retTy:nanollvm_type @$name:nanollvm_rawid($args,*)) =>
+        let argVals : Option (Array (TSyntax `nanollvm_rawid)) := argVals.getElems.mapM asRawId?
+        let argVals ←
+          match argVals with
+          | some argVals => pure argVals
+          | none => throw ()
+        let args : Array (TSyntax `nanollvm_type) := args.getElems.map (fun x => ⟨x⟩)
+        let args : Array (TSyntax `nanollvm_arg) ← args.zip argVals |>.mapM (fun ⟨t, v⟩ => `(nanollvm_arg| $t:nanollvm_type %$v:nanollvm_rawid))
+        let args : Syntax.TSepArray `nanollvm_arg "," := args
+        `([llvm-definition| define $retTy:nanollvm_type @$name:nanollvm_rawid($args,*) {
+          $body:nanollvm_block
+        }])
+      | _ => throw ()
+    | _, _ => throw ()
   | _ => throw ()
 
 @[app_unexpander TopLevelEntity.declaration]
 def unexpandTopLevelEntityDeclaration : Unexpander
   | `($_ $decl) =>
-    let decl : TSyntax `nanollvm_declaration := ⟨decl⟩
-    `(nanollvm_entity| $decl:nanollvm_declaration)
+    match asDeclaration? decl with
+    | some decl => `([llvm-entity| $decl:nanollvm_declaration
+])
+    | none => throw ()
   | _ => throw ()
 
 @[app_unexpander TopLevelEntity.definition]
 def unexpandTopLevelEntityDefinition : Unexpander
   | `($_ $defn) =>
-    let defn : TSyntax `nanollvm_definition := ⟨defn⟩
-    `(nanollvm_entity| $defn:nanollvm_definition)
+    match asDefinition? defn with
+    | some defn => `([llvm-entity| $defn:nanollvm_definition
+])
+    | none => throw ()
   | _ => throw ()
 
 @[app_unexpander TopLevel.mk]
 def unexpandTopLevelMk : Unexpander
   | `($_ [$h]) =>
-    match h with
-    | `(nanollvm_entity| $decl:nanollvm_declaration) =>
-      `(nanollvm|$decl:nanollvm_declaration)
-    | `(nanollvm_entity| $decl:nanollvm_definition) =>
-      `(nanollvm|$decl:nanollvm_definition)
+    match asEntity? h with
+    | some h =>
+      match h with
+      | `(nanollvm_entity| $entity:nanollvm_declaration) =>
+        `([llvm|
+  $entity:nanollvm_declaration
+])
+      | `(nanollvm_entity| $entity:nanollvm_definition) =>
+        `([llvm|
+  $entity:nanollvm_definition
+])
+      | _ => throw ()
     | _ => throw ()
   | `($_ [$els,*]) => do
     let els : Array (TSyntax `nanollvm_entity) ← els.getElems.mapM (fun h => do
-      match h with
-      | `(nanollvm_entity| $decl:nanollvm_declaration) =>
-        `(nanollvm_entity|$decl:nanollvm_declaration)
-      | `(nanollvm_entity| $decl:nanollvm_definition) =>
-        `(nanollvm_entity|$decl:nanollvm_definition)
+      match asEntity? h with
+      | some h =>
+        match h with
+        | `(nanollvm_entity| $entity:nanollvm_declaration) =>
+          `(nanollvm_entity| $entity:nanollvm_declaration
+)
+        | `(nanollvm_entity| $entity:nanollvm_definition) =>
+          `(nanollvm_entity| $entity:nanollvm_definition
+)
+        | _ => throw ()
       | _ => throw ()
     )
     let els : Syntax.TSepArray `nanollvm_entity "\n" := els
-    `(nanollvm|$[$els]*)
-    -- ⟨node⟩
+    `([llvm|
+$[$els]*])
   | _ => throw ()
 
 #check [llvm|
