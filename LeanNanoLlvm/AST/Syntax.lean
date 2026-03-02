@@ -258,8 +258,8 @@ def elabNanoLlvmDefinition (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_entity
-syntax nanollvm_declaration : nanollvm_entity
-syntax nanollvm_definition : nanollvm_entity
+syntax nanollvm_declaration ppLine : nanollvm_entity
+syntax nanollvm_definition ppLine: nanollvm_entity
 
 def elabNanoLlvmEntity (φ : Nat) : Syntax → MetaM Expr
   | `(nanollvm_entity| $decl:nanollvm_declaration) => do
@@ -271,13 +271,14 @@ def elabNanoLlvmEntity (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm
-syntax nanollvm_entity* : nanollvm
+syntax (nanollvm_entity)* : nanollvm
 
 def elabNanoLlvm (φ : Nat) : Syntax → MetaM Expr
   | `(nanollvm| $entity:nanollvm_entity*) => do
     let entity ← entity.mapM (elabNanoLlvmEntity φ)
     let ty ← mkAppOptM ``TopLevelEntity #[mkNatLit φ]
-    mkListLit ty entity.toList
+    let entities ← mkListLit ty entity.toList
+    mkAppOptM ``TopLevel.mk #[mkNatLit φ, entities]
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-" n:num "|" ppLine p:nanollvm "]" : term => elabNanoLlvm n.getNat p

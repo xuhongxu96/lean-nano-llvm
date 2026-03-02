@@ -9,7 +9,7 @@ B:
   %i0 = add i32 0, 1
   ret i32 %i0
 } -/
-def llvm_0_plus_1 : TopLevel 32 := [
+def llvm_0_plus_1 : TopLevel 32 := ⟨[
   .definition {
     prototype := {
       name := .name "f",
@@ -24,7 +24,7 @@ def llvm_0_plus_1 : TopLevel 32 := [
       terminator := ⟨.void 0, .ret ⟨.i32, (.identifier (.local_id (.name "i0")))⟩⟩
     }
   }
-]
+]⟩
 
 #eval llvm_0_plus_1.print
 end
@@ -138,6 +138,7 @@ theorem example_syntax_correct : TopLevel.print [llvm|
     ret i32 %i0
   }
 ] = llvm_0_plus_1.print := by
+  simp [TopLevel.print, llvm_0_plus_1]
   rfl
 
 end

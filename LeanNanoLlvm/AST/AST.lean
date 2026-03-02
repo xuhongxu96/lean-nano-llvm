@@ -135,7 +135,8 @@ inductive TopLevelEntity where
   | declaration (decl : @Declaration φ)
   | definition  (defn : @Definition φ)
 
-abbrev TopLevel (φ : Nat) := List (@TopLevelEntity φ)
+structure TopLevel (φ: Nat) where
+  (entities : List (@TopLevelEntity φ))
 
 end
 

@@ -138,9 +138,9 @@ def TopLevelEntity.print : @TopLevelEntity φ → String
   | .declaration decl => decl.print
   | .definition defn => defn.print
 
-def TopLevel.print : TopLevel φ → String
-  | .nil => ""
-  | .cons entity tail => entity.print ++ "\n" ++ TopLevel.print tail
+def TopLevel.print : @TopLevel φ → String
+  | ⟨.nil⟩ => ""
+  | ⟨.cons entity tail⟩ => entity.print ++ "\n" ++ TopLevel.print ⟨tail⟩
 
 
 end LeanNanoLlvm.AST
