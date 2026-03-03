@@ -12,6 +12,8 @@ inductive RawId : Type where
   | anonymous (n : Nat) -- Anonymous identifiers: %0, %1
 deriving Repr, DecidableEq
 
+deriving instance Hashable for RawId
+
 def RawId.ToString (s : RawId) : String :=
   match s with
   | .name str => str
@@ -26,6 +28,7 @@ inductive Identifier : Type where
   | local_id (id : RawId) -- %id
 deriving Repr, DecidableEq
 
+deriving instance Hashable for Identifier
 
 abbrev LocalId := RawId
 abbrev GlobalId := RawId
