@@ -72,8 +72,8 @@ def add? {w : Nat} (x y : BitVec w) : IntW w :=
 theorem add?_eq : add? a b  = .value (a + b) := rfl
 
 structure NoWrapFlags where
-  nsw : Bool := false
   nuw : Bool := false
+  nsw : Bool := false
 deriving Repr, DecidableEq, Lean.ToExpr
 
 @[simp_llvm_option]

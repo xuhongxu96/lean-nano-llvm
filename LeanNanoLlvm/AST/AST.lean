@@ -2,9 +2,11 @@ import LeanNanoLlvm.Util.ConcreteOrMVar
 
 namespace LeanNanoLlvm.AST
 
-abbrev Width φ := ConcreteOrMVar Nat φ
-abbrev Width.concrete : Nat -> Width φ := ConcreteOrMVar.concrete
-abbrev Width.mvar : Fin φ -> Width φ := ConcreteOrMVar.mvar
+abbrev Width (φ : Nat) := Nat
+abbrev Width.concrete : Nat -> Width φ := id
+-- abbrev Width φ := ConcreteOrMVar Nat φ
+-- abbrev Width.concrete : Nat -> Width φ := ConcreteOrMVar.concrete
+-- abbrev Width.mvar : Fin φ -> Width φ := ConcreteOrMVar.mvar
 
 
 inductive RawId : Type where
