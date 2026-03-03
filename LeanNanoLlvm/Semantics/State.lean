@@ -9,6 +9,11 @@ open Std
 inductive RegisterValue : Type where
   | bv (w : Nat) (val : IntW w)
 
+instance : ToString RegisterValue where
+  toString
+    | .bv w .poison => s!"poison"
+    | .bv w (.value v) => s!"{v}"
+
  def castRegValue? (w : Nat) : RegisterValue → Option (IntW w)
   | .bv w' v =>
     if h : w' = w then some (h ▸ v) else none
@@ -17,6 +22,8 @@ structure NanoLlvmState : Type where
   (registers : ExtHashMap AST.Identifier RegisterValue)
   -- TODO: memory
   -- (memory : ExtHashMap MemoryAddress MemoryValue)
+
+deriving instance Inhabited for NanoLlvmState
 
 abbrev NanoLlvmStateM (retTy: Type) := StateT NanoLlvmState (Except String) retTy
 

@@ -4,6 +4,7 @@ import LeanNanoLlvm.AST.Syntax
 namespace LeanNanoLlvm.AST
 
 open Lean PrettyPrinter PrettyPrinter.Delaborator SubExpr
+open scoped LeanNanoLlvm.AST.Syntax
 
 private def asRawId? (stx : Syntax) : Option (TSyntax `nanollvm_rawid) :=
   match stx with

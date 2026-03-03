@@ -33,6 +33,7 @@ end
 
 section
 open LeanNanoLlvm.AST.Syntax
+open scoped LeanNanoLlvm.AST.Syntax
 
 #check [llvm-rawid| 1]
 #check [llvm-rawid| a]
