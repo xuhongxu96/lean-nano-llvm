@@ -27,6 +27,13 @@ def denoteIntBinaryOp {w : Nat} (op : AST.IntBinaryOp) (x y : IntW w) : IntW w :
   | .xor         => xor x y
 
 @[simp_llvm]
+def denoteConversionOp {fromW toW : Nat} (op : AST.ConversionOp) (v : IntW fromW) : IntW toW :=
+  match op with
+  | .trunc nuw nsw => trunc toW v { nuw := nuw, nsw := nsw }
+  | .zext nneg     => zext toW v { nneg := nneg }
+  | .sext          => sext toW v
+
+@[simp_llvm]
 def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
   | .identifier id => do
     let st ← get
@@ -61,7 +68,18 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
         set st'
       | .void _ => throw s!"IntBinaryOp should be assigned with an instruction id"
     | _ => throw s!"Expected int type, but found [{t.print}]"
-  | .conversionOp op fromTy v toTy => throw s!"conversion op is not supported yet"
+  | .conversionOp op fromTy v toTy => do
+    match fromTy, toTy with
+    | .int fromW, .int toW =>
+      match id with
+      | .id id =>
+        let v ← @denoteExp fromW v
+        let res : IntW toW := denoteConversionOp op v
+        let st ← get
+        let st' := { st with registers := (st.registers.insert (.local_id id) (.bv toW res)) }
+        set st'
+      | .void _ => throw s!"ConversionOp should be assigned with an instruction id"
+    | _, _ => throw s!"Expected int type in conversion op, but found from=[{fromTy.print}], to=[{toTy.print}]"
   | .freeze ⟨ty, exp⟩ => throw s!"`freeze` instruction is not supported yet"
 
 @[simp_llvm]
