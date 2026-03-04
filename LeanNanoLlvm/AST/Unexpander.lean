@@ -317,6 +317,8 @@ def unexpandExpBool : Unexpander
 @[app_unexpander Exp.int]
 def unexpandExpInt : Unexpander
   | `($_ (Int.ofNat $n:num)) => `([llvm-exp| $n:num])
+  | `($_ (Int.ofNat $id:ident)) => `([llvm-exp| <$id:ident:int>])
+  | `($_ $id:ident) => `([llvm-exp| <$id:ident:int>])
   | `($_ $n) =>
     match n with
     | `($_ $n:num) => `([llvm-exp| $n:num])

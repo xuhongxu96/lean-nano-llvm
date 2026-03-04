@@ -9,6 +9,7 @@ open Std
 
 variable {φ : Nat}
 
+@[simp_llvm]
 def denoteIntBinaryOp {w : Nat} (op : AST.IntBinaryOp) (x y : IntW w) : IntW w :=
   match op with
   | .add nuw nsw => add x y { nuw := nuw, nsw := nsw }
@@ -25,6 +26,7 @@ def denoteIntBinaryOp {w : Nat} (op : AST.IntBinaryOp) (x y : IntW w) : IntW w :
   | .or disjoint => Semantics.or x y { disjoint := disjoint }
   | .xor         => xor x y
 
+@[simp_llvm]
 def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
   | .identifier id => do
     let st ← get
@@ -44,6 +46,7 @@ def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
   | .undef => throw s!"`undef` exp is not supported yet"
   | .poison => pure .poison
 
+@[simp_llvm]
 def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoLlvmStateM Unit
   | .intBinaryOp op t v1 v2 => do
     match t with
@@ -61,6 +64,7 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
   | .conversionOp op fromTy v toTy => throw s!"conversion op is not supported yet"
   | .freeze ⟨ty, exp⟩ => throw s!"`freeze` instruction is not supported yet"
 
+@[simp_llvm]
 def denoteNanoLlvmCode : (@AST.Code φ) → NanoLlvmStateM Unit
   | .nil => pure ()
   | ⟨instr_id, instr⟩ :: t => do

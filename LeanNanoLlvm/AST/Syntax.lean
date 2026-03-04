@@ -86,6 +86,7 @@ elab "[llvm-type|" p:nanollvm_type "]" : term => elabNanoLlvmType 512 p
 
 declare_syntax_cat nanollvm_exp
 scoped syntax nanollvm_identifier : nanollvm_exp
+scoped syntax "<" ident ":int>" : nanollvm_exp
 scoped syntax "true" : nanollvm_exp
 scoped syntax "false" : nanollvm_exp
 scoped syntax num : nanollvm_exp -- TODO: negative ints
@@ -97,6 +98,20 @@ def elabNanoLlvmExp : Syntax → MetaM Expr
   | `(nanollvm_exp| $id:nanollvm_identifier) => do
     let id ← elabNanoLlvmIdentifier id
     mkAppM ``Exp.identifier #[id]
+  | `(nanollvm_exp| <$id:ident:int>) => do
+    let lctx ← getLCtx
+    match lctx.findFromUserName? id.getId with
+    | some decl =>
+      let e := decl.toExpr
+      let t ← whnf (← inferType e)
+      if ← isDefEq t (mkConst ``Int) then
+        mkAppM ``Exp.int #[e]
+      else if ← isDefEq t (mkConst ``Nat) then
+        mkAppM ``Exp.int #[← mkAppM ``Int.ofNat #[e]]
+      else
+        throwErrorAt id "Expected local Int/Nat variable in LLVM expression, got type {t}"
+    | none =>
+      throwErrorAt id "Unknown local identifier '{id.getId}' in LLVM expression"
   | `(nanollvm_exp| true) => mkAppM ``Exp.bool #[(.const ``Bool.true [])]
   | `(nanollvm_exp| false) => mkAppM ``Exp.bool #[(.const ``Bool.false [])]
   | `(nanollvm_exp| $n:num) => do

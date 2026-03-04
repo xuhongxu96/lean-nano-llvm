@@ -61,6 +61,8 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-exp| undef]
 #check [llvm-exp| poison]
 
+#check let temp := 10; [llvm-exp| <temp:int>]
+
 #check [llvm-int-bin-op| add]
 #check [llvm-int-bin-op| add nuw]
 #check [llvm-int-bin-op| add nsw]
