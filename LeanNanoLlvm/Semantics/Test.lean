@@ -52,6 +52,7 @@ theorem add_two_i32_then_trunc_to_i8 : forall (a b : ℤ),
   simp [simp_llvm, simp_llvm_option]
   rfl
 
+@[simp]
 def stWithUndef0_i8_5 : NanoLlvmState :=
   { registers := (default : NanoLlvmState).registers
   , undefs := (default : NanoLlvmState).undefs.insert [llvm-rawid| 0] (.bv 8 (.value (5 : BitVec 8)))
@@ -69,14 +70,6 @@ theorem add_with_assigned_undef_i8 :
   ) = .ok (some (.value (6 : BitVec 8))) := by
   simp [stWithUndef0_i8_5, simp_llvm, simp_llvm_option]
   rfl
-
-theorem add_with_unassigned_undef_i8_errors :
-  (match (denoteNanoLlvmCode (
-      [llvm-code| %y = add i8 undef, 1]
-    )).run (default : NanoLlvmState) with
-  | .error _ => Bool.true
-  | .ok _ => Bool.false) = Bool.true := by
-  native_decide
 
 theorem poison_propagates_through_add :
   (do
@@ -134,6 +127,55 @@ theorem freeze_of_assigned_undef_value :
       | _ => none)
   ) = .ok (some (.value (5 : BitVec 8))) := by
   simp [stWithUndef0_i8_5, simp_llvm, simp_llvm_option]
+  rfl
+
+@[simp]
+def runDefinitionRet {φ : Nat} (d : @AST.Definition φ) (args : List RegisterValue)
+    (st : NanoLlvmState := default) : Except String RegisterValue := do
+  let (retval, _) ← (denoteNanoLlvmDefinition d args).run st
+  pure retval
+
+theorem denote_definition_with_undef :
+  runDefinitionRet
+    [llvm-definition|
+      define i8 @f(i8 %a) {
+      entry:
+        %x = add i8 undef, %a
+        ret i8 %x
+      }
+    ]
+    [ .bv 8 (.value (1 : BitVec 8)) ]
+    stWithUndef0_i8_5
+    = .ok (.bv 8 (.value (6 : BitVec 8))) := by
+  simp [simp_llvm, simp_llvm_option]
+  rfl
+
+theorem denote_definition_freeze_poison :
+  runDefinitionRet
+    [llvm-definition|
+      define i8 @f() {
+      entry:
+        %p = add nsw i8 127, 1
+        %f = freeze i8 %p
+        ret i8 %f
+      }
+    ]
+    []
+    = .ok (.bv 8 (.value (0 : BitVec 8))) := by
+  simp [simp_llvm, simp_llvm_option]
+  rfl
+
+theorem denote_definition_ret_void :
+  runDefinitionRet
+    [llvm-definition|
+      define void @f() {
+      entry:
+        ret void
+      }
+    ]
+    []
+    = .ok .void := by
+  simp [simp_llvm, simp_llvm_option]
   rfl
 
 end

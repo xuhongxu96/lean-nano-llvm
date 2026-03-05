@@ -44,6 +44,7 @@ def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
           pure (h ▸ val)
         else
           throw s!"invalid width: expected [{w}], found [{w'}]"
+      | _ => throw s!"unsupported void value"
     | none => throw s!"unknown id [{id.print}]"
   | .bool b =>
     if w = 1 then pure (pure b.toNat)
@@ -59,6 +60,7 @@ def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
           pure (h ▸ val)
         else
           throw s!"invalid width: expected [{w}], found [{w'}]"
+      | _ => throw s!"unsupported void value"
     | none => throw s!"unassigned undef value for [{rawid}]"
   | .poison => pure .poison
 
@@ -109,5 +111,39 @@ def denoteNanoLlvmCode : (@AST.Code φ) → NanoLlvmStateM Unit
   | ⟨instr_id, instr⟩ :: t => do
     denoteInstruction instr_id instr
     denoteNanoLlvmCode t
+
+@[simp_llvm]
+def denoteNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → NanoLlvmStateM RegisterValue
+  | ⟨proto, argIds, body⟩, argVals => do
+    let ⟨retTy, argTys⟩ ← match proto.type with
+    | .function retTy argTys => pure (retTy, argTys)
+    | _ => throw s!"Expected function type for the prototype of definition, but found [{proto.type.print}]"
+
+    for ⟨⟨argTy, argId⟩, argVal⟩ in argTys |>.zip argIds |>.zip argVals do
+      match argTy, argVal with
+      | .int wTy, .bv wVal _v =>
+        if wTy = wVal then
+          let st ← get
+          let registers := st.registers.insert (.local_id argId) argVal
+          set { st with registers := registers }
+        else
+          throw s!"unmatched argument integer width: [{argTy.print} {argId} = {argVal}]"
+      | _, _ => throw s!"unsupported argument: [{argTy.print} {argId} = {argVal}]"
+
+    denoteNanoLlvmCode body.code
+
+    match body.terminator with
+    | ⟨_termId, term⟩ => match term with
+      | .retVoid =>
+        match retTy with
+        | .void => pure .void
+        | _ => throw s!"Expected [{retTy.print}] as return type, but found void"
+      | .ret ⟨.int w, exp⟩ =>
+        match retTy with
+        | .ret (.int w) =>
+          let exp ← @denoteExp w exp
+          pure (.bv w exp)
+        | _ => throw s!"Expected [{retTy.print}] as return type, but found [i{w}]"
+      | _ => throw s!"unsupported return: [{term.print}]"
 
 end LeanNanoLlvm.Semantics

@@ -1,5 +1,7 @@
 /-
 Released under Apache 2.0 license as described in the LICENSE of Lean-MLIR.
+
+https://github.com/opencompl/lean-mlir
 -/
 
 -- This file defines a generic `PoisonOr α` type.
