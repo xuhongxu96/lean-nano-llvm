@@ -331,7 +331,11 @@ def unexpandExpNull : Unexpander
 
 @[app_unexpander Exp.undef]
 def unexpandExpUndef : Unexpander
-  | `($_) => `([llvm-exp| undef])
+  | `($_ $n) =>
+    match asRawId? n with
+    | some rawid => `([llvm-exp| undef!$rawid])
+    | none => `([llvm-exp| undef])
+  | _ => throw ()
 
 @[app_unexpander Exp.poison]
 def unexpandExpPoison : Unexpander

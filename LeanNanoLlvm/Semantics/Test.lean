@@ -47,7 +47,7 @@ theorem add_two_i32_then_trunc_to_i8 : forall (a b : ℤ),
     pure (match st.registers.get? [llvm-identifier| %2] with
       | some (.bv 8 v) => some v
       | _ => none)
-  ) = .ok (some (.value (((a : BitVec 32) + (b : BitVec 32)).setWidth 8))) := by
+  ) = .ok (some (.value ((a : BitVec 32) + (b : BitVec 32) |>.setWidth 8))) := by
   intros
   simp [simp_llvm, simp_llvm_option]
   rfl

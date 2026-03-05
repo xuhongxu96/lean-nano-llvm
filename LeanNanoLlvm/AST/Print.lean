@@ -19,7 +19,7 @@ def Exp.print : Exp → String
   | .bool b => s!"{b}"
   | .int i => s!"{i}"
   | .null => "null"
-  | .undef => "undef"
+  | .undef rawid => s!"undef!{rawid}"
   | .poison => "poison"
 
 private def printBinOp (op : String) (flags : List String) (t : LlvmType φ) (v1 v2 : Exp) : String :=

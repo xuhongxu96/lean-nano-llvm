@@ -98,7 +98,7 @@ inductive Exp : Type where
   | bool       (b : Bool)
   | int        (x : Int)
   | null
-  | undef
+  | undef      (id: RawId)
   | poison
 deriving Repr
 

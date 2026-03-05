@@ -50,7 +50,7 @@ def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
     else throw s!"invalid width: expected [{w}], found [1] (bool)"
   | .int x => pure (pure x)
   | .null => throw s!"`null` exp is not supported yet"
-  | .undef => throw s!"`undef` exp is not supported yet"
+  | .undef rawid => throw s!"`undef` exp is not supported yet"
   | .poison => pure .poison
 
 @[simp_llvm]

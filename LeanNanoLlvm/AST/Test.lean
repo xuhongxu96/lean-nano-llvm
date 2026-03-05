@@ -74,11 +74,12 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-conversion-op| trunc nuw]
 #check [llvm-conversion-op| trunc]
 
-#check [llvm-64-instruction| add i8 %1, %3]
-#check [llvm-64-instruction| add nuw i8 %1, %a]
-#check [llvm-64-instruction| trunc nuw i32 %b to i8]
-#check [llvm-64-instruction| zext i8 %b to i16]
-#check [llvm-64-instruction| freeze i8 %1]
+#check [llvm-64-0-instruction| add i8 %1, %3]
+#check [llvm-64-0-instruction| add nuw i8 %1, %a]
+#check [llvm-64-0-instruction| trunc nuw i32 %b to i8]
+#check [llvm-64-0-instruction| zext i8 %b to i16]
+#check [llvm-64-0-instruction| freeze i8 %1]
+#check [llvm-64-10-instruction| add i8 undef, undef]
 
 #check [llvm-64-terminator| ret void]
 #check [llvm-64-terminator| ret i8 %1]
@@ -166,6 +167,8 @@ define i32 @f(i8 %a) {
 B:
   %i0 = add i32 0, 1
   freeze i32 %i0
+  %y = add i32 undef, poison
+  %y2 = add i32 undef, undef
   %x = add nsw i32 %i0, %i0
   ret i32 %x
 }

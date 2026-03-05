@@ -92,12 +92,13 @@ scoped syntax "false" : nanollvm_exp
 scoped syntax num : nanollvm_exp -- TODO: negative ints
 scoped syntax "null" : nanollvm_exp
 scoped syntax "undef" : nanollvm_exp
+scoped syntax "undef!" nanollvm_rawid : nanollvm_exp
 scoped syntax "poison" : nanollvm_exp
 
-def elabNanoLlvmExp : Syntax → MetaM Expr
+def elabNanoLlvmExp (undefStartIndex : Nat) : Syntax → MetaM (Expr × Nat)
   | `(nanollvm_exp| $id:nanollvm_identifier) => do
     let id ← elabNanoLlvmIdentifier id
-    mkAppM ``Exp.identifier #[id]
+    pure (← mkAppM ``Exp.identifier #[id], undefStartIndex)
   | `(nanollvm_exp| <$id:ident:int>) => do
     let lctx ← getLCtx
     match lctx.findFromUserName? id.getId with
@@ -105,24 +106,36 @@ def elabNanoLlvmExp : Syntax → MetaM Expr
       let e := decl.toExpr
       let t ← whnf (← inferType e)
       if ← isDefEq t (mkConst ``Int) then
-        mkAppM ``Exp.int #[e]
+        pure (← mkAppM ``Exp.int #[e], undefStartIndex)
       else if ← isDefEq t (mkConst ``Nat) then
-        mkAppM ``Exp.int #[← mkAppM ``Int.ofNat #[e]]
+        pure (← mkAppM ``Exp.int #[← mkAppM ``Int.ofNat #[e]], undefStartIndex)
       else
         throwErrorAt id "Expected local Int/Nat variable in LLVM expression, got type {t}"
     | none =>
       throwErrorAt id "Unknown local identifier '{id.getId}' in LLVM expression"
-  | `(nanollvm_exp| true) => mkAppM ``Exp.bool #[(.const ``Bool.true [])]
-  | `(nanollvm_exp| false) => mkAppM ``Exp.bool #[(.const ``Bool.false [])]
+  | `(nanollvm_exp| true) => do
+    pure (← mkAppM ``Exp.bool #[(.const ``Bool.true [])], undefStartIndex)
+  | `(nanollvm_exp| false) => do
+    pure (← mkAppM ``Exp.bool #[(.const ``Bool.false [])], undefStartIndex)
   | `(nanollvm_exp| $n:num) => do
     let int ← mkAppM ``Int.ofNat #[mkNatLit n.getNat]
-    mkAppM ``Exp.int #[int]
-  | `(nanollvm_exp| null) => mkAppM ``Exp.null #[]
-  | `(nanollvm_exp| undef) => mkAppM ``Exp.undef #[]
-  | `(nanollvm_exp| poison) => mkAppM ``Exp.poison #[]
+    pure (← mkAppM ``Exp.int #[int], undefStartIndex)
+  | `(nanollvm_exp| null) => do
+    pure (← mkAppM ``Exp.null #[], undefStartIndex)
+  | `(nanollvm_exp| undef) => do
+    let rawid ← mkAppM ``RawId.anonymous #[mkNatLit undefStartIndex]
+    pure (← mkAppM ``Exp.undef #[rawid], undefStartIndex + 1)
+  | `(nanollvm_exp| undef!$rawid:nanollvm_rawid) => do
+    let rawid ← elabNanoLlvmRawId rawid
+    pure (← mkAppM ``Exp.undef #[rawid], undefStartIndex)
+  | `(nanollvm_exp| poison) => do
+    pure (← mkAppM ``Exp.poison #[], undefStartIndex)
   | _ => throwUnsupportedSyntax
 
-elab "[llvm-exp|" p:nanollvm_exp "]" : term => elabNanoLlvmExp p
+elab "[llvm-" m:num "-exp|" p:nanollvm_exp "]" : term => do
+  pure (← elabNanoLlvmExp m.getNat p).fst
+elab "[llvm-exp|" p:nanollvm_exp "]" : term => do
+  pure (← elabNanoLlvmExp 0 p).fst
 
 declare_syntax_cat nanollvm_int_bin_op
 scoped syntax "add" " nuw "? " nsw"? : nanollvm_int_bin_op
@@ -180,44 +193,53 @@ scoped syntax nanollvm_int_bin_op ppHardSpace nanollvm_type ppHardSpace nanollvm
 scoped syntax nanollvm_conversion_op ppHardSpace nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type : nanollvm_instruction
 scoped syntax "freeze" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
 
-def elabNanoLlvmInstruction (φ: Nat) : Syntax → MetaM Expr
+def elabNanoLlvmInstruction (φ: Nat) (_lineno : Nat) (undefStartIndex : Nat) : Syntax → MetaM (Expr × Nat)
   | `(nanollvm_instruction| $op:nanollvm_int_bin_op $ty:nanollvm_type $op1:nanollvm_exp, $op2:nanollvm_exp) => do
     let op ← elabNanoLlvmIntBinOp op
     let ty ← elabNanoLlvmType φ ty
-    let op1 ← elabNanoLlvmExp op1
-    let op2 ← elabNanoLlvmExp op2
-    mkAppM ``Instruction.intBinaryOp #[op, ty, op1, op2]
+    let (op1, undefNext) ← elabNanoLlvmExp undefStartIndex op1
+    let (op2, undefNext) ← elabNanoLlvmExp undefNext op2
+    pure (← mkAppM ``Instruction.intBinaryOp #[op, ty, op1, op2], undefNext)
   | `(nanollvm_instruction| $op:nanollvm_conversion_op $fromTy:nanollvm_type $v:nanollvm_exp to $toTy:nanollvm_type) => do
     let op ← elabNanoLlvmConversionOp op
     let fromTy ← elabNanoLlvmType φ fromTy
-    let v ← elabNanoLlvmExp v
+    let (v, undefNext) ← elabNanoLlvmExp undefStartIndex v
     let toTy ← elabNanoLlvmType φ toTy
-    mkAppM ``Instruction.conversionOp #[op, fromTy, v, toTy]
+    pure (← mkAppM ``Instruction.conversionOp #[op, fromTy, v, toTy], undefNext)
   | `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp) => do
     let ty ← elabNanoLlvmType φ ty
-    let v ← elabNanoLlvmExp v
+    let (v, undefNext) ← elabNanoLlvmExp undefStartIndex v
     let tv ← mkAppM ``Prod.mk #[ty, v]
-    mkAppM ``Instruction.freeze #[tv]
+    pure (← mkAppM ``Instruction.freeze #[tv], undefNext)
   | _ => throwUnsupportedSyntax
 
-elab "[llvm-" n:num "-instruction|" p:nanollvm_instruction "]" : term => elabNanoLlvmInstruction n.getNat p
-elab "[llvm-instruction|" p:nanollvm_instruction "]" : term => elabNanoLlvmInstruction 512 p
+elab "[llvm-" n:num "-" m:num "-instruction|" p:nanollvm_instruction "]" : term => do
+  pure (← elabNanoLlvmInstruction n.getNat m.getNat m.getNat p).fst
+elab "[llvm-" n:num "-instruction|" p:nanollvm_instruction "]" : term => do
+  pure (← elabNanoLlvmInstruction n.getNat 0 0 p).fst
+elab "[llvm-instruction|" p:nanollvm_instruction "]" : term => do
+  pure (← elabNanoLlvmInstruction 512 0 0 p).fst
 
 declare_syntax_cat nanollvm_terminator
 scoped syntax "ret " "void" : nanollvm_terminator
 scoped syntax "ret " nanollvm_type ppHardSpace nanollvm_exp : nanollvm_terminator
 
-def elabNanoLlvmTerminator (φ : Nat) : Syntax → MetaM Expr
-  | `(nanollvm_terminator| ret void) => mkAppOptM ``Terminator.retVoid #[mkNatLit φ]
+def elabNanoLlvmTerminator (φ : Nat) (undefStartIndex : Nat) : Syntax → MetaM (Expr × Nat)
+  | `(nanollvm_terminator| ret void) => do
+    pure (← mkAppOptM ``Terminator.retVoid #[mkNatLit φ], undefStartIndex)
   | `(nanollvm_terminator| ret $ty:nanollvm_type $e:nanollvm_exp) => do
     let ty ← elabNanoLlvmType φ ty
-    let e ← elabNanoLlvmExp e
+    let (e, undefNext) ← elabNanoLlvmExp undefStartIndex e
     let te ← mkAppM ``Prod.mk #[ty, e]
-    mkAppOptM ``Terminator.ret #[mkNatLit φ, te]
+    pure (← mkAppOptM ``Terminator.ret #[mkNatLit φ, te], undefNext)
   | _ => throwUnsupportedSyntax
 
-elab "[llvm-" n:num "-terminator|" p:nanollvm_terminator "]" : term => elabNanoLlvmTerminator n.getNat p
-elab "[llvm-terminator|" p:nanollvm_terminator "]" : term => elabNanoLlvmTerminator 512 p
+elab "[llvm-" n:num "-" m:num "-terminator|" p:nanollvm_terminator "]" : term => do
+  pure (← elabNanoLlvmTerminator n.getNat m.getNat p).fst
+elab "[llvm-" n:num "-terminator|" p:nanollvm_terminator "]" : term => do
+  pure (← elabNanoLlvmTerminator n.getNat 0 p).fst
+elab "[llvm-terminator|" p:nanollvm_terminator "]" : term => do
+  pure (← elabNanoLlvmTerminator 512 0 p).fst
 
 declare_syntax_cat nanollvm_declaration
 scoped syntax "declare " nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_type,* ")" : nanollvm_declaration
@@ -240,53 +262,66 @@ declare_syntax_cat nanollvm_codeline
 scoped syntax "%" nanollvm_rawid " = " nanollvm_instruction : nanollvm_codeline
 scoped syntax nanollvm_instruction : nanollvm_codeline
 
-def elabNanoLlvmCodeline (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
+def elabNanoLlvmCodeline (φ : Nat) (lineno: Nat) (undefStartIndex : Nat) : Syntax → MetaM (Expr × Nat)
   | `(nanollvm_codeline| %$id:nanollvm_rawid = $instr:nanollvm_instruction
   ) => do
     let id ← elabNanoLlvmRawId id
     let id ← mkAppM ``InstructionId.id #[id]
-    let instr ← elabNanoLlvmInstruction φ instr
-    mkAppM ``Prod.mk #[id, instr]
+    let (instr, undefNext) ← elabNanoLlvmInstruction φ lineno undefStartIndex instr
+    pure (← mkAppM ``Prod.mk #[id, instr], undefNext)
   | `(nanollvm_codeline| $instr:nanollvm_instruction
   ) => do
     let id ← mkAppM ``InstructionId.void #[mkNatLit lineno]
-    let instr ← elabNanoLlvmInstruction φ instr
-    mkAppM ``Prod.mk #[id, instr]
+    let (instr, undefNext) ← elabNanoLlvmInstruction φ lineno undefStartIndex instr
+    pure (← mkAppM ``Prod.mk #[id, instr], undefNext)
   | _ => throwUnsupportedSyntax
 
-elab "[llvm-" n:num "-" l:num "-codeline|" p:nanollvm_codeline "]" : term => elabNanoLlvmCodeline n.getNat l.getNat p
-elab "[llvm-codeline|" p:nanollvm_codeline "]" : term => elabNanoLlvmCodeline 512 1 p
+elab "[llvm-" n:num "-" l:num "-codeline|" p:nanollvm_codeline "]" : term => do
+  pure (← elabNanoLlvmCodeline n.getNat l.getNat 0 p).fst
+elab "[llvm-codeline|" p:nanollvm_codeline "]" : term => do
+  pure (← elabNanoLlvmCodeline 512 1 0 p).fst
 
 declare_syntax_cat nanollvm_code
 scoped syntax ppDedent(ppLine nanollvm_codeline)* : nanollvm_code
 
-def elabNanoLlvmCode (φ : Nat) (lineno: Nat) : Syntax → MetaM (Expr × Nat)
-  | `(nanollvm_code| $codelines:nanollvm_codeline*) => do
+def elabNanoLlvmCode (φ : Nat) (lineno: Nat) (undefStartIndex : Nat) : Syntax → MetaM (Expr × Nat × Nat)
+  | `(nanollvm_code| $lines:nanollvm_codeline*) => do
     let instrTy ← mkAppOptM ``Instruction #[mkNatLit φ]
     let ty ← mkAppM ``Prod #[mkConst ``InstructionId, instrTy]
-    let codelines ← codelines.mapIdxM (fun offset => elabNanoLlvmCodeline φ (lineno + offset))
-    pure (← mkListLit (ty) codelines.toList, codelines.size)
+    let codelines := lines
+    let mut undefNext := undefStartIndex
+    let mut elabedCodelines : Array Expr := #[]
+    for offset in [:codelines.size] do
+      let codeline := codelines[offset]!
+      let (codeline, next) ← elabNanoLlvmCodeline φ (lineno + offset) undefNext codeline
+      undefNext := next
+      elabedCodelines := elabedCodelines.push codeline
+    pure (← mkListLit (ty) elabedCodelines.toList, elabedCodelines.size, undefNext)
   | _ => throwUnsupportedSyntax
 
-elab "[llvm-" n:num "-" l:num "-code|" p:nanollvm_code "]" : term => do pure (← elabNanoLlvmCode n.getNat l.getNat p).fst
-elab "[llvm-code|" p:nanollvm_code "]" : term => do pure (← elabNanoLlvmCode 512 1 p).fst
+elab "[llvm-" n:num "-" l:num "-code|" p:nanollvm_code "]" : term => do
+  pure (← elabNanoLlvmCode n.getNat l.getNat 0 p).1
+elab "[llvm-code|" p:nanollvm_code "]" : term => do
+  pure (← elabNanoLlvmCode 512 1 0 p).1
 
 declare_syntax_cat nanollvm_block
 scoped syntax nanollvm_rawid ": " ppIndent(nanollvm_code ppLine nanollvm_terminator) : nanollvm_block
 
-def elabNanoLlvmBlock (φ : Nat) (lineno: Nat) : Syntax → MetaM Expr
+def elabNanoLlvmBlock (φ : Nat) (lineno: Nat) (undefStartIndex : Nat) : Syntax → MetaM (Expr × Nat)
   | `(nanollvm_block| $id:nanollvm_rawid:
   $code:nanollvm_code $term:nanollvm_terminator) => do
     let id ← elabNanoLlvmRawId id
-    let ⟨code, nLines⟩ ← elabNanoLlvmCode φ lineno code
-    let term ← elabNanoLlvmTerminator φ term
+    let (code, nLines, undefNext) ← elabNanoLlvmCode φ lineno undefStartIndex code
+    let (term, undefNext) ← elabNanoLlvmTerminator φ undefNext term
     let termId ← mkAppM ``InstructionId.void #[mkNatLit (lineno + nLines)]
     let term ← mkAppM ``Prod.mk #[termId, term]
-    mkAppM ``Block.mk #[id, code, term]
+    pure (← mkAppM ``Block.mk #[id, code, term], undefNext)
   | _ => throwUnsupportedSyntax
 
-elab "[llvm-" n:num "-" l:num "-block|" p:nanollvm_block "]" : term => elabNanoLlvmBlock n.getNat l.getNat p
-elab "[llvm-block|" p:nanollvm_block "]" : term => elabNanoLlvmBlock 512 1 p
+elab "[llvm-" n:num "-" l:num "-block|" p:nanollvm_block "]" : term => do
+  pure (← elabNanoLlvmBlock n.getNat l.getNat 0 p).fst
+elab "[llvm-block|" p:nanollvm_block "]" : term => do
+  pure (← elabNanoLlvmBlock 512 1 0 p).fst
 
 declare_syntax_cat nanollvm_arg
 scoped syntax nanollvm_type " %" nanollvm_rawid : nanollvm_arg
@@ -321,7 +356,8 @@ def elabNanoLlvmDefinition (φ : Nat) : Syntax → MetaM Expr
     let argList ← mkListLit (argTy) argTys.toList
     let argNameList ← mkListLit (mkConst ``RawId) argNames.toList
     let fnTy ← mkAppM ``LlvmType.function #[retTy, argList]
-    let block ← elabNanoLlvmBlock φ 1 block
+    let blockResult ← elabNanoLlvmBlock φ 1 0 block
+    let block := blockResult.fst
     let decl ← mkAppOptM ``Declaration.mk #[mkNatLit φ, id, fnTy]
     mkAppOptM ``Definition.mk #[mkNatLit φ, decl, argNameList, block]
   | _ => throwUnsupportedSyntax
