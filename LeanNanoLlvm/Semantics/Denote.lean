@@ -50,7 +50,16 @@ def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
     else throw s!"invalid width: expected [{w}], found [1] (bool)"
   | .int x => pure (pure x)
   | .null => throw s!"`null` exp is not supported yet"
-  | .undef rawid => throw s!"`undef` exp is not supported yet"
+  | .undef rawid => do
+    let st ← get
+    match st.undefs.get? rawid with
+    | some val => match val with
+      | .bv w' val =>
+        if h: w = w' then
+          pure (h ▸ val)
+        else
+          throw s!"invalid width: expected [{w}], found [{w'}]"
+    | none => throw s!"unassigned undef value for [{rawid}]"
   | .poison => pure .poison
 
 @[simp_llvm]
@@ -80,7 +89,19 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
         set st'
       | .void _ => throw s!"ConversionOp should be assigned with an instruction id"
     | _, _ => throw s!"Expected int type in conversion op, but found from=[{fromTy.print}], to=[{toTy.print}]"
-  | .freeze ⟨ty, exp⟩ => throw s!"`freeze` instruction is not supported yet"
+  | .freeze ⟨ty, exp⟩ => do
+    let id ← match id with
+    | .id id => pure id
+    | _ => throw s!"freeze should be assigned with an instruction id"
+
+    match ty with
+    | .int w =>
+      let exp ← @denoteExp w exp
+      let res := freeze exp
+      let st ← get
+      let st' := { st with registers := (st.registers.insert (.local_id id) (.bv w res)) }
+      set st'
+    | _ => throw s!"Expected int type for freeze op, but found [{ty.print}]"
 
 @[simp_llvm]
 def denoteNanoLlvmCode : (@AST.Code φ) → NanoLlvmStateM Unit
