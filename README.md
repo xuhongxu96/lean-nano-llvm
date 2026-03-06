@@ -4,6 +4,8 @@ Lean formalization of a small, executable LLVM-like IR with parsing, printing, w
 
 At the core, this project lets you write tiny LLVM programs directly in Lean and prove program optimizations correct.
 
+This project is a research and experimentation artifact, not a production LLVM verification toolchain.
+
 ```lean
 theorem ret_add_x_0_refines_ret_x :
   [llvm-definition|
