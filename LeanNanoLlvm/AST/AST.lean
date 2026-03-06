@@ -103,20 +103,6 @@ def LlvmType.i (w : Width φ) : LlvmType φ := .int w
 abbrev LlvmType.i1 : LlvmType φ := .i 1
 abbrev LlvmType.i32 : LlvmType φ := .i 32
 
-mutual
-
-@[simp]
-def LlvmRetType.instantiateWidths (ws : List.Vector Nat φ) : LlvmRetType φ → LlvmRetType 0
-  | .void => .void
-  | .ret ty => .ret <| ty.instantiateWidths ws
-
-@[simp]
-def LlvmType.instantiateWidths (ws : List.Vector Nat φ) : LlvmType φ → LlvmType 0
-  | .int w => .int <| Width.instantiate ws w
-  | .function ret args => .function (ret.instantiateWidths ws) (args.map (LlvmType.instantiateWidths ws))
-
-end
-
 
 abbrev TypedIdentifier φ := Identifier × (LlvmType φ)
 
@@ -193,6 +179,21 @@ inductive TopLevelEntity where
 
 structure TopLevel (φ: Nat) where
   (entities : List (@TopLevelEntity φ))
+
+
+mutual
+
+@[simp]
+def LlvmRetType.instantiateWidths (ws : List.Vector Nat φ) : LlvmRetType φ → LlvmRetType 0
+  | .void => .void
+  | .ret ty => .ret <| ty.instantiateWidths ws
+
+@[simp]
+def LlvmType.instantiateWidths (ws : List.Vector Nat φ) : LlvmType φ → LlvmType 0
+  | .int w => .int <| Width.instantiate ws w
+  | .function ret args => .function (ret.instantiateWidths ws) (args.map (LlvmType.instantiateWidths ws))
+
+end
 
 @[simp]
 def TypedExp.instantiateWidths (ws : List.Vector Nat φ) : TypedExp φ → TypedExp 0

@@ -1,4 +1,5 @@
 import LeanNanoLlvm.Semantics.Denote
+import LeanNanoLlvm.Semantics.State
 import LeanNanoLlvm.Tactic
 
 namespace LeanNanoLlvm
@@ -141,5 +142,20 @@ theorem definition_wellFormed_iff (defn : @Definition φ) :
     exact .mk retTy argTys hproto htype hlen hnodup hcode hterm
 
 end AST
+
+namespace Semantics
+
+@[simp_wellform]
+def RegisterValue.WellFormedFor : AST.LlvmType φ → RegisterValue → Prop
+  | .int (.concrete wTy), .bv wVal _ => wTy = wVal
+  | _, _ => False
+
+@[simp_wellform]
+def Definition.ArgValuesWellFormed (defn : @AST.Definition φ) (argVals : List RegisterValue) : Prop :=
+  match defn.prototype.type with
+  | .function _ argTys => List.Forall₂ RegisterValue.WellFormedFor argTys argVals
+  | _ => False
+
+end Semantics
 
 end LeanNanoLlvm

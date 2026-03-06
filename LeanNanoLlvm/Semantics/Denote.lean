@@ -9,17 +9,6 @@ open Std
 
 variable {φ : Nat}
 
-@[simp_wellform]
-def RegisterValue.WellFormedFor : AST.LlvmType φ → RegisterValue → Prop
-  | .int (.concrete wTy), .bv wVal _ => wTy = wVal
-  | _, _ => False
-
-@[simp_wellform]
-def Definition.ArgValuesWellFormed (defn : @AST.Definition φ) (argVals : List RegisterValue) : Prop :=
-  match defn.prototype.type with
-  | .function _ argTys => List.Forall₂ RegisterValue.WellFormedFor argTys argVals
-  | _ => False
-
 @[simp_llvm]
 private def expectConcreteWidth : AST.Width φ → NanoLlvmStateM Nat
   | .concrete w => pure w
