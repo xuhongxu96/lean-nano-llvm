@@ -5,6 +5,8 @@ https://github.com/opencompl/lean-mlir
 -/
 
 import LeanNanoLlvm.Tactic
+import LeanNanoLlvm.AST.AST
+import LeanNanoLlvm.Semantics.Denote
 import Mathlib.Order.Defs.Unbundled
 
 /--
@@ -73,3 +75,38 @@ theorem pure_isRefinedBy_pure (x : α) (y : β) :
   (pure x : Id _) ⊑ (pure y : Id _) ↔ x ⊑ y := by rfl
 
 end Id
+
+namespace LeanNanoLlvm.Refinement
+
+open LeanNanoLlvm
+open Semantics
+
+variable {φ : Nat}
+
+/--
+Semantic refinement on LLVM definitions.
+
+`x ⊑ y` means every successful observable behavior of `y` is also a successful
+observable behavior of `x` under the same input arguments and initial state.
+-/
+def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
+  ∀ (args : List RegisterValue)
+    (undefs : Std.ExtHashMap AST.RawId RegisterValue)
+    (ret : RegisterValue),
+    ((denoteNanoLlvmDefinition y args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret →
+    ((denoteNanoLlvmDefinition x args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret
+
+instance : Refinement (@AST.Definition φ) where
+  IsRefinedBy := Definition.IsRefinedBy
+
+@[simp_denote]
+theorem definition_isRefinedBy_iff (x y : @AST.Definition φ) :
+    x ⊑ y ↔
+      (∀ (args : List RegisterValue)
+        (undefs : Std.ExtHashMap AST.RawId RegisterValue)
+        (ret : RegisterValue),
+        ((denoteNanoLlvmDefinition y args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret →
+        ((denoteNanoLlvmDefinition x args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret) := by
+  rfl
+
+end LeanNanoLlvm.Refinement

@@ -113,13 +113,13 @@ def denoteNanoLlvmCode : (@AST.Code φ) → NanoLlvmStateM Unit
     denoteNanoLlvmCode t
 
 @[simp_llvm]
-def denoteNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → NanoLlvmStateM RegisterValue
-  | ⟨proto, argIds, body⟩, argVals => do
-    let ⟨retTy, argTys⟩ ← match proto.type with
-    | .function retTy argTys => pure (retTy, argTys)
-    | _ => throw s!"Expected function type for the prototype of definition, but found [{proto.type.print}]"
-
-    for ⟨⟨argTy, argId⟩, argVal⟩ in argTys |>.zip argIds |>.zip argVals do
+def bindDefinitionArgs :
+    List (AST.LlvmType φ) → List AST.RawId → List RegisterValue → NanoLlvmStateM Unit
+  | [], [], [] => pure ()
+  | [], _, _ => throw s!"unmatched number of argument types, ids and values"
+  | _, [], _ => throw s!"unmatched number of argument types, ids and values"
+  | _, _, [] => throw s!"unmatched number of argument types, ids and values"
+  | (argTy :: restTys), (argId :: restIds), (argVal :: restVals) => do
       match argTy, argVal with
       | .int wTy, .bv wVal _v =>
         if wTy = wVal then
@@ -129,21 +129,30 @@ def denoteNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → N
         else
           throw s!"unmatched argument integer width: [{argTy.print} {argId} = {argVal}]"
       | _, _ => throw s!"unsupported argument: [{argTy.print} {argId} = {argVal}]"
+      bindDefinitionArgs restTys restIds restVals
 
-    denoteNanoLlvmCode body.code
+@[simp_llvm]
+def denoteNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → NanoLlvmStateM RegisterValue
+  | ⟨proto, argIds, body⟩, argVals =>
+    match proto.type with
+    | .function retTy argTys => do
+      bindDefinitionArgs argTys argIds argVals
 
-    match body.terminator with
-    | ⟨_termId, term⟩ => match term with
-      | .retVoid =>
-        match retTy with
-        | .void => pure .void
-        | _ => throw s!"Expected [{retTy.print}] as return type, but found void"
-      | .ret ⟨.int w, exp⟩ =>
-        match retTy with
-        | .ret (.int w) =>
-          let exp ← @denoteExp w exp
-          pure (.bv w exp)
-        | _ => throw s!"Expected [{retTy.print}] as return type, but found [i{w}]"
-      | _ => throw s!"unsupported return: [{term.print}]"
+      denoteNanoLlvmCode body.code
+
+      match body.terminator with
+      | ⟨_termId, term⟩ => match term with
+        | .retVoid =>
+          match retTy with
+          | .void => pure .void
+          | _ => throw s!"Expected [{retTy.print}] as return type, but found void"
+        | .ret ⟨.int w, exp⟩ =>
+          match retTy with
+          | .ret (.int w) =>
+            let exp ← @denoteExp w exp
+            pure (.bv w exp)
+          | _ => throw s!"Expected [{retTy.print}] as return type, but found [i{w}]"
+        | _ => throw s!"unsupported return: [{term.print}]"
+    | ty => throw s!"Expected function type for the prototype of definition, but found [{ty.print}]"
 
 end LeanNanoLlvm.Semantics

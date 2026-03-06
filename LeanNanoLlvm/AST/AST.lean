@@ -42,6 +42,7 @@ inductive InstructionId
   | void (n : Nat) -- give unique ids to instructions that have void return type, such as `store`, terminators, etc.
 deriving Repr, DecidableEq
 
+
 section
 
 variable (φ : Nat)
@@ -58,6 +59,26 @@ inductive LlvmType : Type where
 deriving Repr
 
 end
+
+@[simp]
+def LlvmRetType.isVoid? : LlvmRetType φ -> Bool
+  | .void => true
+  | .ret _ => false
+
+@[simp]
+def LlvmRetType.asRet? : LlvmRetType φ -> Option (LlvmType φ)
+  | .void => none
+  | .ret ty => some ty
+
+@[simp]
+def LlvmType.asInt? : LlvmType φ -> Option (Width φ)
+  | .int w => some w
+  | _ => none
+
+@[simp]
+def LlvmType.asFunction? : LlvmType φ -> Option ((LlvmRetType φ) × List (LlvmType φ))
+  | .function ret argTys => some (ret, argTys)
+  | _ => none
 
 end
 
