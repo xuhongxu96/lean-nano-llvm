@@ -11,7 +11,7 @@ B:
   %i0 = add i32 0, 1
   ret i32 %i0
 } -/
-def llvm_0_plus_1 : TopLevel 32 := ⟨[
+def llvm_0_plus_1 : TopLevel 0 := ⟨[
   .definition {
     prototype := {
       name := .name "f",
@@ -47,7 +47,7 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-instruction-id| %2]
 #check [llvm-instruction-id| void (3)]
 
-#check [llvm-64-type| i8]
+#check [llvm-type| i8]
 #check [llvm-64-type| i$0]
 #check [llvm-64-type| i8()]
 #check [llvm-64-type| i8(i32, i16)]
@@ -75,19 +75,19 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-conversion-op| trunc nuw]
 #check [llvm-conversion-op| trunc]
 
-#check [llvm-64-0-instruction| add i8 %1, %3]
+#check [llvm-instruction| add i8 %1, %3]
 #check [llvm-64-0-instruction| add nuw i8 %1, %a]
 #check [llvm-64-0-instruction| trunc nuw i32 %b to i8]
 #check [llvm-64-0-instruction| zext i8 %b to i16]
 #check [llvm-64-0-instruction| freeze i8 %1]
 #check [llvm-64-10-instruction| add i8 undef, undef]
 
-#check [llvm-64-terminator| ret void]
+#check [llvm-terminator| ret void]
 #check [llvm-64-terminator| ret i8 %1]
 
-#check [llvm-64-declaration| declare i32 @puts(i8, i32)]
+#check [llvm-declaration| declare i32 @puts(i8, i32)]
 
-#check [llvm-64-1-codeline| %1 = add i8 %0, %a]
+#check [llvm-codeline| %1 = add i8 %0, %a]
 #check [llvm-64-1-codeline| freeze i8 %a]
 
 #check [llvm-64-1-code|
@@ -114,7 +114,7 @@ entry:
 }
 ]
 
-#check [llvm-2-definition|
+#check [llvm-1-definition|
 define i$0 @f(i$0 %a) {
 entry:
   %1 = add i$0 %a, 0
@@ -122,7 +122,7 @@ entry:
 }
 ]
 
-#check [llvm-64-entity| declare i32 @puts(i8, i32)]
+#check [llvm-entity| declare i32 @puts(i8, i32)]
 
 #check [llvm-64-entity|
 define void @f() {
@@ -134,7 +134,7 @@ entry:
 }
 ]
 
-#check [llvm-64|
+#check [llvm-2|
 declare i32 @puts(i8, i32)
 define void @g(i8 %a) {
 entry:

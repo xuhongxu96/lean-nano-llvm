@@ -178,7 +178,7 @@ theorem denote_definition_ret_void :
   simp [simp_llvm, simp_llvm_option]
   rfl
 
-def wfDefinition : @AST.Definition 512 :=
+def wfDefinition : @AST.Definition 0 :=
   [llvm-definition|
     define i8 @f(i8 %a) {
     entry:
@@ -197,7 +197,7 @@ theorem wfDefinition_wellFormed : wfDefinition.WellFormed := by
   . simp [wfDefinition, AST.Terminator.WellFormedWith, AST.Code.definedIds,
       AST.Exp.WellFormedFor, AST.Exp.WellScopedTo]
 
-def badDefinitionDuplicateArgs : @AST.Definition 512 :=
+def badDefinitionDuplicateArgs : @AST.Definition 0 :=
   [llvm-definition|
     define i8 @f(i8 %a, i8 %a) {
     entry:
@@ -211,7 +211,7 @@ theorem badDefinitionDuplicateArgs_not_wellFormed :
   simp [badDefinitionDuplicateArgs, AST.Code.WellFormedFrom, AST.Terminator.WellFormedWith,
     AST.Exp.WellFormedFor, AST.Exp.WellScopedTo, AST.Code.definedIds]
 
-def badDefinitionUnboundRet : @AST.Definition 512 :=
+def badDefinitionUnboundRet : @AST.Definition 0 :=
   [llvm-definition|
     define i8 @f() {
     entry:

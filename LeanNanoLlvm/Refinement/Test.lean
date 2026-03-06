@@ -8,7 +8,7 @@ open Semantics
 open AST.Syntax
 
 open scoped LeanNanoLlvm.AST.Syntax in
-def addDef : @AST.Definition 512 := [llvm-definition|
+def addDef : @AST.Definition 0 := [llvm-definition|
   define i8 @f(i8 %a, i8 %b) {
   entry:
     %x = add i8 %a, %b

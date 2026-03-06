@@ -92,7 +92,7 @@ partial def elabNanoLlvmRetType (φ : Nat) : Syntax → MetaM Expr
 end
 
 elab "[llvm-" n:num "-type|" p:nanollvm_type "]" : term => elabNanoLlvmType n.getNat p
-elab "[llvm-type|" p:nanollvm_type "]" : term => elabNanoLlvmType 512 p
+elab "[llvm-type|" p:nanollvm_type "]" : term => elabNanoLlvmType 0 p
 
 declare_syntax_cat nanollvm_exp
 scoped syntax nanollvm_identifier : nanollvm_exp
@@ -228,7 +228,7 @@ elab "[llvm-" n:num "-" m:num "-instruction|" p:nanollvm_instruction "]" : term 
 elab "[llvm-" n:num "-instruction|" p:nanollvm_instruction "]" : term => do
   pure (← elabNanoLlvmInstruction n.getNat 0 0 p).fst
 elab "[llvm-instruction|" p:nanollvm_instruction "]" : term => do
-  pure (← elabNanoLlvmInstruction 512 0 0 p).fst
+  pure (← elabNanoLlvmInstruction 0 0 0 p).fst
 
 declare_syntax_cat nanollvm_terminator
 scoped syntax "ret " "void" : nanollvm_terminator
@@ -249,7 +249,7 @@ elab "[llvm-" n:num "-" m:num "-terminator|" p:nanollvm_terminator "]" : term =>
 elab "[llvm-" n:num "-terminator|" p:nanollvm_terminator "]" : term => do
   pure (← elabNanoLlvmTerminator n.getNat 0 p).fst
 elab "[llvm-terminator|" p:nanollvm_terminator "]" : term => do
-  pure (← elabNanoLlvmTerminator 512 0 p).fst
+  pure (← elabNanoLlvmTerminator 0 0 p).fst
 
 declare_syntax_cat nanollvm_declaration
 scoped syntax "declare " nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_type,* ")" : nanollvm_declaration
@@ -266,7 +266,7 @@ def elabNanoLlvmDeclaration (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-" n:num "-declaration|" p:nanollvm_declaration "]" : term => elabNanoLlvmDeclaration n.getNat p
-elab "[llvm-declaration|" p:nanollvm_declaration "]" : term => elabNanoLlvmDeclaration 512 p
+elab "[llvm-declaration|" p:nanollvm_declaration "]" : term => elabNanoLlvmDeclaration 0 p
 
 declare_syntax_cat nanollvm_codeline
 scoped syntax "%" nanollvm_rawid " = " nanollvm_instruction : nanollvm_codeline
@@ -289,7 +289,7 @@ def elabNanoLlvmCodeline (φ : Nat) (lineno: Nat) (undefStartIndex : Nat) : Synt
 elab "[llvm-" n:num "-" l:num "-codeline|" p:nanollvm_codeline "]" : term => do
   pure (← elabNanoLlvmCodeline n.getNat l.getNat 0 p).fst
 elab "[llvm-codeline|" p:nanollvm_codeline "]" : term => do
-  pure (← elabNanoLlvmCodeline 512 1 0 p).fst
+  pure (← elabNanoLlvmCodeline 0 1 0 p).fst
 
 declare_syntax_cat nanollvm_code
 scoped syntax ppDedent(ppLine nanollvm_codeline)* : nanollvm_code
@@ -312,7 +312,7 @@ def elabNanoLlvmCode (φ : Nat) (lineno: Nat) (undefStartIndex : Nat) : Syntax �
 elab "[llvm-" n:num "-" l:num "-code|" p:nanollvm_code "]" : term => do
   pure (← elabNanoLlvmCode n.getNat l.getNat 0 p).1
 elab "[llvm-code|" p:nanollvm_code "]" : term => do
-  pure (← elabNanoLlvmCode 512 1 0 p).1
+  pure (← elabNanoLlvmCode 0 1 0 p).1
 
 declare_syntax_cat nanollvm_block
 scoped syntax nanollvm_rawid ": " ppIndent(nanollvm_code ppLine nanollvm_terminator) : nanollvm_block
@@ -331,7 +331,7 @@ def elabNanoLlvmBlock (φ : Nat) (lineno: Nat) (undefStartIndex : Nat) : Syntax 
 elab "[llvm-" n:num "-" l:num "-block|" p:nanollvm_block "]" : term => do
   pure (← elabNanoLlvmBlock n.getNat l.getNat 0 p).fst
 elab "[llvm-block|" p:nanollvm_block "]" : term => do
-  pure (← elabNanoLlvmBlock 512 1 0 p).fst
+  pure (← elabNanoLlvmBlock 0 1 0 p).fst
 
 declare_syntax_cat nanollvm_arg
 scoped syntax nanollvm_type " %" nanollvm_rawid : nanollvm_arg
@@ -347,7 +347,7 @@ elab "[llvm-" n:num "-arg|" p:nanollvm_arg "]" : term => do
   let (ty, id) ← elabNanoLlvmArg n.getNat p
   mkAppM ``Prod.mk #[ty, id]
 elab "[llvm-arg|" p:nanollvm_arg "]" : term => do
-  let (ty, id) ← elabNanoLlvmArg 512 p
+  let (ty, id) ← elabNanoLlvmArg 0 p
   mkAppM ``Prod.mk #[ty, id]
 
 declare_syntax_cat nanollvm_definition
@@ -373,7 +373,7 @@ def elabNanoLlvmDefinition (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-" n:num "-definition|" p:nanollvm_definition "]" : term => elabNanoLlvmDefinition n.getNat p
-elab "[llvm-definition|" p:nanollvm_definition "]" : term => elabNanoLlvmDefinition 512 p
+elab "[llvm-definition|" p:nanollvm_definition "]" : term => elabNanoLlvmDefinition 0 p
 
 declare_syntax_cat nanollvm_entity
 scoped syntax nanollvm_declaration : nanollvm_entity
@@ -389,7 +389,7 @@ def elabNanoLlvmEntity (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-" n:num "-entity|" p:nanollvm_entity "]" : term => elabNanoLlvmEntity n.getNat p
-elab "[llvm-entity|" p:nanollvm_entity "]" : term => elabNanoLlvmEntity 512 p
+elab "[llvm-entity|" p:nanollvm_entity "]" : term => elabNanoLlvmEntity 0 p
 
 declare_syntax_cat nanollvm
 scoped syntax ppDedent(nanollvm_entity ppLine)* : nanollvm
@@ -403,6 +403,6 @@ def elabNanoLlvm (φ : Nat) : Syntax → MetaM Expr
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-" n:num "|" ppLine p:nanollvm "]" : term => elabNanoLlvm n.getNat p
-elab "[llvm|" ppLine p:nanollvm "]" : term => elabNanoLlvm 512 p
+elab "[llvm|" ppLine p:nanollvm "]" : term => elabNanoLlvm 0 p
 
 end LeanNanoLlvm.AST.Syntax
