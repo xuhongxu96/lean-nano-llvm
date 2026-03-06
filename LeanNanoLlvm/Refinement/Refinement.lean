@@ -7,6 +7,7 @@ https://github.com/opencompl/lean-mlir
 import LeanNanoLlvm.Tactic
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.Semantics.Denote
+import LeanNanoLlvm.Semantics.Wellformed
 import Mathlib.Order.Defs.Unbundled
 
 /--
@@ -87,12 +88,25 @@ variable {φ : Nat}
 Semantic refinement on LLVM definitions.
 
 `x ⊑ y` means every successful observable behavior of `y` is also a successful
-observable behavior of `x` under the same input arguments and initial state.
+observable behavior of `x` under the same well-typed input arguments and initial state,
+assuming both definitions are themselves well formed.
 -/
+def Definition.SignatureCompatible (x y : @AST.Definition φ) : Prop :=
+  x.prototype.type = y.prototype.type
+
+@[simp_denote]
+theorem definition_signatureCompatible_iff (x y : @AST.Definition φ) :
+    Definition.SignatureCompatible x y ↔ x.prototype.type = y.prototype.type := by
+  rfl
+
 def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
   ∀ (args : List RegisterValue)
     (undefs : Std.ExtHashMap AST.RawId RegisterValue)
     (ret : RegisterValue),
+    AST.Definition.WellFormed x →
+    AST.Definition.WellFormed y →
+    Definition.SignatureCompatible x y →
+    Semantics.Definition.ArgValuesWellFormed x args →
     ((denoteNanoLlvmDefinition y args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret →
     ((denoteNanoLlvmDefinition x args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret
 
@@ -105,6 +119,10 @@ theorem definition_isRefinedBy_iff (x y : @AST.Definition φ) :
       (∀ (args : List RegisterValue)
         (undefs : Std.ExtHashMap AST.RawId RegisterValue)
         (ret : RegisterValue),
+        AST.Definition.WellFormed x →
+        AST.Definition.WellFormed y →
+        Definition.SignatureCompatible x y →
+        Semantics.Definition.ArgValuesWellFormed x args →
         ((denoteNanoLlvmDefinition y args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret →
         ((denoteNanoLlvmDefinition x args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret) := by
   rfl

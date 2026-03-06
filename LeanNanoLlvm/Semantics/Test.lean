@@ -178,4 +178,63 @@ theorem denote_definition_ret_void :
   simp [simp_llvm, simp_llvm_option]
   rfl
 
+def wfDefinition : @AST.Definition 512 :=
+  [llvm-definition|
+    define i8 @f(i8 %a) {
+    entry:
+      %x = add i8 %a, 1
+      ret i8 %x
+    }
+  ]
+
+theorem wfDefinition_wellFormed : wfDefinition.WellFormed := by
+  rw [AST.definition_wellFormed_iff]
+  refine ⟨_, _, ?_, rfl, rfl, by simp [wfDefinition], ?_, ?_⟩
+  . rw [AST.declaration_wellFormed_iff]
+    simp [AST.Declaration.WellFormedType, wfDefinition]
+  . simp [wfDefinition, AST.Code.WellFormedFrom, AST.Instruction.WellFormedWith,
+      AST.Exp.WellFormedFor, AST.Exp.WellScopedTo, AST.InstructionId.DefinesLocal]
+  . simp [wfDefinition, AST.Terminator.WellFormedWith, AST.Code.definedIds,
+      AST.Exp.WellFormedFor, AST.Exp.WellScopedTo]
+
+def badDefinitionDuplicateArgs : @AST.Definition 512 :=
+  [llvm-definition|
+    define i8 @f(i8 %a, i8 %a) {
+    entry:
+      ret i8 %a
+    }
+  ]
+
+theorem badDefinitionDuplicateArgs_not_wellFormed :
+    ¬ badDefinitionDuplicateArgs.WellFormed := by
+  rw [AST.definition_wellFormed_iff]
+  simp [badDefinitionDuplicateArgs, AST.Code.WellFormedFrom, AST.Terminator.WellFormedWith,
+    AST.Exp.WellFormedFor, AST.Exp.WellScopedTo, AST.Code.definedIds]
+
+def badDefinitionUnboundRet : @AST.Definition 512 :=
+  [llvm-definition|
+    define i8 @f() {
+    entry:
+      ret i8 %x
+    }
+  ]
+
+theorem badDefinitionUnboundRet_not_wellFormed :
+    ¬ badDefinitionUnboundRet.WellFormed := by
+  rw [AST.definition_wellFormed_iff]
+  simp [badDefinitionUnboundRet, AST.Code.WellFormedFrom, AST.Terminator.WellFormedWith,
+    AST.Exp.WellFormedFor, AST.Exp.WellScopedTo, AST.Code.definedIds]
+
+theorem wfDefinition_argValuesWellFormed :
+    Semantics.Definition.ArgValuesWellFormed wfDefinition [RegisterValue.bv 8 (.value (7 : BitVec 8))] := by
+  simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedFor, wfDefinition]
+
+theorem wfDefinition_argValuesIllFormed_wrongWidth :
+    ¬ Semantics.Definition.ArgValuesWellFormed wfDefinition [RegisterValue.bv 16 (.value (7 : BitVec 16))] := by
+  simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedFor, wfDefinition]
+
+theorem wfDefinition_argValuesIllFormed_wrongArity :
+    ¬ Semantics.Definition.ArgValuesWellFormed wfDefinition [] := by
+  simp [Semantics.Definition.ArgValuesWellFormed, wfDefinition]
+
 end

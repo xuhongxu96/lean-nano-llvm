@@ -2,4 +2,5 @@ import Lean.Meta.Tactic.Simp.RegisterCommand
 
 register_simp_attr simp_llvm
 register_simp_attr simp_llvm_option
+register_simp_attr simp_wellform
 register_simp_attr simp_denote

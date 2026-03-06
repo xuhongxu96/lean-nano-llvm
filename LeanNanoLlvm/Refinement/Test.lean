@@ -17,7 +17,7 @@ def addDef : @AST.Definition 512 := [llvm-definition|
 ]
 
 theorem addDef_refines_itself : addDef ⊑ addDef := by
-  intro args st retval h
+  intro args st retval _ _ _ _ h
   exact h
 
 open scoped LeanNanoLlvm.AST.Syntax in
@@ -38,15 +38,27 @@ def retXDef : @AST.Definition 512 := [llvm-definition|
 ]
 
 private theorem intw_add_zero (x : Semantics.IntW 8) :
-    (do let y ← x; pure (y + (0 : BitVec 8))) = x := by
+    (do let y ← x; PoisonOr.value (y + (0 : BitVec 8))) = x := by
   cases x with
   | ofOption o =>
     cases o <;> simp
 
 
 theorem ret_add_x_0_refines_ret_x : retAddX0Def ⊑ retXDef := by
-  intro args undefs retval h
-  sorry
+  intro args undefs retval hwfAdd hwfRet hsig hargs h
+  cases args with
+  | nil =>
+      simp [Semantics.Definition.ArgValuesWellFormed, retAddX0Def] at hargs
+  | cons arg rest =>
+      cases rest with
+      | nil =>
+          cases arg <;> simp [Semantics.Definition.ArgValuesWellFormed,
+            Semantics.RegisterValue.WellFormedFor, retAddX0Def] at hargs
+          rename_i w v
+          subst hargs
+          simp [retAddX0Def, simp_llvm, simp_wellform, simp_llvm_option] at *
+      | cons arg' rest' =>
+          simp [Semantics.Definition.ArgValuesWellFormed, retAddX0Def] at hargs
 
 
 end LeanNanoLlvm.Refinement
