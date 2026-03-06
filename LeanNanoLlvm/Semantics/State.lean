@@ -13,8 +13,8 @@ deriving DecidableEq
 
 instance : ToString RegisterValue where
   toString
-    | .bv w .poison => "poison"
-    | .bv w (.value v) => s!"{v}"
+    | .bv _w .poison => "poison"
+    | .bv _w (.value v) => s!"{v}"
     | .void => "void"
 
  def castRegValue? (w : Nat) : RegisterValue → Option (IntW w)
