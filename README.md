@@ -135,3 +135,11 @@ The project is aimed at a sweet spot:
 - small enough that semantics and proofs stay readable
 - expressive enough to demonstrate real program refinement arguments
 - structured enough to grow toward richer LLVM features later
+
+## Acknowledgments
+
+This project reuses and adapts some code from
+[Lean-MLIR](https://github.com/opencompl/lean-mlir) and is also informed by
+prior LLVM formalization efforts such as
+[Vellvm](https://github.com/vellvm/vellvm), although no Vellvm code is included
+in this repository.

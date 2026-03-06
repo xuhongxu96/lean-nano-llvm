@@ -1,5 +1,6 @@
 /-
-Released under Apache 2.0 license as described in the LICENSE of Lean-MLIR.
+Adapted in part from Lean-MLIR.
+See LICENSE and NOTICE in this repository for licensing and attribution details.
 
 https://github.com/opencompl/lean-mlir
 -/

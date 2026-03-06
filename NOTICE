@@ -1,0 +1,19 @@
+lean-nano-llvm
+
+This project is licensed under the Apache License, Version 2.0.
+
+Portions of this project were copied from, adapted from, or inspired by
+Lean-MLIR:
+https://github.com/opencompl/lean-mlir
+
+In particular, some utility and semantics-related code in this repository was
+initially derived from Lean-MLIR and then modified for lean-nano-llvm.
+
+This project was also informed by prior LLVM formalization efforts such as
+Vellvm:
+https://github.com/vellvm/vellvm
+
+No Vellvm code is included in this repository.
+
+Additional modifications and original code in this repository are copyright
+their respective authors.
