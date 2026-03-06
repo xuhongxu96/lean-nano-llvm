@@ -145,6 +145,12 @@ def unexpandWidthConcrete : Unexpander
     `([llvm-type| $w:ident])
   | _ => throw ()
 
+@[app_unexpander Width.mvar]
+def unexpandWidthMVar : Unexpander
+  | `($_ ($n:num : Fin $_)) => `([llvm-type| i$ $n:num])
+  | `($_ $n:num) => `([llvm-type| i$ $n:num])
+  | _ => throw ()
+
 @[app_unexpander LlvmType.int]
 def unexpandLlvmTypeInt : Unexpander
   | `($_ $w) =>

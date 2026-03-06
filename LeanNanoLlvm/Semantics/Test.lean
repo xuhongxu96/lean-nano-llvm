@@ -237,4 +237,22 @@ theorem wfDefinition_argValuesIllFormed_wrongArity :
     ¬ Semantics.Definition.ArgValuesWellFormed wfDefinition [] := by
   simp [Semantics.Definition.ArgValuesWellFormed, wfDefinition]
 
+def wfDefinitionPoly : @AST.Definition 1 :=
+  [llvm-1-definition|
+    define i$0 @f(i$0 %a) {
+    entry:
+      %x = add i$0 %a, 1
+      ret i$0 %x
+    }
+  ]
+
+abbrev singletonWidths (w : Nat) : List.Vector Nat 1 := ⟨[w], by simp⟩
+
+theorem runInstantiatedDefinition_poly :
+    runInstantiatedDefinition (singletonWidths 8) wfDefinitionPoly [ .bv 8 (.value (2 : BitVec 8)) ]
+      = .ok (.bv 8 (.value (3 : BitVec 8))) := by
+  simp [runInstantiatedDefinition, denoteInstantiatedDefinition, singletonWidths, wfDefinitionPoly,
+    simp_llvm, simp_llvm_option]
+  rfl
+
 end

@@ -2,11 +2,27 @@ import LeanNanoLlvm.Util.ConcreteOrMVar
 
 namespace LeanNanoLlvm.AST
 
-abbrev Width (φ : Nat) := Nat
-abbrev Width.concrete : Nat -> Width φ := id
--- abbrev Width φ := ConcreteOrMVar Nat φ
--- abbrev Width.concrete : Nat -> Width φ := ConcreteOrMVar.concrete
--- abbrev Width.mvar : Fin φ -> Width φ := ConcreteOrMVar.mvar
+abbrev Width (φ : Nat) := ConcreteOrMVar Nat φ
+abbrev Width.concrete : Nat -> Width φ := ConcreteOrMVar.concrete
+abbrev Width.mvar : Fin φ -> Width φ := ConcreteOrMVar.mvar
+
+def Width.print : Width φ → String
+  | .concrete w => s!"i{w}"
+  | .mvar i => s!"i${i}"
+
+def Width.toNat? : Width φ → Option Nat
+  | .concrete w => some w
+  | .mvar _ => none
+
+@[simp]
+def Width.instantiate (ws : List.Vector Nat φ) : Width φ → Width 0
+  | w => .concrete <| ConcreteOrMVar.instantiate ws w
+
+@[simp]
+theorem Width.toNat?_concrete (w : Nat) : Width.toNat? (.concrete w : Width φ) = some w := rfl
+
+@[simp]
+theorem Width.toNat?_mvar (i : Fin φ) : Width.toNat? (.mvar i : Width φ) = none := rfl
 
 
 inductive RawId : Type where
@@ -87,6 +103,20 @@ def LlvmType.i (w : Width φ) : LlvmType φ := .int w
 abbrev LlvmType.i1 : LlvmType φ := .i 1
 abbrev LlvmType.i32 : LlvmType φ := .i 32
 
+mutual
+
+@[simp]
+def LlvmRetType.instantiateWidths (ws : List.Vector Nat φ) : LlvmRetType φ → LlvmRetType 0
+  | .void => .void
+  | .ret ty => .ret <| ty.instantiateWidths ws
+
+@[simp]
+def LlvmType.instantiateWidths (ws : List.Vector Nat φ) : LlvmType φ → LlvmType 0
+  | .int w => .int <| Width.instantiate ws w
+  | .function ret args => .function (ret.instantiateWidths ws) (args.map (LlvmType.instantiateWidths ws))
+
+end
+
 
 abbrev TypedIdentifier φ := Identifier × (LlvmType φ)
 
@@ -163,6 +193,46 @@ inductive TopLevelEntity where
 
 structure TopLevel (φ: Nat) where
   (entities : List (@TopLevelEntity φ))
+
+@[simp]
+def TypedExp.instantiateWidths (ws : List.Vector Nat φ) : TypedExp φ → TypedExp 0
+  | (ty, exp) => (ty.instantiateWidths ws, exp)
+
+@[simp]
+def Instruction.instantiateWidths (ws : List.Vector Nat φ) : @Instruction φ → @Instruction 0
+  | .intBinaryOp op t v1 v2 => .intBinaryOp op (t.instantiateWidths ws) v1 v2
+  | .conversionOp op fromTy v toTy => .conversionOp op (fromTy.instantiateWidths ws) v (toTy.instantiateWidths ws)
+  | .freeze (ty, v) => .freeze (ty.instantiateWidths ws, v)
+
+@[simp]
+def Terminator.instantiateWidths (ws : List.Vector Nat φ) : @Terminator φ → @Terminator 0
+  | .retVoid => .retVoid
+  | .ret tv => .ret <| tv.instantiateWidths ws
+
+@[simp]
+def Declaration.instantiateWidths (ws : List.Vector Nat φ) : @Declaration φ → @Declaration 0
+  | ⟨name, type⟩ => ⟨name, type.instantiateWidths ws⟩
+
+@[simp]
+def Code.instantiateWidths (ws : List.Vector Nat φ) : @Code φ → @Code 0
+  | code => code.map fun (instrId, instr) => (instrId, instr.instantiateWidths ws)
+
+@[simp]
+def Block.instantiateWidths (ws : List.Vector Nat φ) : @Block φ → @Block 0
+  | ⟨id, code, terminator⟩ => ⟨id, code.instantiateWidths ws, (terminator.fst, terminator.snd.instantiateWidths ws)⟩
+
+@[simp]
+def Definition.instantiateWidths (ws : List.Vector Nat φ) : @Definition φ → @Definition 0
+  | ⟨prototype, args, body⟩ => ⟨prototype.instantiateWidths ws, args, body.instantiateWidths ws⟩
+
+@[simp]
+def TopLevelEntity.instantiateWidths (ws : List.Vector Nat φ) : @TopLevelEntity φ → @TopLevelEntity 0
+  | .declaration decl => .declaration <| decl.instantiateWidths ws
+  | .definition defn => .definition <| defn.instantiateWidths ws
+
+@[simp]
+def TopLevel.instantiateWidths (ws : List.Vector Nat φ) : @TopLevel φ → @TopLevel 0
+  | ⟨entities⟩ => ⟨entities.map (TopLevelEntity.instantiateWidths ws)⟩
 
 end
 

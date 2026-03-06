@@ -49,6 +49,7 @@ elab "[llvm-instruction-id|" p:nanollvm_instruction_id "]" : term => elabNanoLlv
 declare_syntax_cat nanollvm_type
 scoped syntax "void" : nanollvm_type
 scoped syntax ident : nanollvm_type
+scoped syntax "i$" num : nanollvm_type
 scoped syntax nanollvm_type "(" nanollvm_type,* ")" : nanollvm_type
 
 mutual
@@ -64,6 +65,15 @@ partial def elabNanoLlvmType (φ : Nat) : Syntax → MetaM Expr
       | none   => throwError "Invalid LLVM integer type width: {s}"
     else
       throwUnsupportedSyntax
+
+  | `(nanollvm_type| i$ $n:num) => do
+    let idx := n.getNat
+    if h : idx < φ then
+      let i : Fin φ := ⟨idx, h⟩
+      let w ← mkAppM ``Width.mvar #[toExpr i]
+      mkAppM ``LlvmType.int #[w]
+    else
+      throwError "Width metavariable index {idx} out of bounds for φ = {φ}"
 
   | `(nanollvm_type| $ret:nanollvm_type ( $params:nanollvm_type,* )) => do
     let ty ← mkAppM ``LlvmType #[mkNatLit φ]

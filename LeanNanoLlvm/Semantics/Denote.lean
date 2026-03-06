@@ -11,7 +11,7 @@ variable {φ : Nat}
 
 @[simp_wellform]
 def RegisterValue.WellFormedFor : AST.LlvmType φ → RegisterValue → Prop
-  | .int wTy, .bv wVal _ => wTy = wVal
+  | .int (.concrete wTy), .bv wVal _ => wTy = wVal
   | _, _ => False
 
 @[simp_wellform]
@@ -19,6 +19,11 @@ def Definition.ArgValuesWellFormed (defn : @AST.Definition φ) (argVals : List R
   match defn.prototype.type with
   | .function _ argTys => List.Forall₂ RegisterValue.WellFormedFor argTys argVals
   | _ => False
+
+@[simp_llvm]
+private def expectConcreteWidth : AST.Width φ → NanoLlvmStateM Nat
+  | .concrete w => pure w
+  | .mvar i => throw s!"symbolic width {AST.Width.print (.mvar i)} is not executable; instantiate widths first"
 
 @[simp_llvm]
 def denoteIntBinaryOp {w : Nat} (op : AST.IntBinaryOp) (x y : IntW w) : IntW w :=
@@ -80,6 +85,7 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
   | .intBinaryOp op t v1 v2 => do
     match t with
     | .int w =>
+      let w ← expectConcreteWidth w
       match id with
       | .id id =>
         let v1 ← @denoteExp w v1
@@ -93,6 +99,8 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
   | .conversionOp op fromTy v toTy => do
     match fromTy, toTy with
     | .int fromW, .int toW =>
+      let fromW ← expectConcreteWidth fromW
+      let toW ← expectConcreteWidth toW
       match id with
       | .id id =>
         let v ← @denoteExp fromW v
@@ -109,6 +117,7 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
 
     match ty with
     | .int w =>
+      let w ← expectConcreteWidth w
       let exp ← @denoteExp w exp
       let res := freeze exp
       let st ← get
@@ -133,6 +142,7 @@ def bindDefinitionArgs :
   | (argTy :: restTys), (argId :: restIds), (argVal :: restVals) => do
       match argTy, argVal with
       | .int wTy, .bv wVal _v =>
+        let wTy ← expectConcreteWidth wTy
         if wTy = wVal then
           let st ← get
           let registers := st.registers.insert (.local_id argId) argVal
@@ -158,12 +168,28 @@ def denoteNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → N
           | .void => pure .void
           | _ => throw s!"Expected [{retTy.print}] as return type, but found void"
         | .ret ⟨.int w, exp⟩ =>
+          let w ← expectConcreteWidth w
           match retTy with
-          | .ret (.int w) =>
-            let exp ← @denoteExp w exp
-            pure (.bv w exp)
+          | .ret (.int retW) =>
+            let retW ← expectConcreteWidth retW
+            if h : retW = w then
+              let exp ← @denoteExp w exp
+              pure (.bv w (h ▸ exp))
+            else
+              throw s!"Expected [{retTy.print}] as return type, but found [i{w}]"
           | _ => throw s!"Expected [{retTy.print}] as return type, but found [i{w}]"
         | _ => throw s!"unsupported return: [{term.print}]"
     | ty => throw s!"Expected function type for the prototype of definition, but found [{ty.print}]"
+
+@[simp_llvm]
+def denoteInstantiatedDefinition (ws : List.Vector Nat φ) (defn : @AST.Definition φ)
+    (argVals : List RegisterValue) : NanoLlvmStateM RegisterValue :=
+  denoteNanoLlvmDefinition (defn.instantiateWidths ws) argVals
+
+@[simp_llvm]
+def runInstantiatedDefinition (ws : List.Vector Nat φ) (defn : @AST.Definition φ)
+    (args : List RegisterValue) (st : NanoLlvmState := default) : Except String RegisterValue := do
+  let (retval, _) ← (denoteInstantiatedDefinition ws defn args).run st
+  pure retval
 
 end LeanNanoLlvm.Semantics

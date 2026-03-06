@@ -7,7 +7,7 @@ def Identifier.print : Identifier → String
   | .local_id id => s!"%{id.ToString}"
 
 def LlvmType.print : LlvmType φ → String
-  | .int w => s!"{w}"
+  | .int w => w.print
   | .function .. => unreachable!
 
 def LlvmRetType.print : LlvmRetType φ → String

@@ -48,6 +48,7 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-instruction-id| void (3)]
 
 #check [llvm-64-type| i8]
+#check [llvm-64-type| i$0]
 #check [llvm-64-type| i8()]
 #check [llvm-64-type| i8(i32, i16)]
 #check [llvm-64-type| void(i32, i16)]
@@ -110,6 +111,14 @@ entry:
   %d = add i8 %2, %b
   freeze i8 %1
   ret void
+}
+]
+
+#check [llvm-2-definition|
+define i$0 @f(i$0 %a) {
+entry:
+  %1 = add i$0 %a, 0
+  ret i$0 %1
 }
 ]
 

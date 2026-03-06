@@ -36,6 +36,18 @@ def Code.definedIds : @Code φ → List LocalId
       | .void _ => Code.definedIds rest
 
 @[simp_wellform]
+def Width.CanTruncateTo (fromW toW : Width φ) : Prop :=
+  match fromW.toNat?, toW.toNat? with
+  | some fromW, some toW => toW < fromW
+  | _, _ => True
+
+@[simp_wellform]
+def Width.CanExtendTo (fromW toW : Width φ) : Prop :=
+  match fromW.toNat?, toW.toNat? with
+  | some fromW, some toW => fromW < toW
+  | _, _ => True
+
+@[simp_wellform]
 def Instruction.WellFormedWith (locals : List LocalId) (instrId : InstructionId) :
     @Instruction φ → Prop
   | .intBinaryOp _ (.int w) v1 v2 =>
@@ -50,9 +62,9 @@ def Instruction.WellFormedWith (locals : List LocalId) (instrId : InstructionId)
       ∧ v.WellFormedFor (.int fromW)
       ∧ v.WellScopedTo locals
       ∧ match op with
-        | .trunc _ _ => toW < fromW
-        | .zext _ => fromW < toW
-        | .sext => fromW < toW
+        | .trunc _ _ => fromW.CanTruncateTo toW
+        | .zext _ => fromW.CanExtendTo toW
+        | .sext => fromW.CanExtendTo toW
   | .conversionOp _ _ _ _ => False
   | .freeze ⟨.int w, v⟩ =>
       instrId.DefinesLocal

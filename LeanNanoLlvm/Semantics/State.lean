@@ -9,6 +9,7 @@ open Std
 inductive RegisterValue : Type where
   | bv (w : Nat) (val : IntW w)
   | void
+deriving DecidableEq
 
 instance : ToString RegisterValue where
   toString
