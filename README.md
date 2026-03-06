@@ -5,6 +5,29 @@ Lean formalization of a small, executable LLVM-like IR with parsing, printing, w
 At the core, this project lets you write tiny LLVM programs directly in Lean and prove program optimizations correct.
 
 ```lean
+theorem ret_add_x_0_refines_ret_x :
+  [llvm-definition|
+    define i8 @f(i8 %x) {
+    entry:
+      %x = add i8 %x, 0
+      ret i8 %x
+    }
+  ] ⊑ [llvm-definition|
+    define i8 @f(i8 %x) {
+    entry:
+      ret i8 %x
+    }
+  ] := by
+  -- ...
+```
+
+> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L50) for the full proof.
+>
+> This says: the program `x + 0` refines the program `x`, where `x` is a variable of type `i8` (a signed integer of width `8`).
+
+More interestingly, the project supports symbolic widths, so you can write one program with a symbolic width and prove a theorem that holds for every concrete width:
+
+```lean
 theorem ret_add_x_0_refines_ret_x_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f(i$0 %x) {
@@ -21,10 +44,11 @@ theorem ret_add_x_0_refines_ret_x_generic (w : Nat) :
     }
   ].instantiateWidths (singletonWidths w) := by
   -- ...
-  -- See <LeanNanoLlvm/Refinement/Test.lean> for the full proof.
 ```
 
-This says: for every bitwidth `w`, the program `x + 0` refines the program `x`,
+> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L83) for the full proof.
+>
+> This says: for every bitwidth `w`, the program `x + 0` refines the program `x`,
 where `x` is a variable of type `i$0` (a signed integer of width `w`).
 
 ## Why it is interesting
