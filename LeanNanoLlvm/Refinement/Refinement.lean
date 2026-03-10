@@ -102,14 +102,13 @@ theorem definition_signatureCompatible_iff (x y : @AST.Definition φ) :
 
 def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
   ∀ (args : List RegisterValue)
-    (undefs : Std.ExtHashMap AST.RawId RegisterValue)
     (ret : RegisterValue),
     AST.Definition.WellFormed x →
     AST.Definition.WellFormed y →
     Definition.SignatureCompatible x y →
     Semantics.Definition.ArgValuesWellFormed x args →
-    ((denoteNanoLlvmDefinition y args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret →
-    ((denoteNanoLlvmDefinition x args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret
+    ((denoteNanoLlvmDefinition y args).run default).map Prod.fst = .ok ret →
+    ((denoteNanoLlvmDefinition x args).run default).map Prod.fst = .ok ret
 
 instance : Refinement (@AST.Definition φ) where
   IsRefinedBy := Definition.IsRefinedBy
@@ -118,14 +117,13 @@ instance : Refinement (@AST.Definition φ) where
 theorem definition_isRefinedBy_iff (x y : @AST.Definition φ) :
     x ⊑ y ↔
       (∀ (args : List RegisterValue)
-        (undefs : Std.ExtHashMap AST.RawId RegisterValue)
         (ret : RegisterValue),
         AST.Definition.WellFormed x →
         AST.Definition.WellFormed y →
         Definition.SignatureCompatible x y →
         Semantics.Definition.ArgValuesWellFormed x args →
-        ((denoteNanoLlvmDefinition y args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret →
-        ((denoteNanoLlvmDefinition x args).run { (default : NanoLlvmState) with undefs := undefs }).map Prod.fst = .ok ret) := by
+        ((denoteNanoLlvmDefinition y args).run default).map Prod.fst = .ok ret →
+        ((denoteNanoLlvmDefinition x args).run default).map Prod.fst = .ok ret) := by
   rfl
 
 end LeanNanoLlvm.Refinement

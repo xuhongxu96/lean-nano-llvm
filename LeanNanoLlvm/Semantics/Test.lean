@@ -52,25 +52,6 @@ theorem add_two_i32_then_trunc_to_i8 : forall (a b : ℤ),
   simp [simp_llvm, simp_llvm_option]
   rfl
 
-@[simp]
-def stWithUndef0_i8_5 : NanoLlvmState :=
-  { registers := (default : NanoLlvmState).registers
-  , undefs := (default : NanoLlvmState).undefs.insert [llvm-rawid| 0] (.bv 8 (.value (5 : BitVec 8)))
-  }
-
-theorem add_with_assigned_undef_i8 :
-  (do
-    let (_, st) ← (denoteNanoLlvmCode (
-      [llvm-code| %y = add i8 undef, 1]
-    )).run stWithUndef0_i8_5
-
-    pure (match st.registers.get? [llvm-identifier| %y] with
-      | some (.bv 8 v) => some v
-      | _ => none)
-  ) = .ok (some (.value (6 : BitVec 8))) := by
-  simp [stWithUndef0_i8_5, simp_llvm, simp_llvm_option]
-  rfl
-
 theorem poison_propagates_through_add :
   (do
     let (_, st) ← (denoteNanoLlvmCode (
@@ -116,39 +97,11 @@ theorem freeze_of_poison_returns_zero_current_model :
   simp [simp_llvm, simp_llvm_option]
   rfl
 
-theorem freeze_of_assigned_undef_value :
-  (do
-    let (_, st) ← (denoteNanoLlvmCode (
-      [llvm-code| %f = freeze i8 undef]
-    )).run stWithUndef0_i8_5
-
-    pure (match st.registers.get? [llvm-identifier| %f] with
-      | some (.bv 8 v) => some v
-      | _ => none)
-  ) = .ok (some (.value (5 : BitVec 8))) := by
-  simp [stWithUndef0_i8_5, simp_llvm, simp_llvm_option]
-  rfl
-
 @[simp]
 def runDefinitionRet {φ : Nat} (d : @AST.Definition φ) (args : List RegisterValue)
     (st : NanoLlvmState := default) : Except String RegisterValue := do
   let (retval, _) ← (denoteNanoLlvmDefinition d args).run st
   pure retval
-
-theorem denote_definition_with_undef :
-  runDefinitionRet
-    [llvm-definition|
-      define i8 @f(i8 %a) {
-      entry:
-        %x = add i8 undef, %a
-        ret i8 %x
-      }
-    ]
-    [ .bv 8 (.value (1 : BitVec 8)) ]
-    stWithUndef0_i8_5
-    = .ok (.bv 8 (.value (6 : BitVec 8))) := by
-  simp [simp_llvm, simp_llvm_option]
-  rfl
 
 theorem denote_definition_freeze_poison :
   runDefinitionRet

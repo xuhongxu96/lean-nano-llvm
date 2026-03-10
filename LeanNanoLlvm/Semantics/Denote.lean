@@ -57,16 +57,7 @@ def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
   | .int x => pure (pure x)
   | .null => throw s!"`null` exp is not supported yet"
   | .undef rawid => do
-    let st ← get
-    match st.undefs.get? rawid with
-    | some val => match val with
-      | .bv w' val =>
-        if h: w = w' then
-          pure (h ▸ val)
-        else
-          throw s!"invalid width: expected [{w}], found [{w'}]"
-      | _ => throw s!"unsupported void value"
-    | none => throw s!"unassigned undef value for [{rawid}]"
+    throw s!"`undef` is not supported yet"
   | .poison => pure .poison
 
 @[simp_llvm]

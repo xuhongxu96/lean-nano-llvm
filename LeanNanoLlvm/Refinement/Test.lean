@@ -17,7 +17,7 @@ def addDef : @AST.Definition 0 := [llvm-definition|
 ]
 
 theorem addDef_refines_itself : addDef ⊑ addDef := by
-  intro args st retval _ _ _ _ h
+  intro args st retval _ _ _ h
   exact h
 
 
@@ -47,7 +47,7 @@ theorem ret_add_x_0_refines_ret_x :
       ret i8 %x
     }
   ] := by
-  intro args undefs retval hwfAdd hwfRet hsig hargs h
+  intro args retval hwfAdd hwfRet hsig hargs h
   cases args with
   | nil =>
       simp [Definition.ArgValuesWellFormed] at hargs
@@ -80,7 +80,7 @@ theorem ret_add_x_0_refines_ret_x_generic (w : Nat) :
       ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w) := by
-  intro args undefs retval hwfAdd hwfRet hsig hargs h
+  intro args retval hwfAdd hwfRet hsig hargs h
   cases args with
   | nil =>
       simp [Definition.ArgValuesWellFormed, singletonWidths] at hargs

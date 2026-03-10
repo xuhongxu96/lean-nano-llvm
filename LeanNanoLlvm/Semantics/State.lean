@@ -24,7 +24,6 @@ instance : ToString RegisterValue where
 
 structure NanoLlvmState : Type where
   (registers : ExtHashMap AST.Identifier RegisterValue)
-  (undefs : ExtHashMap AST.RawId RegisterValue)
   -- TODO: memory
   -- (memory : ExtHashMap MemoryAddress MemoryValue)
 
