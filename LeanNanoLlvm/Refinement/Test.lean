@@ -1,5 +1,6 @@
 import LeanNanoLlvm.Refinement
 import LeanNanoLlvm.AST.Syntax
+import LeanNanoLlvm.AST.Unexpander
 
 namespace LeanNanoLlvm.Refinement
 
@@ -66,13 +67,6 @@ theorem ret_add_x_0_is_refined_by_ret_x :
 
 abbrev singletonWidths (w : Nat) : List.Vector Nat 1 := ⟨[w], by simp⟩
 
-private theorem bitvec_double_eq_mul_two_generic {w : Nat} (b : BitVec w) :
-    b + b = b * (2 : BitVec w) := by
-  apply BitVec.eq_of_toFin_eq
-  apply Fin.ext
-  simp [Fin.val_add, Fin.val_mul, BitVec.toFin_ofNat]
-  rw [← Nat.two_mul b.toNat, Nat.mul_comm]
-
 theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   open scoped LeanNanoLlvm.AST.Syntax in
   [llvm-1-definition|
@@ -116,6 +110,29 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
             simp_all [singletonWidths, simp_llvm, simp_wellform]
         | cons arg' rest' =>
             simp [Definition.ArgValuesWellFormed, singletonWidths] at hargs
+
+private theorem bitvec_double_eq_mul_two_generic {w : Nat} (b : BitVec w) :
+    b + b = b * (2 : BitVec w) := by
+  apply BitVec.eq_of_toFin_eq
+  apply Fin.ext
+  simp [Fin.val_add, Fin.val_mul, BitVec.toFin_ofNat]
+  rw [← Nat.two_mul b.toNat, Nat.mul_comm]
+
+private theorem bitvec_mul_two_ne_one_generic {w : Nat} (hpos : 0 < w) (b : BitVec w) :
+    b * (2 : BitVec w) ≠ BitVec.ofNat w 1 := by
+  intro h
+  have hval :
+      (((b * (2 : BitVec w)).toFin : Fin (2 ^ w)) : Nat) =
+        (((BitVec.ofNat w 1).toFin : Fin (2 ^ w)) : Nat) := by
+    simp_all
+  simp [Fin.val_mul, BitVec.toFin_ofNat] at hval
+  have hmod := congrArg (fun n => n % 2) hval
+  have hright : (1 % 2 ^ w) % 2 = 1 := by
+    cases w with
+    | zero => cases Nat.not_lt_zero _ hpos
+    | succ n =>
+      simp
+  simp [hright] at hmod
 
 open scoped LeanNanoLlvm.AST.Syntax in
 @[simp]
@@ -232,26 +249,6 @@ def undefMul2Def8 : @AST.Definition 0 := [llvm-definition|
   }
 ]
 
-private theorem bitvec8_double_eq_mul_two (b : BitVec 8) :
-    b + b = b * (2 : BitVec 8) := by
-  apply BitVec.eq_of_toFin_eq
-  apply Fin.ext
-  simp [Fin.val_add, Fin.val_mul, BitVec.toFin_ofNat]
-  rw [← Nat.two_mul b.toNat, Nat.mul_comm]
-
-private theorem bitvec8_mul_two_ne_one (b : BitVec 8) :
-    b * (2 : BitVec 8) ≠ (1 : BitVec 8) := by
-  intro h
-  have hval : (((b * (2 : BitVec 8)).toFin : Fin 256) : Nat) = (((1 : BitVec 8).toFin : Fin 256) : Nat) := by
-    simpa using congrArg Fin.val (congrArg BitVec.toFin h)
-  simp [Fin.val_mul, BitVec.toFin_ofNat] at hval
-  have hmod := congrArg (fun n => n % 2) hval
-  have hleft : ((b.toNat * 2) % 256) % 2 = 0 := by
-    rw [show 256 = 128 * 2 by rfl, Nat.mod_mul_left_mod]
-    rw [Nat.mul_mod]
-    simp
-  simp [hleft] at hmod
-
 theorem undef_add_is_refined_by_undef_mul2_i8 : undefAddDef8 ⊑ undefMul2Def8 := by
   intro args hwfAdd hwfMul hsig hargs
   constructor
@@ -295,7 +292,7 @@ theorem undef_add_is_refined_by_undef_mul2_i8 : undefAddDef8 ⊑ undefMul2Def8 :
               Except.ok (RegisterValue.bv 8 (.value ((BitVec.ofNat 8 x) + (BitVec.ofNat 8 x)))) := by
           simp [simp_llvm]
           rfl
-        simp_all [bitvec8_double_eq_mul_two]
+        simp_all [bitvec_double_eq_mul_two_generic]
     | cons arg rest =>
       simp [Definition.ArgValuesWellFormed] at hargs
 
@@ -329,23 +326,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_i8 : ¬ (undefMul2Def8 ⊑ undefA
         simp [simp_llvm]
         rfl
       simp_all
-      exact bitvec8_mul_two_ne_one _ hmulRun.symm
-
-private theorem bitvec_mul_two_ne_one_generic {w : Nat} (hpos : 0 < w) (b : BitVec w) :
-    b * (2 : BitVec w) ≠ BitVec.ofNat w 1 := by
-  intro h
-  have hval :
-      (((b * (2 : BitVec w)).toFin : Fin (2 ^ w)) : Nat) =
-        (((BitVec.ofNat w 1).toFin : Fin (2 ^ w)) : Nat) := by
-    simp_all
-  simp [Fin.val_mul, BitVec.toFin_ofNat] at hval
-  have hmod := congrArg (fun n => n % 2) hval
-  have hright : (1 % 2 ^ w) % 2 = 1 := by
-    cases w with
-    | zero => cases Nat.not_lt_zero _ hpos
-    | succ n =>
-      simp
-  simp [hright] at hmod
+      exact bitvec_mul_two_ne_one_generic (by simp) _ hmulRun.symm
 
 open scoped LeanNanoLlvm.AST.Syntax in
 theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
@@ -435,5 +416,74 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
         simp_all [bitvec_double_eq_mul_two_generic]
     | cons arg rest =>
       simp [Definition.ArgValuesWellFormed] at hargs
+
+open scoped LeanNanoLlvm.AST.Syntax in
+theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) :
+  ¬ ([llvm-1-definition|
+    define i$0 @f() {
+      entry:
+        %x = mul i$0 undef, 2
+        ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w)
+  ⊑
+  [llvm-1-definition|
+    define i$0 @f() {
+      entry:
+        %x = add i$0 undef, undef
+        ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w)) := by
+  intro h
+  have haddRun :
+      runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+        define i$0 @f() {
+          entry:
+            %x = add i$0 undef, undef
+            ret i$0 %x
+        }
+      ].instantiateWidths (singletonWidths w)) []) default
+        ({ supplyChain := [1, 0], supplyIndex := 0 }) =
+      Except.ok (RegisterValue.bv w (.value (BitVec.ofNat w 1))) := by
+    simp [simp_llvm]
+    change Except.ok (RegisterValue.bv w (.value ((BitVec.ofNat w 1) + (BitVec.ofNat w 0)))) =
+      Except.ok (RegisterValue.bv w (.value (BitVec.ofNat w 1)))
+    simp
+  obtain ⟨u', hu'⟩ := (h []
+    (by simp [simp_wellform])
+    (by simp [simp_wellform])
+    (by rfl)
+    (by simp [Definition.ArgValuesWellFormed, simp_wellform])
+    ).2 [1, 0] (RegisterValue.bv w (.value (BitVec.ofNat w 1))) haddRun
+  cases u' with
+  | nil =>
+      have hnil :
+          runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+            define i$0 @f() {
+              entry:
+                %x = mul i$0 undef, 2
+                ret i$0 %x
+            }
+          ].instantiateWidths (singletonWidths w)) []) default
+            ({ supplyChain := [], supplyIndex := 0 }) =
+          Except.error "" := by
+        simp
+        rfl
+      simp_all
+  | cons x xs =>
+      have hmulRun :
+          runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+            define i$0 @f() {
+              entry:
+                %x = mul i$0 undef, 2
+                ret i$0 %x
+            }
+          ].instantiateWidths (singletonWidths w)) []) default
+            ({ supplyChain := x :: xs, supplyIndex := 0 }) =
+          Except.ok (RegisterValue.bv w (.value ((BitVec.ofNat w x) * (2 : BitVec w)))) := by
+        simp [simp_llvm]
+        rfl
+      simp_all
+      exact bitvec_mul_two_ne_one_generic hpos _ hmulRun.symm
 
 end LeanNanoLlvm.Refinement
