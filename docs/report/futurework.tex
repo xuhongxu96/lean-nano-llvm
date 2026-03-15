@@ -1,0 +1,41 @@
+\section{Future Work}
+\label{sec:futurework}
+
+There are several natural next steps.
+
+\myparagraph{Extend the \ir fragment.}
+The most obvious direction is to add the features from the proposal that are
+still missing: memory, pointers, \texttt{load}, \texttt{store},
+\texttt{select}, and eventually limited control flow. Doing this well would
+require revisiting both the state model and the well-formedness judgments.
+
+\myparagraph{Implement a real optimizer layer.}
+The current project proves refinement between hand-written pairs of
+definitions. A next step is to define a syntax-directed peephole optimizer and
+prove that each rewrite it performs is sound with respect to the existing
+refinement relation. The current theorem library provides a starting point for
+that.
+
+\myparagraph{Improve the model of \poison and \vundef.}
+The current \vundef supply is explicit and useful, but not fully faithful to
+\llvm. Likewise, \texttt{freeze} is simplified. A stronger future project would
+study a more principled semantics for these features and compare it against the
+current executable approximation.
+
+\myparagraph{Develop proof automation.}
+At the moment, proofs are still mostly hand-guided. There is room for tactics
+or theorem schemas that discharge routine refinement obligations automatically,
+especially once more optimization patterns are added.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\proj does not yet verify a realistic fragment of all
+of \llvm, and it does not implement the full optimizer-oriented roadmap set out
+in the proposal. What it does provide is a compact, readable, executable \lean
+formalization in which small \llvm-like programs can be written directly,
+instantiated at arbitrary widths, executed, and related by machine-checked
+refinement proofs. In particular, the project now supports examples involving
+symbolic widths and explicit \vundef behavior, which turned out to be a richer
+and more educational result than a purely arithmetic toy model would have
+been.

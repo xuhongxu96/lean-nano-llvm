@@ -1,0 +1,44 @@
+Compiler optimizations are easy to state informally and surprisingly hard to
+get exactly right. This is particularly true for \llvm, whose intermediate
+representation carries subtle semantic concepts such as \poison,
+\vundef, integer overflow flags, and target-independent bitvector behavior.
+Production optimization passes such as \instcombine are large, heavily
+engineered, and known to be bug-prone~\cite{yang2011finding}. Tools such as
+\alive~\cite{lopes2021alive2} demonstrate that formal reasoning can be
+practical for many optimization patterns, while projects such as
+\vellvm~\cite{zhao2012formalizing} and \leanmlir~\cite{bhat2024verifying}
+show that proof assistants can support much deeper semantic developments.
+
+This project explores that space from a deliberately smaller angle. The goal
+was not to compete with full \llvm formalizations, but to learn how to build
+an executable semantics and machine-checked refinement proofs in \lean for a
+carefully chosen fragment. The final artifact is
+\proj, a compact \lean library in which one can write
+small \llvm-like programs directly in \lean, instantiate symbolic widths,
+execute the resulting definitions, and prove refinement theorems between
+definitions.
+
+The project is best introduced through the kind of theorems it supports. One
+example is a width-generic algebraic identity: for every width~\texttt{w},
+\texttt{add i\$0 \%x, 0} is refined by \texttt{return \%x},
+where \texttt{i\$0} is a symbolic width and \texttt{\%x} is a symbolic variable.
+Another example is more semantic and interesting: for every width~\texttt{w},
+\texttt{add i\$0 undef, undef} is refined by \texttt{mul i\$0 undef, 2} in the
+project's explicit-\vundef model, meaning every value produced by the
+right-hand side is already allowed by the left-hand side. These statements are not just comments or
+unit tests; they are theorems checked by \lean against the executable
+semantics.
+
+The final system differs in several ways from the original proposal. The
+proposal aimed at a somewhat broader \llvm fragment, including memory
+operations such as \texttt{load} and \texttt{store}, and suggested building a
+small optimizer function and then proving it sound. Under the available time,
+We instead focused on constructing a coherent core: abstract syntax, embedded
+surface syntax, width instantiation, well-formedness, semantics,
+\vundef handling, and refinement proofs for representative examples. This
+decision reduced scope, but it also produced a more complete and better
+understood semantic artifact than a partially finished optimizer would have.
+
+The rest of this report explains what was built, how the proofs were carried
+out, where the design was intentionally simplified, what parts of the
+proposal were not completed, and what we learned from the process.

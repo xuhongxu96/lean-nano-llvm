@@ -1,0 +1,37 @@
+\section{Lessons Learned}
+\label{sec:lessons}
+
+This project clarified a few points that were not obvious at the proposal
+stage. The main lessons concern where the real complexity lives, which design
+choices most improved proof development, and how scope control affected the
+quality of the final artifact.
+
+\myparagraph{Semantic Modeling}
+The first lesson is that semantic modeling dominates everything else. Before
+this project, we expected the interesting work to be mostly in proving algebraic
+rewrites. In practice, the deeper work was deciding what counts as a program,
+what counts as a well-formed input, what exactly execution returns, and how
+refinement should quantify over semantic effects such as \vundef. Once these
+choices were made well, many individual proofs became much easier.
+
+\myparagraph{Executable Semantics}
+The second lesson is that executable semantics is a powerful proving aid.
+Because the semantics reduces by computation, small examples can often be
+proved by simplification after the surrounding proof obligations are arranged
+correctly. This reinforced an appealing idea about proof assistants: one does
+not always have to reason \emph{about} an interpreter abstractly if one can
+also reason \emph{with} the interpreter computationally.
+
+\myparagraph{Surface Syntax}
+The third lesson is that surface syntax matters even in a proof project.
+Readable theorem statements changed our willingness to experiment. It was much
+easier to explore optimization ideas when we could write something that looked
+like \llvm rather than deeply nested constructors.
+
+\myparagraph{Scope Control}
+The fourth lesson is more personal. We learned that there is value in
+narrowing scope early and doing so explicitly. The proposal was useful because
+it forced us to think ambitiously, but the implemented project improved once we
+accepted that finishing memory, optimizer infrastructure, and proofs all at
+once would likely produce a weaker result. Focusing on a smaller but tighter
+artifact was not merely damage control; it was a real design improvement.

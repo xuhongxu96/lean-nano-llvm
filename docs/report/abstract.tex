@@ -1,0 +1,18 @@
+Formal methods have been increasingly applied to verify the correctness of compiler optimizations,
+ensuring that transformations preserve program semantics.
+This report describes the implementation of \proj,
+a \lean formalization of a small executable \llvm-like intermediate
+representation (\ir) with symbolic integer widths, a surface syntax embedded in
+\lean, denotational semantics, structural well-formedness checks, and
+machine-checked refinement proofs.
+
+Two examples illustrate the result. First, the project proves that
+\texttt{add x, 0} is refined by \texttt{return x} both at a fixed width and for all
+instantiations of a symbolic width. Second, the project models \vundef using
+an explicit supply of values and proves a width-generic theorem relating
+\texttt{add undef, undef} and \texttt{mul undef, 2}, showing that the latter
+is a more defined target behavior than the former. These examples capture
+what the project ultimately achieved well: not a broad model of all of
+\llvm, but a small, readable, executable framework in which subtle semantic
+issues such as symbolic widths, \poison, and \vundef can already be studied
+with machine-checked proofs.

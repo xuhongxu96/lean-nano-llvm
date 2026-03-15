@@ -1,0 +1,154 @@
+\section{System Overview}
+\label{sec:system}
+
+The codebase is organized around four connected layers: syntax, static
+well-formedness, executable semantics, and refinement. Together they support
+the workflow ``write a small \llvm-like definition, execute it, and prove that
+one definition is refined by another.''
+
+\subsection{Abstract Syntax and Embedded Surface Syntax}
+
+The core syntax lives in the \texttt{AST} modules. The project defines \lean
+data types for widths, identifiers, types, expressions, instructions,
+terminators, blocks, and single-block function definitions. The supported
+instruction forms are intentionally small: integer binary operations,
+selected integer conversions, and \texttt{freeze}. This is enough to express
+the example optimizations and to surface some of the semantic issues that
+make \llvm optimization correctness subtle.
+
+One design decision that paid off early was to support a concrete surface
+syntax inside \lean rather than constructing every example through raw
+constructors. Quasiquoters are introduced to let the theorems look very
+close to the \llvm syntax they are about, such as \texttt{[llvm-definition| ... ]}.
+The syntax layer also supports symbolic widths,
+written for example as \texttt{i\$0}, where the \texttt{\$0} is a
+metavariable slot.
+This means that a theorem can be stated
+once and later instantiated at any concrete width.
+
+The syntax support is not limited to parsing. The project also includes
+printing and unexpansion support, so the embedded syntax is reasonably
+round-trippable and readable in the \lean environment. This matters for a
+project of this size: readability directly affects how easy it is to inspect
+the generated terms and maintain the proof scripts.
+
+\subsection{Symbolic Widths}
+
+A central technical choice was to reuse the
+\texttt{ConcreteOrMVar} datatype from \leanmlir to represent widths.
+A width is either concrete, such as
+\texttt{i8}, or a metavariable slot such as \texttt{i\$0}. Widths can then be
+instantiated by a vector of natural numbers. This design gives the project a
+useful middle ground. It is not fully dependent over width constraints, but
+it is much more expressive than hard-coding one width at a time.
+
+This choice directly supports one of the most attractive parts of the
+project: width-generic theorems. Instead of proving the same identity again
+for \texttt{i8}, \texttt{i16}, and \texttt{i32}, we can state one theorem over
+a symbolic-width definition and instantiate it. This kept the project small
+without making it trivial.
+
+\subsection{Well-Formedness}
+
+The semantics is only intended to run on structurally sensible definitions,
+so we added explicit well-formedness predicates. Expressions are checked for
+type compatibility and local scoping. Instructions are checked against the
+expected operand types. Code checks enforce that instruction identifiers are
+defined once and then become available in scope for later instructions.
+Definitions check prototype shape, argument counts, duplicate argument names,
+instruction well-formedness, and the compatibility of the terminator with the
+declared return type.
+
+This static layer is intentionally modest. It is not a full typing judgment
+with theorem-proved preservation properties. However, it serves two practical
+purposes. First, it makes the refinement theorem state cleaner by separating
+semantic behavior from obviously malformed programs. Second, it prevents many
+proofs from devolving into low-level bookkeeping about ill-scoped or
+ill-typed examples.
+
+\subsection{Executable Semantics}
+
+The semantic layer interprets definitions in a state monad. The visible state
+currently consists only of registers, stored in a hash map from identifiers to
+register values. Register values are either bitvectors paired with a width or
+\texttt{void}.
+
+Expressions denote integer values of a chosen width. Integer literals and
+booleans are embedded into bitvectors, identifiers look up register state, and
+\poison propagates through the integer semantics already provided in the
+utility layer. Executing a definition binds its arguments, interprets the code
+line by line, and then interprets the return terminator.
+
+The semantics is executable in the strong sense that a fully instantiated
+definition can be run from \lean and returns a concrete \texttt{Except}
+result. This turned out to be valuable well beyond testing. Because the
+semantic functions reduce under simplification, many small proof goals can be
+discharged by computation rather than by manually replaying every semantic
+step.
+
+\subsection{Explicit \texttt{undef} Supply}
+
+The newest and most interesting semantic feature is explicit \vundef
+handling. Initially, \vundef was not supported in the executable semantics.
+The final system introduces a separate supply state that stores a list of
+natural numbers together with a current index. Encountering \vundef during
+evaluation draws the next value from that supply and coerces it to the
+requested bitvector width.
+
+This is not intended to be a perfect model of \llvm's nondeterminism.
+Instead, it is a pragmatic executable approximation that makes it possible to
+state concrete refinement theorems involving \vundef and to inspect how many
+\vundef choices a computation consumes. Importantly, this design forced the
+refinement relation to become more explicit as well, because observable
+behavior now depends on the chosen \vundef supply.
+
+\subsection{Refinement}
+
+The project defines refinement semantically on function definitions. In
+essence, \texttt{x~$\sqsubseteq$~y} has two parts. First, if the source
+definition \texttt{x} is defined for every \vundef supply, then the target
+definition \texttt{y} must also be defined for every \vundef supply. Second,
+every concrete return value produced by the target definition \texttt{y} must
+already be producible by the source definition \texttt{x}, assuming both
+definitions are well formed, have compatible signatures, and are run on
+well-formed arguments.
+
+For the current \vundef model, the definition quantifies over the \vundef
+supplies used to run the two sides separately. This makes the refinement
+relation slightly unusual, but it matches the explicit-supply execution model
+and was sufficient to prove the theorems in the repository.
+
+\small
+\begin{leanlisting}
+def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
+  ∀ (args : List RegisterValue),
+    AST.Definition.WellFormed x →
+    AST.Definition.WellFormed y →
+    Definition.SignatureCompatible x y →
+    Semantics.Definition.ArgValuesWellFormed x args →
+    (((∀ (u : UndefChain), ∃ (ret_x : RegisterValue),
+        runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u, 0⟩ = .ok ret_x) →
+      (∀ (u' : UndefChain), ∃ (ret_y : RegisterValue),
+        runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
+      (∀ (u : UndefChain) (ret : RegisterValue),
+        runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
+        ∃ u',
+          runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret))
+\end{leanlisting}
+\normalsize
+
+This definition is worth reading from top to bottom. The outer quantification
+ranges over concrete argument lists, together with the side conditions that
+both definitions are structurally well formed, have compatible signatures, and
+are run on well-formed source arguments. The body then splits into two
+semantic clauses.
+
+The first clause is the definedness condition. If the source definition
+\texttt{x} can return some value for every \vundef supply, then the target
+definition \texttt{y} must also be able to return some value for every
+\vundef supply. The second clause is the value condition. It quantifies over
+successful target executions and asks that every concrete return value
+produced by \texttt{y} must already be reproducible by \texttt{x}, possibly
+under a different \vundef supply. This asymmetry is what allows the target to
+be more defined than the source without introducing any genuinely new
+observable behavior.

@@ -1,0 +1,85 @@
+\section{Discussion}
+\label{sec:discussion}
+
+In this section we reflect on the design decisions and trade-offs that
+shaped the project.
+We also compare the delivered artifact to the original proposal and
+explain why they differ.
+
+\subsection{Design Decisions}
+
+\subsubsection{Focus on Definitions, Not an Optimizer Pass}
+
+A major shift was to focus on proving relationships between concrete
+definitions instead of implementing an optimizer function first. This made the
+project more semantic and less algorithmic than originally planned. In
+retrospect, that was the right choice. The hard part was not writing a toy
+rewrite function. The hard part was deciding what its correctness should mean
+in the presence of widths, \poison, and \vundef, and then making that notion
+executable enough to support proofs.
+
+By proving refinement directly between definitions, we could separate the
+semantic core from the eventual question of how to enumerate or apply
+optimization patterns. A future optimizer can be built on top of this
+infrastructure instead of in parallel with it.
+
+\subsubsection{Executable Simplification of \texttt{undef}}
+
+Modeling \vundef was the most delicate design choice. A faithful model of full
+\llvm nondeterminism is not easy.
+The explicit supply model is a simplification, but it gave the project something
+valuable: a concrete and inspectable operational account of how \vundef
+choices are consumed. It also made it possible to formulate and prove the
+width-generic \vundef theorem that is now one of the strongest examples in the
+repository.
+
+The downside is clear. The current model is not the full \llvm story. The
+refinement relation is correspondingly tuned to this supply-based semantics.
+This is a sound choice for the artifact as implemented, but it should not be
+oversold as a definitive formalization of \llvm \vundef behavior.
+
+\subsubsection{Major Differences from the Proposal}
+
+The proposal described a broader subset of \llvm, including memory
+operations, a small optimizer function, and proof obligations closer to
+``\texttt{optimize p} is refined by \texttt{p}.'' The delivered system is narrower.
+It has no memory model, no \texttt{load} or \texttt{store}, no
+\texttt{select}, no multi-block control flow, and no standalone optimizer
+pass.
+
+This was not an accident or a loss of interest. It was a response to what the
+project actually demanded once the implementation started. Even a tiny
+\llvm-like semantics is full of choices: value representations, width
+handling, scoping, the role of \poison, the shape of \vundef, and the form of
+the refinement theorem. Building these pieces carefully took more effort than
+the proposal made visible. We chose to finish a coherent core artifact rather
+than spread the time thinly across a larger feature list.
+
+
+\subsection{What Was Achieved and What Was Not}
+
+The main achievements are:
+\begin{itemize}
+  \item an abstract syntax for a small \llvm-like \ir with symbolic widths;
+  \item \lean quasiquoters and unexpansion support for readable examples;
+  \item explicit well-formedness checks for definitions and arguments;
+  \item executable denotational semantics for the implemented fragment;
+  \item an explicit-supply model of \vundef;
+  \item a semantic refinement relation over definitions; and
+  \item machine-checked refinement theorems, including width-generic examples.
+\end{itemize}
+
+The main missing pieces relative to the proposal are equally important to say
+plainly:
+\begin{itemize}
+  \item no memory model;
+  \item no \texttt{load}, \texttt{store}, or pointer reasoning;
+  \item no optimizer function that traverses programs and rewrites them;
+  \item no proof that such an optimizer is globally sound;
+  \item no control flow beyond a single basic block; and
+  \item no fully faithful treatment of all \llvm undefined-behavior corners.
+\end{itemize}
+
+We view this as a successful partial completion rather than a failed broad one.
+The delivered artifact is smaller than proposed, but it is real, executable,
+and logically integrated.

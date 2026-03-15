@@ -1,0 +1,119 @@
+\documentclass[acmsmall,nonacm]{acmart}
+\settopmatter{printfolios=true}
+
+\input{../template/macro/pluverse-preamble.tex}
+\input{constants}
+\input{../template/macro/pluverse-preamble-end.tex}
+
+\DeclareUnicodeCharacter{2291}{\ensuremath{\sqsubseteq}}
+
+\definecolor{leanKeyword}{HTML}{0B5CAD}
+\definecolor{leanComment}{HTML}{3F7D20}
+\definecolor{leanString}{HTML}{B24A1B}
+\definecolor{leanSymbol}{HTML}{7A3E9D}
+\definecolor{llvmKeyword}{HTML}{8A4F08}
+
+\lstdefinelanguage{lean4}{
+  sensitive=true,
+  alsoletter={_,'-},
+  morekeywords={
+    abbrev,axiom,by,calc,case,def,deriving,do,else,end,example,export,
+    extending,forall,fun,have,if,import,in,inductive,infix,infixl,infixr,
+    initialize,instance,let,macro,match,mutual,namespace,noncomputable,
+    notation,opaque,open,partial,postfix,prefix,private,protected,public,
+    theorem,then,termination_by,variable,variables,where,with,structure,
+    class,set_option,attribute
+  },
+  morekeywords=[2]{Type,Prop,Nat,Int,Bool,String,Option,List,Except,Fin,BitVec},
+  morekeywords=[3]{
+    define,entry,ret,add,mul,sub,udiv,sdiv,urem,srem,and,or,xor,shl,lshr,ashr,
+    icmp,select,br,phi,call,alloca,load,store,extractvalue,insertvalue,
+    trunc,zext,sext,undef,poison
+  },
+  morekeywords=[4]{llvm-definition,llvm-1-definition},
+  morecomment=[l]{--},
+  morecomment=[s]{/-}{-/},
+  morestring=[b]",
+  literate=
+    {¬}{{$\neg$}}1
+    {∀}{{$\forall$}}1
+    {∃}{{$\exists$}}1
+    {∧}{{$\land$}}1
+    {⊑}{{$\sqsubseteq$}}1
+    {→}{{$\to$}}1
+    {←}{{$\leftarrow$}}1
+    {·}{{$\cdot$}}1
+    {=>}{{$\Rightarrow$}}2
+    {≤}{{$\le$}}1
+    {≥}{{$\ge$}}1
+    {≠}{{$\neq$}}1
+    {⟨}{{$\langle$}}1
+    {⟩}{{$\rangle$}}1
+    {φ}{{$\varphi$}}1,
+}
+
+\lstdefinestyle{lean4}{
+  language=lean4,
+  tabsize=2,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  escapechar=~,
+  basicstyle=\footnotesize\ttfamily,
+  keywordstyle=\color{leanKeyword}\bfseries,
+  keywordstyle=[2]\color{leanSymbol}\bfseries,
+  keywordstyle=[3]\color{llvmKeyword}\bfseries,
+  keywordstyle=[4]\color{leanSymbol}\bfseries,
+  commentstyle=\color{leanComment},
+  stringstyle=\color{leanString},
+}
+
+\lstnewenvironment{leanlisting}[1][]{
+  \lstset{style=lean4,#1}
+}{}
+
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    \normalfont B\kern-0.5em{\scshape i\kern-0.25em b}\kern-0.8em\TeX}}}
+
+\title{Verified Peephole Optimizer for Arithmetic
+Expressions in Lean 4}
+
+\author{Hongxu Xu}
+\affiliation{%
+  \institution{Cheriton School of Computer Science, University of Waterloo}
+  \city{Waterloo}
+  \country{Canada}}
+\email{hongxu.xu@uwaterloo.ca}
+
+\keywords{Formal Methods, Compiler Optimization, LLVM, Lean4}
+
+\begin{document}
+
+\begin{abstract}
+\input{abstract}
+\end{abstract}
+
+\maketitle
+
+\section{Introduction}
+\label{sec:introduction}
+\input{introduction}
+
+\input{system}
+
+\input{proofs}
+
+\input{discussion}
+
+\input{lessons}
+
+\input{futurework}
+
+\bibliographystyle{ACM-Reference-Format}
+\balance
+\bibliography{../proposal/acmart}
+
+\end{document}

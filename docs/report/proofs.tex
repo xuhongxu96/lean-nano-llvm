@@ -1,0 +1,223 @@
+\section{Constructing Machine-Checked Proofs}
+\label{sec:proofs}
+
+The core proof pattern in this project is semantic rather than syntactic.
+Instead of proving correctness of a global optimizer function, we state a
+refinement theorem directly between two definitions and unfold the semantic
+interpretation enough to show that whenever the target program on the
+right-hand side returns some value, the source program on the left-hand side
+can already return that same value as well.
+
+\subsection{A Simple Refinement: \texttt{add x, 0}}
+
+The simplest examples are algebraic identities such as:
+\small
+\begin{leanlisting}
+theorem ret_add_x_0_is_refined_by_ret_x :
+  [llvm-definition|
+    define i8 @f(i8 %x) {
+    entry:
+      %x = add i8 %x, 0
+      ret i8 %x
+    }
+  ] ⊑ [llvm-definition|
+    define i8 @f(i8 %x) {
+    entry:
+      ret i8 %x
+    }
+  ] := by
+  ...
+\end{leanlisting}
+\normalsize
+
+The shape of the proof is straightforward but still instructive. We first
+introduce the refinement assumptions: arguments, return value,
+well-formedness of both definitions, signature compatibility, and
+well-formedness of argument values. Then we case-split on the input argument
+list to discard impossible shapes. Finally, the actual semantic goal reduces
+to a bitvector fact that simplification can solve.
+
+This style scales well to a width-generic variant because width instantiation
+is explicit in the syntax and semantics. The theorem
+\texttt{ret\_add\_x\_0\_is\_refined\_by\_ret\_x\_generic} shows that the same proof
+idea survives after replacing a fixed width by a symbolic width parameter.
+Here \texttt{llvm-1-definition} denotes a quasiquoter for definitions with one
+symbolic width parameter, later instantiated by \texttt{singletonWidths w}.
+\small
+\begin{leanlisting}
+theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
+  [llvm-1-definition|
+    define i$0 @f(i$0 %x) {
+    entry:
+      %x = add i$0 %x, 0
+      ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w)
+  ⊑
+  [llvm-1-definition|
+    define i$0 @f(i$0 %x) {
+    entry:
+      ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w) := by
+  ...
+\end{leanlisting}
+\normalsize
+
+\subsection{A More Interesting Refinement: \texttt{undef}}
+
+The more distinctive example is the theorem relating
+\texttt{add undef, undef} and \texttt{mul undef, 2}. In the current project
+this theorem is stated for every instantiated width:
+\small
+\begin{leanlisting}
+theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
+  [llvm-1-definition|
+    define i$0 @f() {
+      entry:
+        %x = add i$0 undef, undef
+        ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w)
+  ⊑
+  [llvm-1-definition|
+    define i$0 @f() {
+      entry:
+        %x = mul i$0 undef, 2
+      ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w) := by
+  ...
+\end{leanlisting}
+\normalsize
+
+What makes this theorem interesting is that it is not simply an algebraic
+identity on the same input value. The two occurrences of \vundef on the left
+may resolve independently, while the one occurrence on the right resolves to a
+single concrete value. Since the left-hand side is the source and the
+right-hand side is the target, the proof uses the refinement definition's
+existential freedom on the left-hand-side supply. Given a supply for the
+multiplication program, the proof constructs a matching supply for the
+addition program by repeating the observed choice. The arithmetic lemma then
+shows that doubling a bitvector by addition yields the same result as
+multiplication by two.
+\small
+\begin{leanlisting}[numbers=left,xleftmargin=0.75em]
+  intro args hwfAdd hwfMul hsig hargs ~\label{line:undef-proof-intro}~
+  constructor
+  · intro hdefined u' ~\label{line:undef-proof-definedness}~
+    cases args with ~\label{line:undef-proof-args}~
+    | nil => ~\label{line:undef-proof-nil-args}~
+      have hnil : False := by
+        have hrun : ... = Except.error "" := by ~\label{line:undef-proof-empty-supply}~
+          simp
+          rfl
+        obtain ⟨ret_x, hret_x⟩ := hdefined []
+        simp_all
+      exact False.elim hnil
+    | cons arg rest => ~\label{line:undef-proof-impossible-args}~
+      simp [Definition.ArgValuesWellFormed] at hargs
+  · intro u hRet h ~\label{line:undef-proof-value}~
+    cases u with ~\label{line:undef-proof-supply-split}~
+    | nil =>
+        have hnil : ... = Except.error "" := by
+          simp
+          rfl
+        simp_all
+    | cons x xs => ~\label{line:undef-proof-cons-supply}~
+      have hmulRun : ... =
+          Except.ok (RegisterValue.bv w
+            (.value ((BitVec.ofNat w x) * (2 : BitVec w)))) := by ~\label{line:undef-proof-hmul}~
+        simp [simp_llvm]
+        rfl
+      refine ⟨[x, x], ?_⟩ ~\label{line:undef-proof-witness}~
+      have haddRun : ... =
+          Except.ok (RegisterValue.bv w
+            (.value ((BitVec.ofNat w x) + (BitVec.ofNat w x)))) := by ~\label{line:undef-proof-hadd}~
+        simp [simp_llvm]
+        rfl
+      simp_all [bitvec_double_eq_mul_two_generic] ~\label{line:undef-proof-simpall}~
+\end{leanlisting}
+\normalsize
+
+The proof proceeds in four steps.
+\begin{enumerate}
+  \item At line~\ref{line:undef-proof-intro}, the script introduces the refinement
+    hypotheses. The constructor immediately splits the goal into the
+    definedness obligation at line~\ref{line:undef-proof-definedness} and the
+    value-preservation obligation at line~\ref{line:undef-proof-value}. Within the
+    definedness branch, the argument list is inspected at
+    line~\ref{line:undef-proof-args}; since the function takes no arguments, the
+    impossible nonempty case at line~\ref{line:undef-proof-impossible-args} is
+    discharged from \texttt{Definition.ArgValuesWellFormed}.
+  \item The definedness argument is resolved by contradiction in the empty
+    argument branch at line~\ref{line:undef-proof-nil-args}. The auxiliary run fact
+    \texttt{hrun} at line~\ref{line:undef-proof-empty-supply} shows that the source
+    program \texttt{add undef, undef} fails on the empty supply. That
+    contradicts the hypothesis \texttt{hdefined}, which claims success for
+    every supply, so \texttt{simp\_all} closes the branch.
+  \item The value-preservation branch begins at
+    lines~\ref{line:undef-proof-value} and \ref{line:undef-proof-supply-split}. After the
+    trivial empty-supply case, the interesting branch is the nonempty target
+    supply \texttt{x :: xs} at line~\ref{line:undef-proof-cons-supply}. The fact
+    \texttt{hmulRun} at line~\ref{line:undef-proof-hmul} computes the target run as
+    multiplication by two. The witness chosen at
+    line~\ref{line:undef-proof-witness} is the source supply \texttt{[x, x]},
+    forcing both occurrences of \vundef to resolve to the same concrete value.
+    The fact \texttt{haddRun} at line~\ref{line:undef-proof-hadd} then computes the
+    matching source result as \texttt{x + x}.
+  \item At line~\ref{line:undef-proof-simpall}, \texttt{simp\_all} combines the
+    execution hypothesis with the two concrete run facts and reduces the
+    remaining goal to the arithmetic identity
+    \texttt{BitVec.ofNat w x + BitVec.ofNat w x = BitVec.ofNat w x * 2}, which
+    is discharged by the helper lemma below.
+\end{enumerate}
+
+For reference, the helper lemma used in the final step is:
+\small
+\begin{leanlisting}
+private theorem bitvec_double_eq_mul_two_generic {w : Nat} (b : BitVec w) :
+    b + b = b * (2 : BitVec w) := by
+  ...
+\end{leanlisting}
+\normalsize
+Its proof is routine bitvector arithmetic and is omitted from the report.
+
+This example captures an important lesson from the project: once \vundef is
+present, even very small optimization theorems stop being purely local
+rewrites. The proof has to say something precise about how nondeterministic
+choices line up between the two sides. Making that alignment explicit was one
+of the main conceptual advances of the final stage of the project.
+
+The generic story is also sharp in the opposite direction. For positive
+widths, the converse refinement fails:
+\small
+\begin{leanlisting}
+theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) :
+  ¬ ([llvm-1-definition|
+    define i$0 @f() {
+      entry:
+        %x = mul i$0 undef, 2
+        ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w)
+  ⊑
+  [llvm-1-definition|
+    define i$0 @f() {
+      entry:
+        %x = add i$0 undef, undef
+        ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w)) := by
+  ...
+\end{leanlisting}
+\normalsize
+
+The counterexample is simple. The addition program can return
+\texttt{BitVec.ofNat w 1} using the supply \texttt{[1, 0]}, because the two
+\vundef occurrences are chosen independently. Any execution of
+\texttt{mul undef, 2}, however, returns a value of the form \texttt{b * 2}, and
+the helper lemma \texttt{bitvec\_mul\_two\_ne\_one\_generic} shows that such a
+result can never equal \texttt{1} when \texttt{0 < w}. So the asymmetry in the
+refinement relation is not an artifact of a fixed-width example; it persists
+uniformly across all positive bitwidths.
