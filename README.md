@@ -54,32 +54,6 @@ theorem undef_add_refines_undef_mul2_generic (w : Nat) :
 > This says: for every instantiated bitwidth `w`, `add undef, undef` refines `mul undef, 2`
 > in the project's explicit-`undef` model.
 
-The project also supports width-generic algebraic optimizations:
-
-```lean
-theorem ret_add_x_0_refines_ret_x_generic (w : Nat) :
-  [llvm-1-definition|
-    define i$0 @f(i$0 %x) {
-    entry:
-      %x = add i$0 %x, 0
-      ret i$0 %x
-    }
-  ].instantiateWidths (singletonWidths w)
-  ⊑
-  [llvm-1-definition|
-    define i$0 @f(i$0 %x) {
-    entry:
-      ret i$0 %x
-    }
-  ].instantiateWidths (singletonWidths w) := by
-  -- ...
-```
-
-> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L53) for the full proof.
->
-> This says: for every bitwidth `w`, the program `x + 0` refines the program `x`,
-where `x` is a variable of type `i$0` (a signed integer of width `w`).
-
 ## Why it is interesting
 
 - Arbitrary-width refinement proofs: write one symbolic-width program and prove a theorem for every concrete width.
