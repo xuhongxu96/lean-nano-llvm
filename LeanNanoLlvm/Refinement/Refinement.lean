@@ -89,9 +89,14 @@ variable {φ : Nat}
 /--
 Semantic refinement on LLVM definitions.
 
-`x ⊑ y` means every successful observable behavior of `y` is also a successful
-observable behavior of `x` under the same well-typed input arguments and initial state,
-assuming both definitions are themselves well formed.
+`x ⊑ y` has two components.
+
+1. Definedness: if the source `x` can successfully return some value for every
+   `undef` supply, then the target `y` must also be able to successfully
+   return some value for every `undef` supply.
+2. Value refinement: every concrete return value produced by the target `y`
+   must already be producible by the source `x`, possibly under a different
+   `undef` supply.
 -/
 def Definition.SignatureCompatible (x y : @AST.Definition φ) : Prop :=
   x.prototype.type = y.prototype.type
@@ -102,16 +107,19 @@ theorem definition_signatureCompatible_iff (x y : @AST.Definition φ) :
   rfl
 
 def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
-  ∀ (args : List RegisterValue)
-    (ret : RegisterValue),
+  ∀ (args : List RegisterValue),
     AST.Definition.WellFormed x →
     AST.Definition.WellFormed y →
     Definition.SignatureCompatible x y →
     Semantics.Definition.ArgValuesWellFormed x args →
-    (∀ (u : UndefChain),
-      runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
-      ∃ u',
-        runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret)
+    (((∀ (u : UndefChain), ∃ (ret_x : RegisterValue),
+        runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u, 0⟩ = .ok ret_x) →
+      (∀ (u' : UndefChain), ∃ (ret_y : RegisterValue),
+        runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
+      (∀ (u : UndefChain) (ret : RegisterValue),
+        runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
+        ∃ u',
+          runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret))
 
 instance : Refinement (@AST.Definition φ) where
   IsRefinedBy := Definition.IsRefinedBy
@@ -119,16 +127,19 @@ instance : Refinement (@AST.Definition φ) where
 @[simp_denote]
 theorem definition_isRefinedBy_iff (x y : @AST.Definition φ) :
     x ⊑ y ↔
-      (∀ (args : List RegisterValue)
-        (ret : RegisterValue),
+      (∀ (args : List RegisterValue),
         AST.Definition.WellFormed x →
         AST.Definition.WellFormed y →
         Definition.SignatureCompatible x y →
         Semantics.Definition.ArgValuesWellFormed x args →
-        (∀ (u : UndefChain),
-          runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
-          ∃ u',
-            runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret)) := by
+        (((∀ (u : UndefChain), ∃ (ret_x : RegisterValue),
+            runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u, 0⟩ = .ok ret_x) →
+          (∀ (u' : UndefChain), ∃ (ret_y : RegisterValue),
+            runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
+          (∀ (u : UndefChain) (ret : RegisterValue),
+            runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
+            ∃ u',
+              runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret))) := by
   rfl
 
 end LeanNanoLlvm.Refinement

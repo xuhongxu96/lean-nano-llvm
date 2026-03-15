@@ -7,7 +7,7 @@ At the core, this project lets you write tiny LLVM programs directly in Lean and
 This project is a research and experimentation artifact, not a production LLVM verification toolchain.
 
 ```lean
-theorem ret_add_x_0_refines_ret_x :
+theorem ret_add_x_0_is_refined_by_ret_x :
   [llvm-definition|
     define i8 @f(i8 %x) {
     entry:
@@ -23,14 +23,15 @@ theorem ret_add_x_0_refines_ret_x :
   -- ...
 ```
 
-> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L22) for the full proof.
+> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L25) for the full proof.
 >
-> This says: the program `x + 0` refines the program `x`, where `x` is a variable of type `i8` (a signed integer of width `8`).
+> This theorem says: the program `x + 0` is refined by the program `x`,
+> where `x` is a variable of type `i8` (a signed integer of width `8`).
 
 It also supports symbolic widths and explicit `undef`, so you can prove width-generic theorems about nondeterministic behavior:
 
 ```lean
-theorem undef_add_refines_undef_mul2_generic (w : Nat) :
+theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f() {
       entry:
@@ -49,10 +50,16 @@ theorem undef_add_refines_undef_mul2_generic (w : Nat) :
   -- ...
 ```
 
-> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L303) for the full proof.
+> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L351) for the full proof.
 >
-> This says: for every instantiated bitwidth `w`, `add undef, undef` refines `mul undef, 2`
-> in the project's explicit-`undef` model.
+> Here `x ⊑ y` has two parts: if the source program `x` is defined for every
+> `undef` supply then the target program `y` must also be defined for every
+> supply, and every value successfully produced by the target program `y` must
+> already be producible by the source program `x` under some supply.
+>
+> In this example, that means: for every instantiated bitwidth `w`, every value produced by the
+> target program `mul undef, 2` is already allowed by the source program
+> `add undef, undef`.
 
 ## Why it is interesting
 
@@ -74,7 +81,7 @@ theorem undef_add_refines_undef_mul2_generic (w : Nat) :
 - Width instantiation from symbolic programs to concrete programs
 - Denotational semantics for integer expressions and single-block definitions
 - Explicit `undef` supply threading for execution and proofs
-- A refinement relation for proving one definition refines another across `undef` choices
+- A refinement relation with both definedness and value components: if the source `x` is defined for every `undef` supply then so is the target `y`, and every value produced by `y` must already be allowed by `x`
 
 ## Small executable example
 
