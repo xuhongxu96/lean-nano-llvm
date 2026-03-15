@@ -12,8 +12,8 @@ section
 open scoped LeanNanoLlvm.AST.Syntax
 
 def runCodeToMsg {φ : Nat} (c : @LeanNanoLlvm.AST.Code φ) (resKey : AST.Identifier) : String :=
-  match (denoteNanoLlvmCode c).run default with
-  | .ok (_, st) => s!"ok: {st.registers.get? resKey}"
+  match runNanoLlvmStateMWithState (denoteNanoLlvmCode c) with
+  | .ok ((_, st), _) => s!"ok: {st.registers.get? resKey}"
   | .error e => s!"error: {e}"
 
 #eval runCodeToMsg [llvm-code|
@@ -23,10 +23,10 @@ def runCodeToMsg {φ : Nat} (c : @LeanNanoLlvm.AST.Code φ) (resKey : AST.Identi
 
 theorem add_two_i32 : forall (a b : ℤ),
   (do
-    let (_, st) ← (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
       [llvm-code| %1 = add i32 <a:int>, <b:int>]
-    )).run default
-
+    )
+    )
     pure (match st.registers.get? [llvm-identifier| %1] with
       | some (.bv 32 v) => some v
       | _ => none)
@@ -35,73 +35,74 @@ theorem add_two_i32 : forall (a b : ℤ),
   simp [simp_llvm]
   rfl
 
+
 theorem add_two_i32_then_trunc_to_i8 : forall (a b : ℤ),
   (do
-    let (_, st) ← (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
       [llvm-code|
         %1 = add i32 <a:int>, <b:int>
         %2 = trunc i32 %1 to i8
       ]
-    )).run default
+    ))
 
     pure (match st.registers.get? [llvm-identifier| %2] with
       | some (.bv 8 v) => some v
       | _ => none)
   ) = .ok (some (.value ((a : BitVec 32) + (b : BitVec 32) |>.setWidth 8))) := by
   intros
-  simp [simp_llvm, simp_llvm_option]
+  simp [simp_llvm]
   rfl
+
 
 theorem poison_propagates_through_add :
   (do
-    let (_, st) ← (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
       [llvm-code|
         %p = add nsw i8 127, 1
         %y = add i8 %p, 1
       ]
-    )).run (default : NanoLlvmState)
+    ))
 
     pure (match st.registers.get? [llvm-identifier| %y] with
       | some (.bv 8 v) => some v
       | _ => none)
   ) = .ok (some (.poison)) := by
-  simp [simp_llvm, simp_llvm_option]
+  simp [simp_llvm]
   rfl
 
 theorem freeze_of_nonpoison_is_identity :
   (do
-    let (_, st) ← (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
       [llvm-code| %f = freeze i8 7]
-    )).run (default : NanoLlvmState)
+    ))
 
     pure (match st.registers.get? [llvm-identifier| %f] with
       | some (.bv 8 v) => some v
       | _ => none)
   ) = .ok (some (.value (7 : BitVec 8))) := by
-  simp [simp_llvm, simp_llvm_option]
+  simp [simp_llvm]
   rfl
 
 theorem freeze_of_poison_returns_zero_current_model :
   (do
-    let (_, st) ← (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
       [llvm-code|
         %p = add nsw i8 127, 1
         %f = freeze i8 %p
       ]
-    )).run (default : NanoLlvmState)
+    ))
 
     pure (match st.registers.get? [llvm-identifier| %f] with
       | some (.bv 8 v) => some v
       | _ => none)
   ) = .ok (some (.value (0 : BitVec 8))) := by
-  simp [simp_llvm, simp_llvm_option]
+  simp [simp_llvm]
   rfl
 
 @[simp]
 def runDefinitionRet {φ : Nat} (d : @AST.Definition φ) (args : List RegisterValue)
     (st : NanoLlvmState := default) : Except String RegisterValue := do
-  let (retval, _) ← (denoteNanoLlvmDefinition d args).run st
-  pure retval
+  runNanoLlvmStateM (denoteNanoLlvmDefinition d args) st
 
 theorem denote_definition_freeze_poison :
   runDefinitionRet
@@ -115,7 +116,7 @@ theorem denote_definition_freeze_poison :
     ]
     []
     = .ok (.bv 8 (.value (0 : BitVec 8))) := by
-  simp [simp_llvm, simp_llvm_option]
+  simp [simp_llvm]
   rfl
 
 theorem denote_definition_ret_void :
@@ -128,7 +129,7 @@ theorem denote_definition_ret_void :
     ]
     []
     = .ok .void := by
-  simp [simp_llvm, simp_llvm_option]
+  simp [simp_llvm]
   rfl
 
 def wfDefinition : @AST.Definition 0 :=
@@ -202,8 +203,7 @@ theorem runInstantiatedDefinition_poly :
     }
   ] [ .bv 8 (.value (2 : BitVec 8)) ]
       = .ok (.bv 8 (.value (3 : BitVec 8))) := by
-  simp [runInstantiatedDefinition, denoteInstantiatedDefinition, singletonWidths,
-    simp_llvm, simp_llvm_option]
+  simp [simp_llvm]
   rfl
 
 end

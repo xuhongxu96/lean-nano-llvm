@@ -1,6 +1,6 @@
 # lean-nano-llvm
 
-Lean formalization of a small, executable LLVM-like IR with parsing, printing, wellformedness, denotational semantics, and refinement proofs.
+Lean formalization of a small, executable LLVM-like IR with parsing, printing, wellformedness, denotational semantics, explicit `undef` modeling, and refinement proofs.
 
 At the core, this project lets you write tiny LLVM programs directly in Lean and prove program optimizations correct.
 
@@ -23,11 +23,38 @@ theorem ret_add_x_0_refines_ret_x :
   -- ...
 ```
 
-> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L50) for the full proof.
+> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L22) for the full proof.
 >
 > This says: the program `x + 0` refines the program `x`, where `x` is a variable of type `i8` (a signed integer of width `8`).
 
-More interestingly, the project supports symbolic widths, so you can write one program with a symbolic width and prove a theorem that holds for every concrete width:
+It also supports symbolic widths and explicit `undef`, so you can prove width-generic theorems about nondeterministic behavior:
+
+```lean
+theorem undef_add_refines_undef_mul2_generic (w : Nat) :
+  [llvm-1-definition|
+    define i$0 @f() {
+      entry:
+        %x = add i$0 undef, undef
+        ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w)
+  ⊑
+  [llvm-1-definition|
+    define i$0 @f() {
+      entry:
+        %x = mul i$0 undef, 2
+        ret i$0 %x
+    }
+  ].instantiateWidths (singletonWidths w) := by
+  -- ...
+```
+
+> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L303) for the full proof.
+>
+> This says: for every instantiated bitwidth `w`, `add undef, undef` refines `mul undef, 2`
+> in the project's explicit-`undef` model.
+
+The project also supports width-generic algebraic optimizations:
 
 ```lean
 theorem ret_add_x_0_refines_ret_x_generic (w : Nat) :
@@ -48,7 +75,7 @@ theorem ret_add_x_0_refines_ret_x_generic (w : Nat) :
   -- ...
 ```
 
-> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L83) for the full proof.
+> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L53) for the full proof.
 >
 > This says: for every bitwidth `w`, the program `x + 0` refines the program `x`,
 where `x` is a variable of type `i$0` (a signed integer of width `w`).
@@ -72,11 +99,12 @@ where `x` is a variable of type `i$0` (a signed integer of width `w`).
 - Symbolic widths via `ConcreteOrMVar`, so widths can be reused across return types, argument types, and instructions
 - Width instantiation from symbolic programs to concrete programs
 - Denotational semantics for integer expressions and single-block definitions
-- A refinement relation for proving one definition refines another
+- Explicit `undef` supply threading for execution and proofs
+- A refinement relation for proving one definition refines another across `undef` choices
 
 ## Small executable example
 
-The project can also execute instantiated symbolic programs. The theorem in [Semantics/Test.lean](LeanNanoLlvm/Semantics/Test.lean#L251) proves:
+The project can also execute instantiated symbolic programs. The theorem in [Semantics/Test.lean](LeanNanoLlvm/Semantics/Test.lean#L197) proves:
 
 ```lean
 runInstantiatedDefinition (singletonWidths 8) [llvm-1-definition|
@@ -99,6 +127,7 @@ Currently, the IR supports:
 - function types
 - integer binary operations such as `add`
 - conversions such as `trunc`, `zext`, `sext`
+- `undef` values via an explicit external supply
 - `freeze` (turns `poison` to `0`, which may not be exactly the same as LLVM)
 - `ret`
 - single basic block function bodies
@@ -114,8 +143,8 @@ This is not a full LLVM model. Important current limitations:
 - No loads, stores, pointers, or aliasing reasoning
 - No calls, external effects, or interprocedural semantics
 - No phi nodes
-- No poison/undef completeness story close to full LLVM
-- No first-class refinement interface for unknown `undef` inputs; refinement currently quantifies over an explicit `undef` environment
+- `undef` is modeled by an explicit supply of concrete values, not LLVM's full nondeterministic semantics
+- `freeze` currently maps `poison` to `0`, which is a simplification of LLVM behavior
 - Execution requires concrete widths; symbolic-width programs must be instantiated before running
 
 ## Build

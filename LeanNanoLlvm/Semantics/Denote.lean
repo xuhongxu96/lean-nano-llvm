@@ -9,6 +9,19 @@ open Std
 
 variable {φ : Nat}
 
+
+@[simp]
+def UndefMToStateT {α : Type} [Inhabited α] (a : UndefM α α) :
+    StateT (SupplyState α) (Except String) α := fun st =>
+  match a.run st with
+  | .ok res => pure res
+  | .error _ => throw ""
+
+@[simp_llvm]
+def genUndef {w : Nat} : NanoLlvmStateM (BitVec w) := do
+  let n : Nat ← StateT.lift <| UndefMToStateT (UndefM.undef : UndefM Nat Nat)
+  pure (BitVec.ofNat w n)
+
 @[simp_llvm]
 private def expectConcreteWidth : AST.Width φ → NanoLlvmStateM Nat
   | .concrete w => pure w
@@ -56,8 +69,8 @@ def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
     else throw s!"invalid width: expected [{w}], found [1] (bool)"
   | .int x => pure (pure x)
   | .null => throw s!"`null` exp is not supported yet"
-  | .undef rawid => do
-    throw s!"`undef` is not supported yet"
+  | .undef _rawid => do
+    pure (.value (← genUndef))
   | .poison => pure .poison
 
 @[simp_llvm]
@@ -169,7 +182,12 @@ def denoteInstantiatedDefinition (ws : List.Vector Nat φ) (defn : @AST.Definiti
 @[simp_llvm]
 def runInstantiatedDefinition (ws : List.Vector Nat φ) (defn : @AST.Definition φ)
     (args : List RegisterValue) (st : NanoLlvmState := default) : Except String RegisterValue := do
-  let (retval, _) ← (denoteInstantiatedDefinition ws defn args).run st
-  pure retval
+  runNanoLlvmStateM (denoteInstantiatedDefinition ws defn args) st
+
+@[simp_llvm]
+def runInstantiatedDefinitionWithUndef (ws : List.Vector Nat φ) (defn : @AST.Definition φ)
+    (args : List RegisterValue) (st : NanoLlvmState := default) (uState : UndefState := default)
+    : Except String RegisterValue :=
+  runNanoLlvmStateM (denoteInstantiatedDefinition ws defn args) st uState
 
 end LeanNanoLlvm.Semantics

@@ -9,6 +9,7 @@ import LeanNanoLlvm.Tactic
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.Semantics.Denote
 import LeanNanoLlvm.Semantics.Wellformed
+import LeanNanoLlvm.Util.Undef
 import Mathlib.Order.Defs.Unbundled
 
 /--
@@ -107,8 +108,10 @@ def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
     AST.Definition.WellFormed y →
     Definition.SignatureCompatible x y →
     Semantics.Definition.ArgValuesWellFormed x args →
-    ((denoteNanoLlvmDefinition y args).run default).map Prod.fst = .ok ret →
-    ((denoteNanoLlvmDefinition x args).run default).map Prod.fst = .ok ret
+    (∀ (u : UndefChain),
+      runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
+      ∃ u',
+        runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret)
 
 instance : Refinement (@AST.Definition φ) where
   IsRefinedBy := Definition.IsRefinedBy
@@ -122,8 +125,10 @@ theorem definition_isRefinedBy_iff (x y : @AST.Definition φ) :
         AST.Definition.WellFormed y →
         Definition.SignatureCompatible x y →
         Semantics.Definition.ArgValuesWellFormed x args →
-        ((denoteNanoLlvmDefinition y args).run default).map Prod.fst = .ok ret →
-        ((denoteNanoLlvmDefinition x args).run default).map Prod.fst = .ok ret) := by
+        (∀ (u : UndefChain),
+          runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
+          ∃ u',
+            runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret)) := by
   rfl
 
 end LeanNanoLlvm.Refinement
