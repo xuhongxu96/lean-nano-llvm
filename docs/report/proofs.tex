@@ -6,7 +6,9 @@ Instead of proving correctness of a global optimizer function, we state a
 refinement theorem directly between two definitions and unfold the semantic
 interpretation enough to show that whenever the target program on the
 right-hand side returns some value, the source program on the left-hand side
-can already return that same value as well.
+can either return that same value exactly or justify it through the
+poison-aware register-value refinement relation. In most proofs in this
+repository, the exact-equality branch is enough.
 
 \subsection{A Simple Refinement: \texttt{add x, 0}}
 
@@ -100,7 +102,8 @@ existential freedom on the left-hand-side supply. Given a supply for the
 multiplication program, the proof constructs a matching supply for the
 addition program by repeating the observed choice. The arithmetic lemma then
 shows that doubling a bitvector by addition yields the same result as
-multiplication by two.
+multiplication by two, so the proof can use the exact-equality branch of the
+refinement disjunction.
 \small
 \begin{leanlisting}[numbers=left,xleftmargin=0.75em]
   intro args hwfAdd hwfMul hsig hargs ~\label{line:undef-proof-intro}~
@@ -130,7 +133,7 @@ multiplication by two.
             (.value ((BitVec.ofNat w x) * (2 : BitVec w)))) := by ~\label{line:undef-proof-hmul}~
         simp [simp_llvm]
         rfl
-      refine ⟨[x, x], ?_⟩ ~\label{line:undef-proof-witness}~
+      refine ⟨[x, x], Or.inl, ?_⟩ ~\label{line:undef-proof-witness}~
       have haddRun : ... =
           Except.ok (RegisterValue.bv w
             (.value ((BitVec.ofNat w x) + (BitVec.ofNat w x)))) := by ~\label{line:undef-proof-hadd}~
@@ -163,7 +166,9 @@ The proof proceeds in four steps.
     \texttt{hmulRun} at line~\ref{line:undef-proof-hmul} computes the target run as
     multiplication by two. The witness chosen at
     line~\ref{line:undef-proof-witness} is the source supply \texttt{[x, x]},
-    forcing both occurrences of \vundef to resolve to the same concrete value.
+    forcing both occurrences of \vundef to resolve to the same concrete value;
+    the proof then enters the left branch of the refinement disjunction,
+    corresponding to exact return equality.
     The fact \texttt{haddRun} at line~\ref{line:undef-proof-hadd} then computes the
     matching source result as \texttt{x + x}.
   \item At line~\ref{line:undef-proof-simpall}, \texttt{simp\_all} combines the

@@ -25,7 +25,8 @@ where \texttt{i\$0} is a symbolic width and \texttt{\%x} is a symbolic variable.
 Another example is more semantic and interesting: for every width~\texttt{w},
 \texttt{add i\$0 undef, undef} is refined by \texttt{mul i\$0 undef, 2} in the
 project's explicit-\vundef model, meaning every value produced by the
-right-hand side is already allowed by the left-hand side. These statements are not just comments or
+right-hand side is either returned exactly by the left-hand side or justified
+by the refinement relation's poison-aware value clause. These statements are not just comments or
 unit tests; they are theorems checked by \lean against the executable
 semantics.
 

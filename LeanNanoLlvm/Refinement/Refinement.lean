@@ -106,6 +106,48 @@ theorem definition_signatureCompatible_iff (x y : @AST.Definition φ) :
     Definition.SignatureCompatible x y ↔ x.prototype.type = y.prototype.type := by
   rfl
 
+/--
+Return-value refinement for the current executable semantics.
+
+A source poison integer return allows any target integer return of the same
+width. Non-poison bitvector returns and `void` must match exactly.
+-/
+@[simp]
+def RegisterValue.IsRefinedBy : RegisterValue → RegisterValue → Prop
+  | .bv w_x .poison, .bv w_y _ => w_x = w_y
+  | .bv w_x (.value v_x), .bv w_y (.value v_y) => ∃ h : w_x = w_y, h ▸ v_x = v_y
+  | .void, .void => True
+  | _, _ => False
+
+@[simp_denote]
+theorem registerValue_isRefinedBy_iff (x y : RegisterValue) :
+    RegisterValue.IsRefinedBy x y ↔
+      match x, y with
+      | .bv w_x .poison, .bv w_y _ => w_x = w_y
+      | .bv w_x (.value v_x), .bv w_y (.value v_y) => ∃ h : w_x = w_y, h ▸ v_x = v_y
+      | .void, .void => True
+      | _, _ => False := by
+  cases x <;> cases y <;> rfl
+
+def Definition.ReturnValuesRefined (x : @AST.Definition φ) (args : List RegisterValue)
+    (_u : UndefChain) (ret : RegisterValue) : Prop :=
+  ∃ u',
+    runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
+      ∃ ret_x,
+        runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
+          RegisterValue.IsRefinedBy ret_x ret
+
+@[simp_denote]
+theorem definition_returnValuesRefined_iff (x : @AST.Definition φ) (args : List RegisterValue)
+    (u : UndefChain) (ret : RegisterValue) :
+    Definition.ReturnValuesRefined x args u ret ↔
+      ∃ u',
+        runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
+          ∃ ret_x,
+            runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
+              RegisterValue.IsRefinedBy ret_x ret := by
+  rfl
+
 def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
   ∀ (args : List RegisterValue),
     AST.Definition.WellFormed x →
@@ -118,8 +160,7 @@ def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
         runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
       (∀ (u : UndefChain) (ret : RegisterValue),
         runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
-        ∃ u',
-          runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret))
+        Definition.ReturnValuesRefined x args u ret))
 
 instance : Refinement (@AST.Definition φ) where
   IsRefinedBy := Definition.IsRefinedBy
@@ -138,8 +179,7 @@ theorem definition_isRefinedBy_iff (x y : @AST.Definition φ) :
             runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
           (∀ (u : UndefChain) (ret : RegisterValue),
             runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
-            ∃ u',
-              runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret))) := by
+            Definition.ReturnValuesRefined x args u ret))) := by
   rfl
 
 end LeanNanoLlvm.Refinement

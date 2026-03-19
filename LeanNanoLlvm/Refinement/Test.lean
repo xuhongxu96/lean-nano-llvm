@@ -21,7 +21,7 @@ theorem addDef_is_refined_by_itself : addDef ⊑ addDef := by
   constructor
   · simp_all
   · intro u ret h
-    exact ⟨u, h⟩
+    exact ⟨u, Or.inl h⟩
 
 theorem ret_add_x_0_is_refined_by_ret_x :
   open scoped LeanNanoLlvm.AST.Syntax in
@@ -188,7 +188,7 @@ theorem undef_add_is_refined_by_undef_mul2 : undefAddDef ⊑ undefMul2Def := by
               Except.ok (RegisterValue.bv 1 (.value (0 : BitVec 1))) := by
           simp [simp_llvm]
           rfl
-        refine ⟨[x, x], ?_⟩
+        refine ⟨[x, x], Or.inl ?_⟩
         have haddRun :
             runNanoLlvmStateM (denoteNanoLlvmDefinition undefAddDef []) default ({ supplyChain := [x, x], supplyIndex := 0 }) =
               Except.ok (RegisterValue.bv 1 (.value ((BitVec.ofNat 1 x) + (BitVec.ofNat 1 x)))) := by
@@ -285,7 +285,7 @@ theorem undef_add_is_refined_by_undef_mul2_i8 : undefAddDef8 ⊑ undefMul2Def8 :
               Except.ok (RegisterValue.bv 8 (.value ((BitVec.ofNat 8 x) * (2 : BitVec 8)))) := by
           simp [simp_llvm]
           rfl
-        refine ⟨[x, x], ?_⟩
+        refine ⟨[x, x], Or.inl ?_⟩
         have haddRun :
             runNanoLlvmStateM (denoteNanoLlvmDefinition undefAddDef8 []) default
               ({ supplyChain := [x, x], supplyIndex := 0 }) =
@@ -326,7 +326,8 @@ theorem undef_mul2_is_not_refined_by_undef_add_i8 : ¬ (undefMul2Def8 ⊑ undefA
         simp [simp_llvm]
         rfl
       simp_all
-      exact bitvec_mul_two_ne_one_generic (by simp) _ hmulRun.symm
+      have hcontra := bitvec_mul_two_ne_one_generic (by simp) (BitVec.ofNat 8 x)
+      contradiction
 
 open scoped LeanNanoLlvm.AST.Syntax in
 theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
@@ -400,7 +401,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
               Except.ok (RegisterValue.bv w (.value ((BitVec.ofNat w x) * (2 : BitVec w)))) := by
           simp [simp_llvm]
           rfl
-        refine ⟨[x, x], ?_⟩
+        refine ⟨[x, x], Or.inl ?_⟩
         have haddRun :
             runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
               define i$0 @f() {
@@ -484,6 +485,82 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
         simp [simp_llvm]
         rfl
       simp_all
-      exact bitvec_mul_two_ne_one_generic hpos _ hmulRun.symm
+      have hcontra := bitvec_mul_two_ne_one_generic hpos (BitVec.ofNat w x)
+      contradiction
+
+open scoped LeanNanoLlvm.AST.Syntax in
+def poisonDef : @AST.Definition 0 := [llvm-definition|
+  define i8 @f() {
+  entry:
+    ret i8 poison
+  }
+]
+
+open scoped LeanNanoLlvm.AST.Syntax in
+def zeroDef : @AST.Definition 0 := [llvm-definition|
+  define i8 @f() {
+  entry:
+    ret i8 0
+  }
+]
+
+private theorem run_poisonDef (u : UndefChain) :
+    runNanoLlvmStateM (denoteNanoLlvmDefinition poisonDef []) default
+      ({ supplyChain := u, supplyIndex := 0 }) =
+    Except.ok (RegisterValue.bv 8 .poison) := by
+  rfl
+
+private theorem run_zeroDef (u : UndefChain) :
+    runNanoLlvmStateM (denoteNanoLlvmDefinition zeroDef []) default
+      ({ supplyChain := u, supplyIndex := 0 }) =
+    Except.ok (RegisterValue.bv 8 (.value (0 : BitVec 8))) := by
+  rfl
+
+theorem poison_is_refined_by_zero : poisonDef ⊑ zeroDef := by
+  intro args hwfPoison hwfZero hsig hargs
+  constructor
+  · intro _ u
+    cases args with
+    | nil =>
+        refine ⟨RegisterValue.bv 8 (.value (0 : BitVec 8)), ?_⟩
+        rfl
+    | cons arg rest =>
+        have : False := by
+          simp [Definition.ArgValuesWellFormed, poisonDef] at hargs
+        exact False.elim this
+  · intro u ret h
+    cases args with
+    | nil =>
+        refine ⟨u, Or.inr ?_⟩
+        have hret : ret = RegisterValue.bv 8 (.value (0 : BitVec 8)) := by
+          rw [run_zeroDef u] at h
+          injection h with hret
+          exact hret.symm
+        subst ret
+        exact ⟨RegisterValue.bv 8 .poison, run_poisonDef u, rfl⟩
+    | cons arg rest =>
+        have : False := by
+          simp [Definition.ArgValuesWellFormed, poisonDef] at hargs
+        exact False.elim this
+
+theorem zero_is_not_refined_by_poison : ¬ (zeroDef ⊑ poisonDef) := by
+  intro h
+  obtain ⟨u', hu'⟩ := (h []
+    (by simp [simp_wellform, zeroDef])
+    (by simp [simp_wellform, poisonDef])
+    (by rfl)
+    (by simp [Definition.ArgValuesWellFormed, simp_wellform, zeroDef])
+    ).2 [] (RegisterValue.bv 8 .poison) (run_poisonDef [])
+  obtain ⟨ret_x, hret_x, href⟩ := hu'.elim
+    (fun hret_x => False.elim (by
+      rw [run_zeroDef u'] at hret_x
+      cases hret_x))
+    (fun h2 => h2)
+  have hret0 : ret_x = RegisterValue.bv 8 (.value (0 : BitVec 8)) := by
+    rw [run_zeroDef u'] at hret_x
+    injection hret_x with hret0
+    exact hret0.symm
+  subst ret_x
+  simp at href
 
 end LeanNanoLlvm.Refinement

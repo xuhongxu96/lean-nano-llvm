@@ -68,12 +68,13 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   -- ...
 ```
 
-> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L332) and [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L421) for the full proofs.
+> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L333) and [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L422) for the full proofs.
 >
 > Here `x ⊑ y` has two parts: if the source program `x` is defined for every
 > `undef` supply then the target program `y` must also be defined for every
 > supply, and every value successfully produced by the target program `y` must
-> already be producible by the source program `x` under some supply.
+> either already be returned exactly by the source program `x` under some
+> supply, or be justified by a poison-aware source return.
 >
 > In this example, that means: for every instantiated bitwidth `w`, every value
 > produced by `mul undef, 2` is already allowed by `add undef, undef`. The
@@ -101,7 +102,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
 - Width instantiation from symbolic programs to concrete programs
 - Denotational semantics for integer expressions and single-block definitions
 - Explicit `undef` supply threading for execution and proofs
-- A refinement relation with both definedness and value components: if the source `x` is defined for every `undef` supply then so is the target `y`, and every value produced by `y` must already be allowed by `x`
+- A refinement relation with both definedness and value components: if the source `x` is defined for every `undef` supply then so is the target `y`, and every value produced by `y` must either be returned exactly by `x` or be covered by a poison-aware source return
 
 ## Small executable example
 
