@@ -1,6 +1,6 @@
 # lean-nano-llvm
 
-Lean formalization of a small, executable LLVM-like IR with parsing, printing, wellformedness, denotational semantics, explicit `undef` modeling, and refinement proofs.
+Lean formalization of a small, executable LLVM-like IR with parsing, printing, wellformedness, operational semantics, explicit `undef` modeling, and refinement proofs.
 
 At the core, this project lets you write tiny LLVM programs directly in Lean and prove program optimizations correct.
 
@@ -100,7 +100,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   - `[llvm-definition| ...]`
 - Symbolic widths via `ConcreteOrMVar`, so widths can be reused across return types, argument types, and instructions
 - Width instantiation from symbolic programs to concrete programs
-- Denotational semantics for integer expressions and single-block definitions
+- Operational semantics for integer expressions and single-block definitions
 - Explicit `undef` supply threading for execution and proofs
 - A refinement relation with both definedness and value components: if the source `x` is defined for every `undef` supply then so is the target `y`, and every value produced by `y` must either be returned exactly by `x` or be covered by a poison-aware source return
 

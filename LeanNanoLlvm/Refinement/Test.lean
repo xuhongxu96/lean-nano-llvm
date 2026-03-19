@@ -162,7 +162,7 @@ theorem undef_add_is_refined_by_undef_mul2 : undefAddDef ⊑ undefMul2Def := by
     | nil =>
       have hnil : False := by
         have hrun :
-            runNanoLlvmStateM (denoteNanoLlvmDefinition undefAddDef []) default
+            runNanoLlvmStateM (evalNanoLlvmDefinition undefAddDef []) default
               ({ supplyChain := [], supplyIndex := 0 }) =
               Except.error "" := by
           rfl
@@ -178,19 +178,19 @@ theorem undef_add_is_refined_by_undef_mul2 : undefAddDef ⊑ undefMul2Def := by
       cases u with
       | nil =>
           have hnil :
-              runNanoLlvmStateM (denoteNanoLlvmDefinition undefMul2Def []) default ({ supplyChain := [], supplyIndex := 0 }) =
+              runNanoLlvmStateM (evalNanoLlvmDefinition undefMul2Def []) default ({ supplyChain := [], supplyIndex := 0 }) =
                 Except.error "" := by
             rfl
           simp_all
       | cons x xs =>
         have hmulRun :
-            runNanoLlvmStateM (denoteNanoLlvmDefinition undefMul2Def []) default ({ supplyChain := x :: xs, supplyIndex := 0 }) =
+            runNanoLlvmStateM (evalNanoLlvmDefinition undefMul2Def []) default ({ supplyChain := x :: xs, supplyIndex := 0 }) =
               Except.ok (RegisterValue.bv 1 (.value (0 : BitVec 1))) := by
           simp [simp_llvm]
           rfl
         refine ⟨[x, x], Or.inl ?_⟩
         have haddRun :
-            runNanoLlvmStateM (denoteNanoLlvmDefinition undefAddDef []) default ({ supplyChain := [x, x], supplyIndex := 0 }) =
+            runNanoLlvmStateM (evalNanoLlvmDefinition undefAddDef []) default ({ supplyChain := [x, x], supplyIndex := 0 }) =
               Except.ok (RegisterValue.bv 1 (.value ((BitVec.ofNat 1 x) + (BitVec.ofNat 1 x)))) := by
           simp [simp_llvm]
           rfl
@@ -201,7 +201,7 @@ theorem undef_add_is_refined_by_undef_mul2 : undefAddDef ⊑ undefMul2Def := by
 theorem undef_mul2_is_not_refined_by_undef_add : ¬ (undefMul2Def ⊑ undefAddDef) := by
   intro h
   have haddRun :
-      runNanoLlvmStateM (denoteNanoLlvmDefinition undefAddDef []) default
+      runNanoLlvmStateM (evalNanoLlvmDefinition undefAddDef []) default
         ({ supplyChain := [1, 0], supplyIndex := 0 }) =
         Except.ok (RegisterValue.bv 1 (.value (1 : BitVec 1))) := by
     simp [simp_llvm]
@@ -215,14 +215,14 @@ theorem undef_mul2_is_not_refined_by_undef_add : ¬ (undefMul2Def ⊑ undefAddDe
   cases u' with
   | nil =>
       have hnil :
-          runNanoLlvmStateM (denoteNanoLlvmDefinition undefMul2Def []) default
+          runNanoLlvmStateM (evalNanoLlvmDefinition undefMul2Def []) default
             ({ supplyChain := [], supplyIndex := 0 }) =
             Except.error "" := by
         rfl
       simp_all
   | cons x xs =>
       have hmulRun :
-          runNanoLlvmStateM (denoteNanoLlvmDefinition undefMul2Def []) default
+          runNanoLlvmStateM (evalNanoLlvmDefinition undefMul2Def []) default
             ({ supplyChain := x :: xs, supplyIndex := 0 }) =
             Except.ok (RegisterValue.bv 1 (.value (0 : BitVec 1))) := by
         simp [simp_llvm]
@@ -257,7 +257,7 @@ theorem undef_add_is_refined_by_undef_mul2_i8 : undefAddDef8 ⊑ undefMul2Def8 :
     | nil =>
       have hnil : False := by
         have hrun :
-            runNanoLlvmStateM (denoteNanoLlvmDefinition undefAddDef8 []) default
+            runNanoLlvmStateM (evalNanoLlvmDefinition undefAddDef8 []) default
               ({ supplyChain := [], supplyIndex := 0 }) =
               Except.error "" := by
           rfl
@@ -273,21 +273,21 @@ theorem undef_add_is_refined_by_undef_mul2_i8 : undefAddDef8 ⊑ undefMul2Def8 :
       cases u with
       | nil =>
           have hnil :
-              runNanoLlvmStateM (denoteNanoLlvmDefinition undefMul2Def8 []) default
+              runNanoLlvmStateM (evalNanoLlvmDefinition undefMul2Def8 []) default
                 ({ supplyChain := [], supplyIndex := 0 }) =
                 Except.error "" := by
             rfl
           simp_all
       | cons x xs =>
         have hmulRun :
-            runNanoLlvmStateM (denoteNanoLlvmDefinition undefMul2Def8 []) default
+            runNanoLlvmStateM (evalNanoLlvmDefinition undefMul2Def8 []) default
               ({ supplyChain := x :: xs, supplyIndex := 0 }) =
               Except.ok (RegisterValue.bv 8 (.value ((BitVec.ofNat 8 x) * (2 : BitVec 8)))) := by
           simp [simp_llvm]
           rfl
         refine ⟨[x, x], Or.inl ?_⟩
         have haddRun :
-            runNanoLlvmStateM (denoteNanoLlvmDefinition undefAddDef8 []) default
+            runNanoLlvmStateM (evalNanoLlvmDefinition undefAddDef8 []) default
               ({ supplyChain := [x, x], supplyIndex := 0 }) =
               Except.ok (RegisterValue.bv 8 (.value ((BitVec.ofNat 8 x) + (BitVec.ofNat 8 x)))) := by
           simp [simp_llvm]
@@ -299,7 +299,7 @@ theorem undef_add_is_refined_by_undef_mul2_i8 : undefAddDef8 ⊑ undefMul2Def8 :
 theorem undef_mul2_is_not_refined_by_undef_add_i8 : ¬ (undefMul2Def8 ⊑ undefAddDef8) := by
   intro h
   have haddRun :
-      runNanoLlvmStateM (denoteNanoLlvmDefinition undefAddDef8 []) default
+      runNanoLlvmStateM (evalNanoLlvmDefinition undefAddDef8 []) default
         ({ supplyChain := [1, 0], supplyIndex := 0 }) =
         Except.ok (RegisterValue.bv 8 (.value (1 : BitVec 8))) := by
     simp [simp_llvm]
@@ -313,14 +313,14 @@ theorem undef_mul2_is_not_refined_by_undef_add_i8 : ¬ (undefMul2Def8 ⊑ undefA
   cases u' with
   | nil =>
       have hnil :
-          runNanoLlvmStateM (denoteNanoLlvmDefinition undefMul2Def8 []) default
+          runNanoLlvmStateM (evalNanoLlvmDefinition undefMul2Def8 []) default
             ({ supplyChain := [], supplyIndex := 0 }) =
             Except.error "" := by
         rfl
       simp_all
   | cons x xs =>
       have hmulRun :
-          runNanoLlvmStateM (denoteNanoLlvmDefinition undefMul2Def8 []) default
+          runNanoLlvmStateM (evalNanoLlvmDefinition undefMul2Def8 []) default
             ({ supplyChain := x :: xs, supplyIndex := 0 }) =
             Except.ok (RegisterValue.bv 8 (.value ((BitVec.ofNat 8 x) * (2 : BitVec 8)))) := by
         simp [simp_llvm]
@@ -353,7 +353,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
     | nil =>
       have hnil : False := by
         have hrun :
-          runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+          runNanoLlvmStateM (evalNanoLlvmDefinition ([llvm-1-definition|
             define i$0 @f() {
               entry:
                 %x = add i$0 undef, undef
@@ -376,7 +376,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
       cases u with
       | nil =>
           have hnil :
-              runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+              runNanoLlvmStateM (evalNanoLlvmDefinition ([llvm-1-definition|
                 define i$0 @f() {
                   entry:
                     %x = mul i$0 undef, 2
@@ -390,7 +390,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
           simp_all
       | cons x xs =>
         have hmulRun :
-            runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+            runNanoLlvmStateM (evalNanoLlvmDefinition ([llvm-1-definition|
               define i$0 @f() {
                 entry:
                   %x = mul i$0 undef, 2
@@ -403,7 +403,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
           rfl
         refine ⟨[x, x], Or.inl ?_⟩
         have haddRun :
-            runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+            runNanoLlvmStateM (evalNanoLlvmDefinition ([llvm-1-definition|
               define i$0 @f() {
                 entry:
                   %x = add i$0 undef, undef
@@ -437,7 +437,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   ].instantiateWidths (singletonWidths w)) := by
   intro h
   have haddRun :
-      runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+      runNanoLlvmStateM (evalNanoLlvmDefinition ([llvm-1-definition|
         define i$0 @f() {
           entry:
             %x = add i$0 undef, undef
@@ -459,7 +459,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   cases u' with
   | nil =>
       have hnil :
-          runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+          runNanoLlvmStateM (evalNanoLlvmDefinition ([llvm-1-definition|
             define i$0 @f() {
               entry:
                 %x = mul i$0 undef, 2
@@ -473,7 +473,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
       simp_all
   | cons x xs =>
       have hmulRun :
-          runNanoLlvmStateM (denoteNanoLlvmDefinition ([llvm-1-definition|
+          runNanoLlvmStateM (evalNanoLlvmDefinition ([llvm-1-definition|
             define i$0 @f() {
               entry:
                 %x = mul i$0 undef, 2
@@ -505,13 +505,13 @@ def zeroDef : @AST.Definition 0 := [llvm-definition|
 ]
 
 private theorem run_poisonDef (u : UndefChain) :
-    runNanoLlvmStateM (denoteNanoLlvmDefinition poisonDef []) default
+    runNanoLlvmStateM (evalNanoLlvmDefinition poisonDef []) default
       ({ supplyChain := u, supplyIndex := 0 }) =
     Except.ok (RegisterValue.bv 8 .poison) := by
   rfl
 
 private theorem run_zeroDef (u : UndefChain) :
-    runNanoLlvmStateM (denoteNanoLlvmDefinition zeroDef []) default
+    runNanoLlvmStateM (evalNanoLlvmDefinition zeroDef []) default
       ({ supplyChain := u, supplyIndex := 0 }) =
     Except.ok (RegisterValue.bv 8 (.value (0 : BitVec 8))) := by
   rfl

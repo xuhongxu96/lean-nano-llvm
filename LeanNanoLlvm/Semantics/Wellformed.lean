@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Semantics.Denote
+import LeanNanoLlvm.Semantics.Eval
 import LeanNanoLlvm.Semantics.State
 import LeanNanoLlvm.Tactic
 

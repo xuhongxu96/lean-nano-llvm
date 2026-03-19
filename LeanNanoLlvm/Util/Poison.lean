@@ -120,7 +120,6 @@ variable {a : α}
 @[simp] theorem mk_some (x : α) : { toOption := some x } = PoisonOr.value x := rfl
 @[simp] theorem mk_none : { toOption := @none α } = PoisonOr.poison := rfl
 
--- TODO: simp_denote
 @[simp]
 theorem toOption_getSome : (PoisonOr.value x).toOption.getD y = x := by rfl
 @[simp]

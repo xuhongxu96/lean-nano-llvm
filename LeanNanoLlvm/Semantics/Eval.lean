@@ -28,7 +28,7 @@ private def expectConcreteWidth : AST.Width φ → NanoLlvmStateM Nat
   | .mvar i => throw s!"symbolic width {AST.Width.print (.mvar i)} is not executable; instantiate widths first"
 
 @[simp_llvm]
-def denoteIntBinaryOp {w : Nat} (op : AST.IntBinaryOp) (x y : IntW w) : IntW w :=
+def evalIntBinaryOp {w : Nat} (op : AST.IntBinaryOp) (x y : IntW w) : IntW w :=
   match op with
   | .add nuw nsw => add x y { nuw := nuw, nsw := nsw }
   | .sub nuw nsw => sub x y { nuw := nuw, nsw := nsw }
@@ -45,14 +45,14 @@ def denoteIntBinaryOp {w : Nat} (op : AST.IntBinaryOp) (x y : IntW w) : IntW w :
   | .xor         => xor x y
 
 @[simp_llvm]
-def denoteConversionOp {fromW toW : Nat} (op : AST.ConversionOp) (v : IntW fromW) : IntW toW :=
+def evalConversionOp {fromW toW : Nat} (op : AST.ConversionOp) (v : IntW fromW) : IntW toW :=
   match op with
   | .trunc nuw nsw => trunc toW v { nuw := nuw, nsw := nsw }
   | .zext nneg     => zext toW v { nneg := nneg }
   | .sext          => sext toW v
 
 @[simp_llvm]
-def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
+def evalExp : AST.Exp → NanoLlvmStateM (IntW w)
   | .identifier id => do
     let st ← get
     match st.registers.get? id with
@@ -74,16 +74,16 @@ def denoteExp : AST.Exp → NanoLlvmStateM (IntW w)
   | .poison => pure .poison
 
 @[simp_llvm]
-def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoLlvmStateM Unit
+def evalInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoLlvmStateM Unit
   | .intBinaryOp op t v1 v2 => do
     match t with
     | .int w =>
       let w ← expectConcreteWidth w
       match id with
       | .id id =>
-        let v1 ← @denoteExp w v1
-        let v2 ← @denoteExp w v2
-        let res := denoteIntBinaryOp op v1 v2
+        let v1 ← @evalExp w v1
+        let v2 ← @evalExp w v2
+        let res := evalIntBinaryOp op v1 v2
         let st ← get
         let st' := {st with registers := (st.registers.insert (.local_id id) (.bv w res))}
         set st'
@@ -96,8 +96,8 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
       let toW ← expectConcreteWidth toW
       match id with
       | .id id =>
-        let v ← @denoteExp fromW v
-        let res : IntW toW := denoteConversionOp op v
+        let v ← @evalExp fromW v
+        let res : IntW toW := evalConversionOp op v
         let st ← get
         let st' := { st with registers := (st.registers.insert (.local_id id) (.bv toW res)) }
         set st'
@@ -111,7 +111,7 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
     match ty with
     | .int w =>
       let w ← expectConcreteWidth w
-      let exp ← @denoteExp w exp
+      let exp ← @evalExp w exp
       let res := freeze exp
       let st ← get
       let st' := { st with registers := (st.registers.insert (.local_id id) (.bv w res)) }
@@ -119,11 +119,11 @@ def denoteInstruction (id : AST.InstructionId) : (@AST.Instruction φ) → NanoL
     | _ => throw s!"Expected int type for freeze op, but found [{ty.print}]"
 
 @[simp_llvm]
-def denoteNanoLlvmCode : (@AST.Code φ) → NanoLlvmStateM Unit
+def evalNanoLlvmCode : (@AST.Code φ) → NanoLlvmStateM Unit
   | .nil => pure ()
   | ⟨instr_id, instr⟩ :: t => do
-    denoteInstruction instr_id instr
-    denoteNanoLlvmCode t
+    evalInstruction instr_id instr
+    evalNanoLlvmCode t
 
 @[simp_llvm]
 def bindDefinitionArgs :
@@ -146,13 +146,13 @@ def bindDefinitionArgs :
       bindDefinitionArgs restTys restIds restVals
 
 @[simp_llvm]
-def denoteNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → NanoLlvmStateM RegisterValue
+def evalNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → NanoLlvmStateM RegisterValue
   | ⟨proto, argIds, body⟩, argVals =>
     match proto.type with
     | .function retTy argTys => do
       bindDefinitionArgs argTys argIds argVals
 
-      denoteNanoLlvmCode body.code
+      evalNanoLlvmCode body.code
 
       match body.terminator with
       | ⟨_termId, term⟩ => match term with
@@ -166,7 +166,7 @@ def denoteNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → N
           | .ret (.int retW) =>
             let retW ← expectConcreteWidth retW
             if h : retW = w then
-              let exp ← @denoteExp w exp
+              let exp ← @evalExp w exp
               pure (.bv w (h ▸ exp))
             else
               throw s!"Expected [{retTy.print}] as return type, but found [i{w}]"
@@ -175,19 +175,19 @@ def denoteNanoLlvmDefinition : (@AST.Definition φ) → List RegisterValue → N
     | ty => throw s!"Expected function type for the prototype of definition, but found [{ty.print}]"
 
 @[simp_llvm]
-def denoteInstantiatedDefinition (ws : List.Vector Nat φ) (defn : @AST.Definition φ)
+def evalInstantiatedDefinition (ws : List.Vector Nat φ) (defn : @AST.Definition φ)
     (argVals : List RegisterValue) : NanoLlvmStateM RegisterValue :=
-  denoteNanoLlvmDefinition (defn.instantiateWidths ws) argVals
+  evalNanoLlvmDefinition (defn.instantiateWidths ws) argVals
 
 @[simp_llvm]
 def runInstantiatedDefinition (ws : List.Vector Nat φ) (defn : @AST.Definition φ)
     (args : List RegisterValue) (st : NanoLlvmState := default) : Except String RegisterValue := do
-  runNanoLlvmStateM (denoteInstantiatedDefinition ws defn args) st
+  runNanoLlvmStateM (evalInstantiatedDefinition ws defn args) st
 
 @[simp_llvm]
 def runInstantiatedDefinitionWithUndef (ws : List.Vector Nat φ) (defn : @AST.Definition φ)
     (args : List RegisterValue) (st : NanoLlvmState := default) (uState : UndefState := default)
     : Except String RegisterValue :=
-  runNanoLlvmStateM (denoteInstantiatedDefinition ws defn args) st uState
+  runNanoLlvmStateM (evalInstantiatedDefinition ws defn args) st uState
 
 end LeanNanoLlvm.Semantics

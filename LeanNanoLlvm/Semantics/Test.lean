@@ -12,7 +12,7 @@ section
 open scoped LeanNanoLlvm.AST.Syntax
 
 def runCodeToMsg {φ : Nat} (c : @LeanNanoLlvm.AST.Code φ) (resKey : AST.Identifier) : String :=
-  match runNanoLlvmStateMWithState (denoteNanoLlvmCode c) with
+  match runNanoLlvmStateMWithState (evalNanoLlvmCode c) with
   | .ok ((_, st), _) => s!"ok: {st.registers.get? resKey}"
   | .error e => s!"error: {e}"
 
@@ -23,7 +23,7 @@ def runCodeToMsg {φ : Nat} (c : @LeanNanoLlvm.AST.Code φ) (resKey : AST.Identi
 
 theorem add_two_i32 : forall (a b : ℤ),
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
       [llvm-code| %1 = add i32 <a:int>, <b:int>]
     )
     )
@@ -38,7 +38,7 @@ theorem add_two_i32 : forall (a b : ℤ),
 
 theorem add_two_i32_then_trunc_to_i8 : forall (a b : ℤ),
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
       [llvm-code|
         %1 = add i32 <a:int>, <b:int>
         %2 = trunc i32 %1 to i8
@@ -56,7 +56,7 @@ theorem add_two_i32_then_trunc_to_i8 : forall (a b : ℤ),
 
 theorem poison_propagates_through_add :
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
       [llvm-code|
         %p = add nsw i8 127, 1
         %y = add i8 %p, 1
@@ -72,7 +72,7 @@ theorem poison_propagates_through_add :
 
 theorem freeze_of_nonpoison_is_identity :
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
       [llvm-code| %f = freeze i8 7]
     ))
 
@@ -85,7 +85,7 @@ theorem freeze_of_nonpoison_is_identity :
 
 theorem freeze_of_poison_returns_zero_current_model :
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (denoteNanoLlvmCode (
+    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
       [llvm-code|
         %p = add nsw i8 127, 1
         %f = freeze i8 %p
@@ -102,9 +102,9 @@ theorem freeze_of_poison_returns_zero_current_model :
 @[simp]
 def runDefinitionRet {φ : Nat} (d : @AST.Definition φ) (args : List RegisterValue)
     (st : NanoLlvmState := default) : Except String RegisterValue := do
-  runNanoLlvmStateM (denoteNanoLlvmDefinition d args) st
+  runNanoLlvmStateM (evalNanoLlvmDefinition d args) st
 
-theorem denote_definition_freeze_poison :
+theorem eval_definition_freeze_poison :
   runDefinitionRet
     [llvm-definition|
       define i8 @f() {
@@ -119,7 +119,7 @@ theorem denote_definition_freeze_poison :
   simp [simp_llvm]
   rfl
 
-theorem denote_definition_ret_void :
+theorem eval_definition_ret_void :
   runDefinitionRet
     [llvm-definition|
       define void @f() {

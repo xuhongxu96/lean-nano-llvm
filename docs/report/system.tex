@@ -73,7 +73,7 @@ currently consists only of registers, stored in a hash map from identifiers to
 register values. Register values are either bitvectors paired with a width or
 \texttt{void}.
 
-Expressions denote integer values of a chosen width. Integer literals and
+Expressions evaluate to integer values of a chosen width. Integer literals and
 booleans are embedded into bitvectors, identifiers look up register state, and
 \poison propagates through the integer semantics already provided in the
 utility layer. Executing a definition binds its arguments, interprets the code
@@ -127,15 +127,15 @@ def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
     Definition.SignatureCompatible x y →
     Semantics.Definition.ArgValuesWellFormed x args →
     (((∀ (u : UndefChain), ∃ (ret_x : RegisterValue),
-        runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u, 0⟩ = .ok ret_x) →
+        runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u, 0⟩ = .ok ret_x) →
       (∀ (u' : UndefChain), ∃ (ret_y : RegisterValue),
-        runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
+        runNanoLlvmStateM (evalNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
       (∀ (u : UndefChain) (ret : RegisterValue),
-        runNanoLlvmStateM (denoteNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
+        runNanoLlvmStateM (evalNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
         ∃ u',
-          runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
+          runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
             ∃ ret_x,
-              runNanoLlvmStateM (denoteNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
+              runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
                 RegisterValue.IsRefinedBy ret_x ret))
 \end{leanlisting}
 \normalsize
