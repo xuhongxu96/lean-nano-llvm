@@ -119,11 +119,11 @@ private theorem bitvec_double_eq_mul_two_generic {w : Nat} (b : BitVec w) :
   rw [← Nat.two_mul b.toNat, Nat.mul_comm]
 
 private theorem bitvec_mul_two_ne_one_generic {w : Nat} (hpos : 0 < w) (b : BitVec w) :
-    b * (2 : BitVec w) ≠ BitVec.ofNat w 1 := by
+    b * (2#w) ≠ 1#w := by
   intro h
   have hval :
-      (((b * (2 : BitVec w)).toFin : Fin (2 ^ w)) : Nat) =
-        (((BitVec.ofNat w 1).toFin : Fin (2 ^ w)) : Nat) := by
+      (((b * (2#w)).toFin : Fin (2 ^ w)) : Nat) =
+        (((1#w).toFin : Fin (2 ^ w)) : Nat) := by
     simp_all
   simp [Fin.val_mul, BitVec.toFin_ofNat] at hval
   have hmod := congrArg (fun n => n % 2) hval
@@ -398,7 +398,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
               }
             ].instantiateWidths (singletonWidths w)) []) default
               ({ supplyChain := x :: xs, supplyIndex := 0 }) =
-              Except.ok (RegisterValue.bv w (.value ((BitVec.ofNat w x) * (2 : BitVec w)))) := by
+              Except.ok (RegisterValue.bv w (.value ((BitVec.ofNat w x) * (2#w)))) := by
           simp [simp_llvm]
           rfl
         refine ⟨[x, x], Or.inl ?_⟩
@@ -445,17 +445,16 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
         }
       ].instantiateWidths (singletonWidths w)) []) default
         ({ supplyChain := [1, 0], supplyIndex := 0 }) =
-      Except.ok (RegisterValue.bv w (.value (BitVec.ofNat w 1))) := by
+      Except.ok (RegisterValue.bv w (.value (1#w))) := by
     simp [simp_llvm]
-    change Except.ok (RegisterValue.bv w (.value ((BitVec.ofNat w 1) + (BitVec.ofNat w 0)))) =
-      Except.ok (RegisterValue.bv w (.value (BitVec.ofNat w 1)))
-    simp
+    rw [<- BitVec.add_zero 1#w]
+    rfl
   obtain ⟨u', hu'⟩ := (h []
     (by simp [simp_wellform])
     (by simp [simp_wellform])
     (by rfl)
     (by simp [Definition.ArgValuesWellFormed, simp_wellform])
-    ).2 [1, 0] (RegisterValue.bv w (.value (BitVec.ofNat w 1))) haddRun
+    ).2 [1, 0] (RegisterValue.bv w (.value (1#w))) haddRun
   cases u' with
   | nil =>
       have hnil :
@@ -481,7 +480,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
             }
           ].instantiateWidths (singletonWidths w)) []) default
             ({ supplyChain := x :: xs, supplyIndex := 0 }) =
-          Except.ok (RegisterValue.bv w (.value ((BitVec.ofNat w x) * (2 : BitVec w)))) := by
+          Except.ok (RegisterValue.bv w (.value ((BitVec.ofNat w x) * (2#w)))) := by
         simp [simp_llvm]
         rfl
       simp_all

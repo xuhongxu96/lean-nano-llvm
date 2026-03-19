@@ -130,7 +130,7 @@ refinement disjunction.
     | cons x xs => ~\label{line:undef-proof-cons-supply}~
       have hmulRun : ... =
           Except.ok (RegisterValue.bv w
-            (.value ((BitVec.ofNat w x) * (2 : BitVec w)))) := by ~\label{line:undef-proof-hmul}~
+            (.value ((BitVec.ofNat w x) * (2#w)))) := by ~\label{line:undef-proof-hmul}~
         simp [simp_llvm]
         rfl
       refine ⟨[x, x], Or.inl, ?_⟩ ~\label{line:undef-proof-witness}~
