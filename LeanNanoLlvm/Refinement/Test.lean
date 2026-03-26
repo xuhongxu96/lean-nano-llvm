@@ -28,15 +28,18 @@ theorem ret_add_x_0_is_refined_by_ret_x :
   [llvm-definition|
     define i8 @f(i8 %x) {
     entry:
+      ret i8 %x
+    }
+  ]
+  ⊑
+  [llvm-definition|
+    define i8 @f(i8 %x) {
+    entry:
       %x = add i8 %x, 0
       ret i8 %x
     }
-  ] ⊑ [llvm-definition|
-    define i8 @f(i8 %x) {
-    entry:
-      ret i8 %x
-    }
-  ] := by
+  ]
+  := by
   intro args hwfAdd hwfRet hsig hargs
   constructor
   · intro hdefined u
@@ -72,7 +75,6 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f(i$0 %x) {
     entry:
-      %x = add i$0 %x, 0
       ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)
@@ -80,9 +82,11 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f(i$0 %x) {
     entry:
+      %x = add i$0 %x, 0
       ret i$0 %x
     }
-  ].instantiateWidths (singletonWidths w) := by
+  ].instantiateWidths (singletonWidths w)
+  := by
   intro args hwfAdd hwfRet hsig hargs
   constructor
   · intro hdefined u
@@ -154,7 +158,7 @@ def undefMul2Def : @AST.Definition 0 := [llvm-definition|
   }
 ]
 
-theorem undef_add_is_refined_by_undef_mul2 : undefAddDef ⊑ undefMul2Def := by
+theorem undef_add_is_refined_by_undef_mul2 : undefMul2Def ⊑ undefAddDef := by
   intro args hwfAdd hwfMul hsig hargs
   constructor
   · intro hdefined u'
@@ -198,7 +202,7 @@ theorem undef_add_is_refined_by_undef_mul2 : undefAddDef ⊑ undefMul2Def := by
     | cons arg rest =>
       simp [Definition.ArgValuesWellFormed] at hargs
 
-theorem undef_mul2_is_not_refined_by_undef_add : ¬ (undefMul2Def ⊑ undefAddDef) := by
+theorem undef_mul2_is_not_refined_by_undef_add : ¬ (undefAddDef ⊑ undefMul2Def) := by
   intro h
   have haddRun :
       runNanoLlvmStateM (evalNanoLlvmDefinition undefAddDef []) default
@@ -249,7 +253,7 @@ def undefMul2Def8 : @AST.Definition 0 := [llvm-definition|
   }
 ]
 
-theorem undef_add_is_refined_by_undef_mul2_i8 : undefAddDef8 ⊑ undefMul2Def8 := by
+theorem undef_add_is_refined_by_undef_mul2_i8 : undefMul2Def8 ⊑ undefAddDef8 := by
   intro args hwfAdd hwfMul hsig hargs
   constructor
   · intro hdefined u'
@@ -296,7 +300,7 @@ theorem undef_add_is_refined_by_undef_mul2_i8 : undefAddDef8 ⊑ undefMul2Def8 :
     | cons arg rest =>
       simp [Definition.ArgValuesWellFormed] at hargs
 
-theorem undef_mul2_is_not_refined_by_undef_add_i8 : ¬ (undefMul2Def8 ⊑ undefAddDef8) := by
+theorem undef_mul2_is_not_refined_by_undef_add_i8 : ¬ (undefAddDef8 ⊑ undefMul2Def8) := by
   intro h
   have haddRun :
       runNanoLlvmStateM (evalNanoLlvmDefinition undefAddDef8 []) default
@@ -334,7 +338,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = add i$0 undef, undef
+        %x = mul i$0 undef, 2
         ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)
@@ -342,10 +346,11 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = mul i$0 undef, 2
+        %x = add i$0 undef, undef
         ret i$0 %x
     }
-  ].instantiateWidths (singletonWidths w) := by
+  ].instantiateWidths (singletonWidths w)
+  := by
   intro args hwfAdd hwfMul hsig hargs
   constructor
   · intro hdefined u'
@@ -423,18 +428,19 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   ¬ ([llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = mul i$0 undef, 2
+        %x = add i$0 undef, undef
         ret i$0 %x
     }
-  ].instantiateWidths (singletonWidths w)
+  ].instantiateWidths (singletonWidths w))
   ⊑
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = add i$0 undef, undef
+        %x = mul i$0 undef, 2
         ret i$0 %x
     }
-  ].instantiateWidths (singletonWidths w)) := by
+  ].instantiateWidths (singletonWidths w)
+  := by
   intro h
   have haddRun :
       runNanoLlvmStateM (evalNanoLlvmDefinition ([llvm-1-definition|
@@ -515,7 +521,7 @@ private theorem run_zeroDef (u : UndefChain) :
     Except.ok (RegisterValue.bv 8 (.value (0 : BitVec 8))) := by
   rfl
 
-theorem poison_is_refined_by_zero : poisonDef ⊑ zeroDef := by
+theorem poison_is_refined_by_zero : zeroDef ⊑ poisonDef := by
   intro args hwfPoison hwfZero hsig hargs
   constructor
   · intro _ u
@@ -542,7 +548,7 @@ theorem poison_is_refined_by_zero : poisonDef ⊑ zeroDef := by
           simp [Definition.ArgValuesWellFormed, poisonDef] at hargs
         exact False.elim this
 
-theorem zero_is_not_refined_by_poison : ¬ (zeroDef ⊑ poisonDef) := by
+theorem zero_is_not_refined_by_poison : ¬ (poisonDef ⊑ zeroDef) := by
   intro h
   obtain ⟨u', hu'⟩ := (h []
     (by simp [simp_wellform, zeroDef])

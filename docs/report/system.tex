@@ -105,7 +105,7 @@ behavior now depends on the chosen \vundef supply.
 \subsection{Refinement}
 
 The project defines refinement semantically on function definitions. In
-essence, \texttt{x~$\sqsubseteq$~y} has two parts. First, if the source
+essence, \texttt{y~$\sqsubseteq$~x} has two parts. First, if the source
 definition \texttt{x} is defined for every \vundef supply, then the target
 definition \texttt{y} must also be defined for every \vundef supply. Second,
 every concrete return value produced by the target definition \texttt{y} must
@@ -120,7 +120,7 @@ and was sufficient to prove the theorems in the repository.
 
 \small
 \begin{leanlisting}
-def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
+def Definition.Refines (y x : @AST.Definition φ) : Prop :=
   ∀ (args : List RegisterValue),
     AST.Definition.WellFormed x →
     AST.Definition.WellFormed y →
@@ -136,7 +136,7 @@ def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
           runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
             ∃ ret_x,
               runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
-                RegisterValue.IsRefinedBy ret_x ret))
+                RegisterValue.Refines ret ret_x))
 \end{leanlisting}
 \normalsize
 
@@ -153,6 +153,6 @@ definition \texttt{y} must also be able to return some value for every
 successful target executions and asks that every concrete return value
 produced by \texttt{y} must either be reproduced exactly by \texttt{x},
 possibly under a different \vundef supply, or be justified by a source return
-that refines it through the poison-aware relation on register values. This
+that it refines through the poison-aware relation on register values. This
 asymmetry is what allows the target to be more defined than the source
 without introducing any genuinely new observable behavior.

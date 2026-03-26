@@ -11,12 +11,12 @@ theorem ret_add_x_0_is_refined_by_ret_x :
   [llvm-definition|
     define i8 @f(i8 %x) {
     entry:
-      %x = add i8 %x, 0
       ret i8 %x
     }
   ] ⊑ [llvm-definition|
     define i8 @f(i8 %x) {
     entry:
+      %x = add i8 %x, 0
       ret i8 %x
     }
   ] := by
@@ -25,17 +25,17 @@ theorem ret_add_x_0_is_refined_by_ret_x :
 
 > See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L26) for the full proof.
 >
-> This theorem says: the program `x + 0` is refined by the program `x`,
+> This theorem says: the program `ret x` refines the program `add x, 0`,
 > where `x` is a variable of type `i8` (a signed integer of width `8`).
 
-It also supports symbolic widths and explicit `undef`, so you can prove width-generic theorems about nondeterministic behavior in both directions:
+It also supports symbolic widths and explicit `undef`, so you can prove width-generic theorems about nondeterministic behavior:
 
 ```lean
 theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = add i$0 undef, undef
+        %x = mul i$0 undef, 2
         ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)
@@ -43,7 +43,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = mul i$0 undef, 2
+        %x = add i$0 undef, undef
         ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w) := by
@@ -53,7 +53,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   ¬ ([llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = mul i$0 undef, 2
+        %x = add i$0 undef, undef
         ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)
@@ -61,7 +61,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = add i$0 undef, undef
+        %x = mul i$0 undef, 2
         ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)) := by
@@ -70,7 +70,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
 
 > See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L333) and [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L422) for the full proofs.
 >
-> Here `x ⊑ y` has two parts: if the source program `x` is defined for every
+> Here `y ⊑ x` has two parts: if the source program `x` is defined for every
 > `undef` supply then the target program `y` must also be defined for every
 > supply, and every value successfully produced by the target program `y` must
 > either already be returned exactly by the source program `x` under some

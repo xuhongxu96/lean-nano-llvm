@@ -5,7 +5,7 @@ The core proof pattern in this project is semantic rather than syntactic.
 Instead of proving correctness of a global optimizer function, we state a
 refinement theorem directly between two definitions and unfold the semantic
 interpretation enough to show that whenever the target program on the
-right-hand side returns some value, the source program on the left-hand side
+left-hand side returns some value, the source program on the right-hand side
 can either return that same value exactly or justify it through the
 poison-aware register-value refinement relation. In most proofs in this
 repository, the exact-equality branch is enough.
@@ -19,12 +19,12 @@ theorem ret_add_x_0_is_refined_by_ret_x :
   [llvm-definition|
     define i8 @f(i8 %x) {
     entry:
-      %x = add i8 %x, 0
       ret i8 %x
     }
   ] ⊑ [llvm-definition|
     define i8 @f(i8 %x) {
     entry:
+      %x = add i8 %x, 0
       ret i8 %x
     }
   ] := by
@@ -51,7 +51,6 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f(i$0 %x) {
     entry:
-      %x = add i$0 %x, 0
       ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)
@@ -59,6 +58,7 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f(i$0 %x) {
     entry:
+      %x = add i$0 %x, 0
       ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w) := by
@@ -77,7 +77,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = add i$0 undef, undef
+        %x = mul i$0 undef, 2
         ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)
@@ -85,8 +85,8 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = mul i$0 undef, 2
-      ret i$0 %x
+        %x = add i$0 undef, undef
+        ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w) := by
   ...
@@ -94,11 +94,11 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
 \normalsize
 
 What makes this theorem interesting is that it is not simply an algebraic
-identity on the same input value. The two occurrences of \vundef on the left
-may resolve independently, while the one occurrence on the right resolves to a
-single concrete value. Since the left-hand side is the source and the
-right-hand side is the target, the proof uses the refinement definition's
-existential freedom on the left-hand-side supply. Given a supply for the
+identity on the same input value. The two occurrences of \vundef on the right
+may resolve independently, while the one occurrence on the left resolves to a
+single concrete value. Since the left-hand side is the target and the
+right-hand side is the source, the proof uses the refinement definition's
+existential freedom on the right-hand-side (source) supply. Given a supply for the
 multiplication program, the proof constructs a matching supply for the
 addition program by repeating the observed choice. The arithmetic lemma then
 shows that doubling a bitvector by addition yields the same result as
@@ -133,7 +133,7 @@ refinement disjunction.
             (.value ((BitVec.ofNat w x) * (2#w)))) := by ~\label{line:undef-proof-hmul}~
         simp [simp_llvm]
         rfl
-      refine ⟨[x, x], Or.inl, ?_⟩ ~\label{line:undef-proof-witness}~
+      refine ⟨[x, x], Or.inl ?_⟩ ~\label{line:undef-proof-witness}~
       have haddRun : ... =
           Except.ok (RegisterValue.bv w
             (.value ((BitVec.ofNat w x) + (BitVec.ofNat w x)))) := by ~\label{line:undef-proof-hadd}~
@@ -202,7 +202,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   ¬ ([llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = mul i$0 undef, 2
+        %x = add i$0 undef, undef
         ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)
@@ -210,7 +210,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   [llvm-1-definition|
     define i$0 @f() {
       entry:
-        %x = add i$0 undef, undef
+        %x = mul i$0 undef, 2
         ret i$0 %x
     }
   ].instantiateWidths (singletonWidths w)) := by

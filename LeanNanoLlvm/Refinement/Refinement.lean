@@ -22,15 +22,15 @@ be inferred.
 -/
 class HRefinement (α β : Type) where
   /--
-  We say that `a` is refined by `b`, written as `a ⊑ b`, when
-  every observable behaviour of `b` is allowed by `a`.
+  We say that `a` refines `b`, written as `a ⊑ b`, when
+  every observable behaviour of `a` is allowed by `b`.
 
   Note that this notation is driven by a typeclass, thus the exact meaning
   is type-dependent.
   -/
-  IsRefinedBy : α → β → Prop
+  Refines : α → β → Prop
 
-@[inherit_doc] infix:50 " ⊑ "  => HRefinement.IsRefinedBy
+@[inherit_doc] infix:50 " ⊑ "  => HRefinement.Refines
 
 /--
 The homogenous version of `HRefinement`.
@@ -40,29 +40,29 @@ NOTE: This typeclass is not intended for dialect implementors. Please implement
 `DialectRefinement` instead.
 -/
 class Refinement (α : Type) where
-  IsRefinedBy : α → α → Prop
+  Refines : α → α → Prop
 
 instance instHRefinementOfRefinement [Refinement α] : HRefinement α α where
-  IsRefinedBy := Refinement.IsRefinedBy
+  Refines := Refinement.Refines
 
 @[simp_eval]
 def Refinement.ofHRefinement (inst : HRefinement α α) : Refinement α where
-  IsRefinedBy x y := x ⊑ y
+  Refines x y := x ⊑ y
 
 section OfEq
 
 /-- Equality induces a trivial (homogenous) refinement relation on any type `α`. -/
 def Refinement.ofEq : Refinement α where
-  IsRefinedBy := Eq
+  Refines := Eq
 
 instance (priority := low) :
-    Std.Refl (HRefinement.IsRefinedBy (self := @instHRefinementOfRefinement α .ofEq)) where
+    Std.Refl (HRefinement.Refines (self := @instHRefinementOfRefinement α .ofEq)) where
   refl _ := rfl
 instance (priority := low) :
-    IsTrans α (HRefinement.IsRefinedBy (self := @instHRefinementOfRefinement α .ofEq)) where
+    IsTrans α (HRefinement.Refines (self := @instHRefinementOfRefinement α .ofEq)) where
   trans _ _ _ := Eq.trans
 instance (priority := low) [DecidableEq α] :
-    Decidable (HRefinement.IsRefinedBy (self := @instHRefinementOfRefinement α .ofEq) x y) :=
+    Decidable (HRefinement.Refines (self := @instHRefinementOfRefinement α .ofEq) x y) :=
   decidable_of_iff (x = y) (by rfl)
 
 end OfEq
@@ -73,8 +73,8 @@ variable {α β} [inst : HRefinement α β]
 
 instance instRefinement : HRefinement (Id α) (Id β) := inst
 
-@[simp_eval (high)] -- high priority so that this is tried before the `reduceIsRefinedBy` simproc
-theorem pure_isRefinedBy_pure (x : α) (y : β) :
+@[simp_eval (high)] -- high priority so that this is tried before the `reduceRefines` simproc
+theorem pure_Refines_pure (x : α) (y : β) :
   (pure x : Id _) ⊑ (pure y : Id _) ↔ x ⊑ y := by rfl
 
 end Id
@@ -89,7 +89,7 @@ variable {φ : Nat}
 /--
 Semantic refinement on LLVM definitions.
 
-`x ⊑ y` has two components.
+`y ⊑ x` has two components.
 
 1. Definedness: if the source `x` can successfully return some value for every
    `undef` supply, then the target `y` must also be able to successfully
@@ -113,18 +113,18 @@ A source poison integer return allows any target integer return of the same
 width. Non-poison bitvector returns and `void` must match exactly.
 -/
 @[simp]
-def RegisterValue.IsRefinedBy : RegisterValue → RegisterValue → Prop
-  | .bv w_x .poison, .bv w_y _ => w_x = w_y
-  | .bv w_x (.value v_x), .bv w_y (.value v_y) => ∃ h : w_x = w_y, h ▸ v_x = v_y
+def RegisterValue.Refines : RegisterValue → RegisterValue → Prop
+  | .bv w_x _, .bv w_y .poison => w_y = w_x
+  | .bv w_x (.value v_x), .bv w_y (.value v_y) => ∃ h : w_y = w_x, h ▸ v_y = v_x
   | .void, .void => True
   | _, _ => False
 
 @[simp_eval]
-theorem registerValue_isRefinedBy_iff (x y : RegisterValue) :
-    RegisterValue.IsRefinedBy x y ↔
-      match x, y with
-      | .bv w_x .poison, .bv w_y _ => w_x = w_y
-      | .bv w_x (.value v_x), .bv w_y (.value v_y) => ∃ h : w_x = w_y, h ▸ v_x = v_y
+theorem registerValue_Refines_iff (y x : RegisterValue) :
+    RegisterValue.Refines y x ↔
+      match y, x with
+      | .bv w_x _, .bv w_y .poison=> w_y = w_x
+      | .bv w_x (.value v_x), .bv w_y (.value v_y) => ∃ h : w_y = w_x, h ▸ v_y = v_x
       | .void, .void => True
       | _, _ => False := by
   cases x <;> cases y <;> rfl
@@ -135,7 +135,7 @@ def Definition.ReturnValuesRefined (x : @AST.Definition φ) (args : List Registe
     runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
       ∃ ret_x,
         runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
-          RegisterValue.IsRefinedBy ret_x ret
+          RegisterValue.Refines ret ret_x
 
 @[simp_eval]
 theorem definition_returnValuesRefined_iff (x : @AST.Definition φ) (args : List RegisterValue)
@@ -145,10 +145,10 @@ theorem definition_returnValuesRefined_iff (x : @AST.Definition φ) (args : List
         runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
           ∃ ret_x,
             runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
-              RegisterValue.IsRefinedBy ret_x ret := by
+              RegisterValue.Refines ret ret_x := by
   rfl
 
-def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
+def Definition.Refines (y x : @AST.Definition φ) : Prop :=
   ∀ (args : List RegisterValue),
     AST.Definition.WellFormed x →
     AST.Definition.WellFormed y →
@@ -163,11 +163,11 @@ def Definition.IsRefinedBy (x y : @AST.Definition φ) : Prop :=
         Definition.ReturnValuesRefined x args u ret))
 
 instance : Refinement (@AST.Definition φ) where
-  IsRefinedBy := Definition.IsRefinedBy
+  Refines := Definition.Refines
 
 @[simp_eval]
-theorem definition_isRefinedBy_iff (x y : @AST.Definition φ) :
-    x ⊑ y ↔
+theorem definition_Refines_iff (y x : @AST.Definition φ) :
+    y ⊑ x ↔
       (∀ (args : List RegisterValue),
         x.WellFormed →
         y.WellFormed →
