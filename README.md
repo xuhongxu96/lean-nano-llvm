@@ -1,10 +1,8 @@
 # lean-nano-llvm
 
-Lean formalization of a small, executable LLVM-like IR with parsing, printing, wellformedness, operational semantics, explicit `undef` modeling, and refinement proofs.
+Lean 4 formalization of an executable, almost-complete LLVM IR subset with parsing, printing, data layouts, well-formedness, bit-level operational semantics (aligned with LLVM's `llubi` reference interpreter), configurable `undef` support, and formal refinement proofs.
 
-At the core, this project lets you write tiny LLVM programs directly in Lean and prove program optimizations correct.
-
-This project is a research and experimentation artifact, not a production LLVM verification toolchain.
+At the core, this project lets you write LLVM IR programs directly in Lean using quasiquotations and formally prove program optimizations and semantic properties inside Lean's kernel.
 
 ```lean
 theorem ret_add_x_0_is_refined_by_ret_x :
@@ -23,156 +21,50 @@ theorem ret_add_x_0_is_refined_by_ret_x :
   -- ...
 ```
 
-> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L26) for the full proof.
->
-> This theorem says: the program `ret x` refines the program `add x, 0`,
-> where `x` is a variable of type `i8` (a signed integer of width `8`).
+## Highlights
 
-It also supports symbolic widths and explicit `undef`, so you can prove width-generic theorems about nondeterministic behavior:
+- **Optional, switchable `undef` (`SemanticsConfig.undefMode`)**:
+  - Defaults to `SemanticsConfig.modern` (`undefMode := .disabled`), matching LLVM's ongoing deprecation of `undef` (`Exp.undef` is rejected in well-formedness and execution, and uninitialized memory/padding is `poison`).
+  - Explicitly opt into legacy `undef` with `SemanticsConfig.withUndef` (`undefMode := .nondet`), deterministic zero-fill with `SemanticsConfig.deterministic` (`undefMode := .zero, freezeMode := .zero`), or `SemanticsConfig.legacyCompat`.
+  - Refinement supports explicit configurations via `y ⊑[cfg] x` (with `y ⊑ x` defaulting to `SemanticsConfig.modern`).
+- **Bit-level Memory & Provenance Model** (`LeanNanoLlvm/Semantics/Memory.lean`, `LeanNanoLlvm/AST/DataLayout.lean`):
+  - Exact per-bit provenance (`MemBit`), little-endian & big-endian `DataLayout` (`default64LE`, `default64BE`, `default32LE`), unpacked/packed struct layouts, sub-byte integer padding canonicalization, and `load ..., !noundef`.
+  - `alloca`, `load`, `store`, `getelementptr` (`inbounds`/`nusw`/`nuw`), `ptrtoint` vs `ptrtoaddr` exposed provenance generations, `inttoptr`, `addrspacecast`, `bitcast`.
+  - Stack frame allocation & dangling-pointer detection, `llvm.lifetime.start`/`end`, heap `malloc`/`calloc`/`free` (with use-after-free, double-free, and non-heap free Immediate UB), `llvm.memcpy`/`memmove`/`memset`, and mutable/`constant` globals.
+- **Kernel-Reducible IEEE-754 Floating-Point Engine** (`LeanNanoLlvm/Util/IEEEFloat.lean`, `LeanNanoLlvm/Semantics/FloatOps.lean`):
+  - Pure bit-level arithmetic for `half`, `bfloat`, `float`, `double`, and `fp128` (`fneg`, `fadd`, `fsub`, `fmul`, `fdiv`, `frem`, `fcmp`, `fpext`, `fptrunc`, `sitofp`, `uitofp`, `fptosi`, `fptoui`).
+  - Fast-math flags (`nnan`, `ninf`, `nsz`, `fast`, etc.), IEEE rounding modes (`RNE`, `RNA`, `RTP`, `RTN`, `RTZ`), denormal modes, NaN propagation modes, and FP intrinsics (`llvm.fabs`, `llvm.copysign`, `llvm.fma`, `llvm.minimum`/`maximum`, `llvm.is.fpclass`, `llvm.fptosi.sat`, `llvm.fptoui.sat`).
+- **Control Flow, Modules, Calls, Aggregates, Vectors & Intrinsics**:
+  - Multi-block CFGs with `br`, conditional `br`, `switch`, `unreachable`, parallel `phi` nodes, and fuel-bounded loops/recursion.
+  - Direct and indirect function-pointer `call`s across module definitions and global variables.
+  - Structs, arrays, fixed-width vectors (`extractvalue`, `insertvalue`, `extractelement`, `insertelement`, `shufflevector`, `select`, lane-wise vector operations), and integer intrinsics (`llvm.abs`, `llvm.smax`/`smin`/`umax`/`umin`, `llvm.ctlz`/`cttz`/`ctpop`/`bitreverse`/`bswap`, `llvm.fshl`/`fshr`, saturating & `.with.overflow` arithmetic, `llvm.assume`).
+- **UB-Aware Refinement & Arbitrary-Width Proofs**:
+  - Total nondeterminism oracle (`NondetOracle := Nat → Nat`) for `freeze`, `undef` (when enabled), and FP nondeterminism.
+  - Explicit separation of `ExecError.immediateUB` from `staticError` / resource limits, so Immediate UB refines to any behavior.
+  - Symbolic integer widths (`i$0`, `ConcreteOrMVar`) enabling single width-generic refinement proofs over all bitwidths `w`.
 
-```lean
-theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
-  [llvm-1-definition|
-    define i$0 @f() {
-      entry:
-        %x = mul i$0 undef, 2
-        ret i$0 %x
-    }
-  ].instantiateWidths (singletonWidths w)
-  ⊑
-  [llvm-1-definition|
-    define i$0 @f() {
-      entry:
-        %x = add i$0 undef, undef
-        ret i$0 %x
-    }
-  ].instantiateWidths (singletonWidths w) := by
-  -- ...
+## Architecture
 
-theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) :
-  ¬ ([llvm-1-definition|
-    define i$0 @f() {
-      entry:
-        %x = add i$0 undef, undef
-        ret i$0 %x
-    }
-  ].instantiateWidths (singletonWidths w)
-  ⊑
-  [llvm-1-definition|
-    define i$0 @f() {
-      entry:
-        %x = mul i$0 undef, 2
-        ret i$0 %x
-    }
-  ].instantiateWidths (singletonWidths w)) := by
-  -- ...
-```
+The project preserves a clean four-layer architecture under `LeanNanoLlvm/`:
 
-> See [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L333) and [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean#L422) for the full proofs.
->
-> Here `y ⊑ x` has two parts: if the source program `x` is defined for every
-> `undef` supply then the target program `y` must also be defined for every
-> supply, and every value successfully produced by the target program `y` must
-> either already be returned exactly by the source program `x` under some
-> supply, or be justified by a poison-aware source return.
->
-> In this example, that means: for every instantiated bitwidth `w`, every value
-> produced by `mul undef, 2` is already allowed by `add undef, undef`. The
-> converse fails for positive widths, because `add undef, undef` can produce
-> `1` from the supply `[1, 0]`, while `mul undef, 2` can only produce even
-> results.
+1. `LeanNanoLlvm/Util`: `Config.lean` (`SemanticsConfig`, `UndefMode`, `ExecError`), `IEEEFloat.lean`, `Poison.lean`, `ConcreteOrMVar.lean`, `Undef.lean` (`NondetOracle`, `SupplyState`).
+2. `LeanNanoLlvm/AST`: `AST.lean`, `DataLayout.lean`, `Print.lean`, `Syntax.lean` (`[llvm-*| ...]` quasiquoters), `Unexpander.lean`.
+3. `LeanNanoLlvm/Semantics`: `Semantics.lean` (bitvector ops & `icmp`), `FloatOps.lean`, `Memory.lean`, `State.lean` (`RegisterValue`, serialization, `NanoLlvmState`), `Eval.lean` (total interpreter + intrinsics/libcalls), `Wellformed.lean`.
+4. `LeanNanoLlvm/Refinement`: `Refinement.lean` (`RegisterValue.Refines`, `Definition.RefinesWith`, `y ⊑[cfg] x`, `y ⊑ x`).
 
-## Why it is interesting
-
-- Arbitrary-width refinement proofs: write one symbolic-width program and prove a theorem for every concrete width.
-- Executable semantics: instantiate widths, run the program, and get a concrete result.
-- Surface syntax inside Lean: programs can be written in an LLVM-like notation instead of raw constructors.
-- Syntax + printing + unexpansion: symbolic widths such as `i$0` round-trip through the frontend.
-- Structural wellformedness checks: definitions, declarations, instructions, terminators, scopes, and argument values are checked explicitly.
-
-## What the project provides
-
-- An AST for a small LLVM-like language in [LeanNanoLlvm/AST](LeanNanoLlvm/AST/Test.lean)
-- Quasiquoters such as:
-  - `[llvm-type| ...]`
-  - `[llvm-exp| ...]`
-  - `[llvm-instruction| ...]`
-  - `[llvm-definition| ...]`
-- Symbolic widths via `ConcreteOrMVar`, so widths can be reused across return types, argument types, and instructions
-- Width instantiation from symbolic programs to concrete programs
-- Operational semantics for integer expressions and single-block definitions
-- Explicit `undef` supply threading for execution and proofs
-- A refinement relation with both definedness and value components: if the source `x` is defined for every `undef` supply then so is the target `y`, and every value produced by `y` must either be returned exactly by `x` or be covered by a poison-aware source return
-
-## Small executable example
-
-The project can also execute instantiated symbolic programs. The theorem in [Semantics/Test.lean](LeanNanoLlvm/Semantics/Test.lean#L197) proves:
-
-```lean
-runInstantiatedDefinition (singletonWidths 8) [llvm-1-definition|
-    define i$0 @f(i$0 %a) {
-    entry:
-      %x = add i$0 %a, 1
-      ret i$0 %x
-    }
-  ] [ .bv 8 (.value (2 : BitVec 8)) ]
-  = .ok (.bv 8 (.value (3 : BitVec 8)))
-```
-
-So a symbolic-width function can be instantiated at width `8` and run concretely.
-
-## Supported IR constructs
-
-Currently, the IR supports:
-
-- integer types
-- function types
-- integer binary operations such as `add`
-- conversions such as `trunc`, `zext`, `sext`
-- `undef` values via an explicit external supply
-- `freeze` (turns `poison` to `0`, which may not be exactly the same as LLVM)
-- `ret`
-- single basic block function bodies
-
-This is enough to state and prove small optimization theorems cleanly.
-
-## Limitations
-
-This is not a full LLVM model. Important current limitations:
-
-- No multi-basic-block control flow
-- No memory model
-- No loads, stores, pointers, or aliasing reasoning
-- No calls, external effects, or interprocedural semantics
-- No phi nodes
-- `undef` is modeled by an explicit supply of concrete values, not LLVM's full nondeterministic semantics
-- `freeze` currently maps `poison` to `0`, which is a simplification of LLVM behavior
-- Execution requires concrete widths; symbolic-width programs must be instantiated before running
-
-## Build
+## Build & Test
 
 ```bash
 lake build
+lake exe lean-nano-llvm
 ```
 
-Useful test files:
+Test suites (verified in Lean's kernel):
 
-- [AST/Test.lean](LeanNanoLlvm/AST/Test.lean)
-- [Semantics/Test.lean](LeanNanoLlvm/Semantics/Test.lean)
-- [Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean)
-
-## Direction
-
-The project is aimed at a sweet spot:
-
-- small enough that semantics and proofs stay readable
-- expressive enough to demonstrate real program refinement arguments
-- structured enough to grow toward richer LLVM features later
+- [LeanNanoLlvm/AST/Test.lean](LeanNanoLlvm/AST/Test.lean) — syntax quasiquoters, printing, and unexpansion
+- [LeanNanoLlvm/Semantics/Test.lean](LeanNanoLlvm/Semantics/Test.lean) — toggleable `undef`, Immediate UB vs `poison`, memory/provenance/endianness/heap/globals, IEEE-754 floats, CFG/parallel `phi`/recursion, aggregates, vectors, and intrinsics
+- [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean) — width-generic arithmetic & `undef` refinement, `poison`, Immediate UB, nondeterministic `freeze`, IEEE-754 `fneg` & FMF (`nnan`), `select`, and stack memory store-to-load forwarding
 
 ## Acknowledgments
 
-This project reuses and adapts some code from
-[Lean-MLIR](https://github.com/opencompl/lean-mlir) and is also informed by
-prior LLVM formalization efforts such as
-[Vellvm](https://github.com/vellvm/vellvm), although no Vellvm code is included
-in this repository.
+This project reuses and adapts some code from [Lean-MLIR](https://github.com/opencompl/lean-mlir) and uses upstream LLVM's `llubi` (`llvm/tools/llubi`) as a semantic reference alongside prior LLVM formalizations such as [Vellvm](https://github.com/vellvm/vellvm).

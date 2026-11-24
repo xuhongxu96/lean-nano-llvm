@@ -12,33 +12,12 @@ import LeanNanoLlvm.Semantics.Wellformed
 import LeanNanoLlvm.Util.Undef
 import Mathlib.Order.Defs.Unbundled
 
-/--
-The notation typeclass for heterogenous refinement relations.
-This enables the notation `a ⊑ b`, where `a : α` and `b : β`.
-
-NOTE: This typeclass is not intended for dialect implementors. Please implement
-`DialectRefinement` instead, from which appropriate `HRefinement` instances will
-be inferred.
--/
 class HRefinement (α β : Type) where
-  /--
-  We say that `a` refines `b`, written as `a ⊑ b`, when
-  every observable behaviour of `a` is allowed by `b`.
-
-  Note that this notation is driven by a typeclass, thus the exact meaning
-  is type-dependent.
-  -/
+  /-- Heterogeneous refinement relation (`y ⊑ x` means target `y` refines source `x`). -/
   Refines : α → β → Prop
 
-@[inherit_doc] infix:50 " ⊑ "  => HRefinement.Refines
+@[inherit_doc] infix:50 " ⊑ " => HRefinement.Refines
 
-/--
-The homogenous version of `HRefinement`.
-This enables the notation `a ⊑ b`, where `a, b : α`.
-
-NOTE: This typeclass is not intended for dialect implementors. Please implement
-`DialectRefinement` instead.
--/
 class Refinement (α : Type) where
   Refines : α → α → Prop
 
@@ -51,7 +30,6 @@ def Refinement.ofHRefinement (inst : HRefinement α α) : Refinement α where
 
 section OfEq
 
-/-- Equality induces a trivial (homogenous) refinement relation on any type `α`. -/
 def Refinement.ofEq : Refinement α where
   Refines := Eq
 
@@ -73,7 +51,7 @@ variable {α β} [inst : HRefinement α β]
 
 instance instRefinement : HRefinement (Id α) (Id β) := inst
 
-@[simp_eval (high)] -- high priority so that this is tried before the `reduceRefines` simproc
+@[simp_eval (high)]
 theorem pure_Refines_pure (x : α) (y : β) :
   (pure x : Id _) ⊑ (pure y : Id _) ↔ x ⊑ y := by rfl
 
@@ -86,18 +64,6 @@ open Semantics
 
 variable {φ : Nat}
 
-/--
-Semantic refinement on LLVM definitions.
-
-`y ⊑ x` has two components.
-
-1. Definedness: if the source `x` can successfully return some value for every
-   `undef` supply, then the target `y` must also be able to successfully
-   return some value for every `undef` supply.
-2. Value refinement: every concrete return value produced by the target `y`
-   must already be producible by the source `x`, possibly under a different
-   `undef` supply.
--/
 def Definition.SignatureCompatible (x y : @AST.Definition φ) : Prop :=
   x.prototype.type = y.prototype.type
 
@@ -106,80 +72,108 @@ theorem definition_signatureCompatible_iff (x y : @AST.Definition φ) :
     Definition.SignatureCompatible x y ↔ x.prototype.type = y.prototype.type := by
   rfl
 
-/--
-Return-value refinement for the current executable semantics.
-
-A source poison integer return allows any target integer return of the same
-width. Non-poison bitvector returns and `void` must match exactly.
+/-
+Poison-aware structural return-value refinement across all LLVM IR value types.
+A source `poison` scalar (int, float, ptr) allows any target scalar of the same type;
+non-poison scalars must match; aggregates and vectors refine element-wise.
 -/
+mutual
 @[simp]
 def RegisterValue.Refines : RegisterValue → RegisterValue → Prop
-  | .bv w_x _, .bv w_y .poison => w_y = w_x
-  | .bv w_x (.value v_x), .bv w_y (.value v_y) => ∃ h : w_y = w_x, h ▸ v_y = v_x
+  | .bv wy _, .bv wx .poison => wx = wy
+  | .bv wy (.value vy), .bv wx (.value vx) => ∃ h : wx = wy, h ▸ vx = vy
+  | .float fty _, .float ftx .poison => ftx = fty
+  | .float fty (.value fy), .float ftx (.value fx) => ∃ h : ftx = fty, h ▸ fx = fy
+  | .ptr asy _, .ptr asx .poison => asx = asy
+  | .ptr asy (.value py), .ptr asx (.value px) => asx = asy ∧ px = py
+  | .vector ty esy, .vector tx esx => tx = ty ∧ RegisterValue.RefinesList esy esx
+  | .array ty esy, .array tx esx => tx = ty ∧ RegisterValue.RefinesList esy esx
+  | .struct py tsy fsy, .struct px tsx fsx =>
+      px = py ∧ tsx = tsy ∧ RegisterValue.RefinesList fsy fsx
   | .void, .void => True
   | _, _ => False
 
-@[simp_eval]
-theorem registerValue_Refines_iff (y x : RegisterValue) :
-    RegisterValue.Refines y x ↔
-      match y, x with
-      | .bv w_x _, .bv w_y .poison=> w_y = w_x
-      | .bv w_x (.value v_x), .bv w_y (.value v_y) => ∃ h : w_y = w_x, h ▸ v_y = v_x
-      | .void, .void => True
-      | _, _ => False := by
-  cases x <;> cases y <;> rfl
+@[simp]
+def RegisterValue.RefinesList : List RegisterValue → List RegisterValue → Prop
+  | [], [] => True
+  | y :: ys, x :: xs => RegisterValue.Refines y x ∧ RegisterValue.RefinesList ys xs
+  | _, _ => False
+end
 
-def Definition.ReturnValuesRefined (x : @AST.Definition φ) (args : List RegisterValue)
-    (_u : UndefChain) (ret : RegisterValue) : Prop :=
-  ∃ u',
-    runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
-      ∃ ret_x,
-        runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
-          RegisterValue.Refines ret ret_x
+mutual
+theorem RegisterValue.Refines.refl : ∀ (v : RegisterValue), RegisterValue.Refines v v
+  | .bv _ .poison => rfl
+  | .bv _ (.value _) => ⟨rfl, rfl⟩
+  | .float _ .poison => rfl
+  | .float _ (.value _) => ⟨rfl, rfl⟩
+  | .ptr _ .poison => rfl
+  | .ptr _ (.value _) => ⟨rfl, rfl⟩
+  | .vector _ elems => ⟨rfl, RegisterValue.RefinesList.refl elems⟩
+  | .array _ elems => ⟨rfl, RegisterValue.RefinesList.refl elems⟩
+  | .struct _ _ fields => ⟨rfl, rfl, RegisterValue.RefinesList.refl fields⟩
+  | .void => trivial
 
-@[simp_eval]
-theorem definition_returnValuesRefined_iff (x : @AST.Definition φ) (args : List RegisterValue)
-    (u : UndefChain) (ret : RegisterValue) :
-    Definition.ReturnValuesRefined x args u ret ↔
-      ∃ u',
-        runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret ∨
-          ∃ ret_x,
-            runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u', 0⟩ = .ok ret_x ∧
-              RegisterValue.Refines ret ret_x := by
-  rfl
+theorem RegisterValue.RefinesList.refl : ∀ (vs : List RegisterValue), RegisterValue.RefinesList vs vs
+  | [] => trivial
+  | v :: vs => ⟨RegisterValue.Refines.refl v, RegisterValue.RefinesList.refl vs⟩
+end
 
-def Definition.Refines (y x : @AST.Definition φ) : Prop :=
+/-- Initial machine state for a given `(cfg, dl)` pair. -/
+@[simp]
+def initStateFor (cfg : SemanticsConfig) (dl : AST.DataLayout := .default64LE) : NanoLlvmState :=
+  { config := cfg, dataLayout := dl, stepsRemaining := cfg.maxSteps }
+
+/--
+Config- and UB-aware semantic refinement on LLVM definitions (`y` refines `x`).
+
+For all well-formed arguments `args`, assuming both definitions are well-formed under `cfg`
+and have compatible signatures:
+- If source `x` triggers Immediate UB under some oracle, target `y` is unrestricted (UB refines to anything).
+- Otherwise:
+  1. Definedness: if `x` succeeds for every total oracle `o`, then `y` must succeed for every oracle `o'`.
+  2. Value refinement: every return value `ret_y` produced by `y` under some oracle `o` must refine
+     a return value `ret_x` produced by `x` under some oracle `o'`.
+-/
+def Definition.RefinesWith (cfg : SemanticsConfig) (dl : AST.DataLayout := .default64LE)
+    (y x : @AST.Definition φ) : Prop :=
   ∀ (args : List RegisterValue),
-    AST.Definition.WellFormed x →
-    AST.Definition.WellFormed y →
+    AST.Definition.WellFormedWith cfg x →
+    AST.Definition.WellFormedWith cfg y →
     Definition.SignatureCompatible x y →
     Semantics.Definition.ArgValuesWellFormed x args →
-    (((∀ (u : UndefChain), ∃ (ret_x : RegisterValue),
-        runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u, 0⟩ = .ok ret_x) →
-      (∀ (u' : UndefChain), ∃ (ret_y : RegisterValue),
-        runNanoLlvmStateM (evalNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
-      (∀ (u : UndefChain) (ret : RegisterValue),
-        runNanoLlvmStateM (evalNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
-        Definition.ReturnValuesRefined x args u ret))
+    (∃ (o : NondetOracle) (msg : String),
+        runNanoLlvmM (evalNanoLlvmDefinition x args) (initStateFor cfg dl) ⟨o, 0⟩ = .error (.immediateUB msg)) ∨
+    (((∀ (o : NondetOracle), ∃ (ret_x : RegisterValue),
+        runNanoLlvmM (evalNanoLlvmDefinition x args) (initStateFor cfg dl) ⟨o, 0⟩ = .ok ret_x) →
+      (∀ (o' : NondetOracle), ∃ (ret_y : RegisterValue),
+        runNanoLlvmM (evalNanoLlvmDefinition y args) (initStateFor cfg dl) ⟨o', 0⟩ = .ok ret_y)) ∧
+      (∀ (o : NondetOracle) (ret_y : RegisterValue),
+        runNanoLlvmM (evalNanoLlvmDefinition y args) (initStateFor cfg dl) ⟨o, 0⟩ = .ok ret_y →
+        ∃ (o' : NondetOracle) (ret_x : RegisterValue),
+          runNanoLlvmM (evalNanoLlvmDefinition x args) (initStateFor cfg dl) ⟨o', 0⟩ = .ok ret_x ∧
+          RegisterValue.Refines ret_y ret_x))
+
+/-- Config-explicit refinement notation: `y ⊑[cfg] x`. -/
+notation:50 y " ⊑[" cfg "] " x => Definition.RefinesWith cfg AST.DataLayout.default64LE y x
+
+/-- Default refinement uses `SemanticsConfig.modern` (`undef` disabled). -/
+def Definition.Refines (y x : @AST.Definition φ) : Prop :=
+  Definition.RefinesWith .modern .default64LE y x
 
 instance : Refinement (@AST.Definition φ) where
   Refines := Definition.Refines
 
-@[simp_eval]
-theorem definition_Refines_iff (y x : @AST.Definition φ) :
-    y ⊑ x ↔
-      (∀ (args : List RegisterValue),
-        x.WellFormed →
-        y.WellFormed →
-        Definition.SignatureCompatible x y →
-        Semantics.Definition.ArgValuesWellFormed x args →
-        (((∀ (u : UndefChain), ∃ (ret_x : RegisterValue),
-            runNanoLlvmStateM (evalNanoLlvmDefinition x args) default ⟨u, 0⟩ = .ok ret_x) →
-          (∀ (u' : UndefChain), ∃ (ret_y : RegisterValue),
-            runNanoLlvmStateM (evalNanoLlvmDefinition y args) default ⟨u', 0⟩ = .ok ret_y)) ∧
-          (∀ (u : UndefChain) (ret : RegisterValue),
-            runNanoLlvmStateM (evalNanoLlvmDefinition y args) default ⟨u, 0⟩ = .ok ret →
-            Definition.ReturnValuesRefined x args u ret))) := by
-  rfl
+/-- Reflexivity holds for every LLVM definition under any configuration and DataLayout. -/
+theorem Definition.RefinesWith.refl (cfg : SemanticsConfig) (dl : AST.DataLayout := .default64LE)
+    (d : @AST.Definition φ) : Definition.RefinesWith cfg dl d d := by
+  intro args _ _ _ _
+  right
+  constructor
+  · exact id
+  · intro o ret h
+    exact ⟨o, ret, h, RegisterValue.Refines.refl ret⟩
+
+theorem Definition.Refines.refl (d : @AST.Definition φ) : d ⊑ d :=
+  Definition.RefinesWith.refl .modern .default64LE d
 
 end LeanNanoLlvm.Refinement
