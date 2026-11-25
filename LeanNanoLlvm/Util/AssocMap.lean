@@ -118,6 +118,40 @@ theorem getElem?_eq_get? {α β : Type} [BEq α] (m : AssocMap α β) (k : α) :
 theorem contains_eq_isSome {α β : Type} [BEq α] (m : AssocMap α β) (k : α) :
     m.contains k = (m.get? k).isSome := rfl
 
+theorem get?_isSome_of_mem_keys {α β : Type} [BEq α] [LawfulBEq α]
+    (m : AssocMap α β) {k : α} (hk : k ∈ m.entries.map Prod.fst) :
+    ∃ v, m.get? k = some v := by
+  cases m with
+  | mk entries =>
+    dsimp only [get?]
+    induction entries with
+    | nil => simp at hk
+    | cons hd rest ih =>
+      obtain ⟨k0, v0⟩ := hd
+      simp only [List.map_cons, List.mem_cons] at hk
+      unfold lookupAux
+      by_cases h0 : (k0 == k) = true
+      · rw [if_pos h0]; exact ⟨v0, rfl⟩
+      · rw [if_neg h0]
+        rcases hk with rfl | hrest
+        · exact False.elim (h0 (beq_self_eq_true _))
+        · exact ih hrest
+
+private theorem eraseAux_idem {α β : Type} [BEq α] (k : α) :
+    ∀ (l : List (α × β)), eraseAux k (eraseAux k l) = eraseAux k l
+  | [] => rfl
+  | (k0, v0) :: rest => by
+    simp only [eraseAux]
+    by_cases h0 : (k0 == k) = true
+    · rw [if_pos h0]; exact eraseAux_idem k rest
+    · rw [if_neg h0]; simp only [eraseAux, if_neg h0, eraseAux_idem k rest]
+
+@[simp]
+theorem insert_insert_same {α β : Type} [BEq α] [LawfulBEq α]
+    (m : AssocMap α β) (k : α) (v1 v2 : β) :
+    (m.insert k v1).insert k v2 = m.insert k v2 := by
+  simp only [insert, eraseAux, beq_self_eq_true, ↓reduceIte, eraseAux_idem]
+
 end AssocMap
 
 end LeanNanoLlvm

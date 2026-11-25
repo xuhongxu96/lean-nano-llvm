@@ -1,6 +1,9 @@
-import LeanNanoLlvm.Semantics.Semantics
+import LeanNanoLlvm.Semantics.IntOps
 import LeanNanoLlvm.Semantics.FloatOps
 import LeanNanoLlvm.Semantics.Memory
-import LeanNanoLlvm.Semantics.State
-import LeanNanoLlvm.Semantics.Eval
+import LeanNanoLlvm.Semantics.Value
+import LeanNanoLlvm.Semantics.Intrinsics
+import LeanNanoLlvm.Semantics.Machine
+import LeanNanoLlvm.Semantics.Step
+import LeanNanoLlvm.Semantics.Exec
 import LeanNanoLlvm.Semantics.Wellformed

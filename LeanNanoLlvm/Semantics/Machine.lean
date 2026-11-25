@@ -1,0 +1,329 @@
+import LeanNanoLlvm.Util.Config
+import LeanNanoLlvm.Util.AssocMap
+import LeanNanoLlvm.AST.AST
+import LeanNanoLlvm.AST.DataLayout
+import LeanNanoLlvm.AST.Print
+import LeanNanoLlvm.Semantics.Memory
+import LeanNanoLlvm.Semantics.Value
+
+namespace LeanNanoLlvm.Semantics
+
+open AST
+
+/-! ### Observable Events & Trace Refinement -/
+
+/-- Observable machine events emitted by small-step transitions (volatile I/O, external calls). -/
+inductive TraceEvent : Type where
+  | volatileLoad  (addrSpace : Nat) (addr : Nat) (bytes : Array MemByte)
+  | volatileStore (addrSpace : Nat) (addr : Nat) (bytes : Array MemByte)
+  | externalCall  (name : String) (args : List RegisterValue)
+deriving DecidableEq
+
+/-- Byte-array refinement under a `MemoryInjection` (equal length, pointwise `MemByte.Refines`). -/
+def ByteArrayRefines (inj : MemoryInjection) (bsY bsX : Array MemByte) : Prop :=
+  bsY.size = bsX.size ∧
+  ∀ i < bsX.size, MemByte.Refines inj (bsY.getD i MemByte.poison) (bsX.getD i MemByte.poison)
+
+theorem ByteArrayRefines.refl (bs : Array MemByte) : ByteArrayRefines .id bs bs :=
+  ⟨rfl, fun _ _ => MemByte.Refines.refl _⟩
+
+theorem ByteArrayRefines.trans {f g : MemoryInjection} {b1 b2 b3 : Array MemByte}
+    (h12 : ByteArrayRefines f b1 b2) (h23 : ByteArrayRefines g b2 b3) :
+    ByteArrayRefines (f.comp g) b1 b3 :=
+  ⟨h12.1.trans h23.1, fun i hi => MemByte.Refines.trans (h12.2 i (by rw [h23.1]; exact hi)) (h23.2 i hi)⟩
+
+/-- Observable event refinement under a `MemoryInjection`. -/
+def TraceEvent.Refines (inj : MemoryInjection) : TraceEvent → TraceEvent → Prop
+  | .volatileLoad asY addrY bsY, .volatileLoad asX addrX bsX =>
+      asY = asX ∧ addrY = addrX ∧ ByteArrayRefines inj bsY bsX
+  | .volatileStore asY addrY bsY, .volatileStore asX addrX bsX =>
+      asY = asX ∧ addrY = addrX ∧ ByteArrayRefines inj bsY bsX
+  | .externalCall nY argsY, .externalCall nX argsX =>
+      nY = nX ∧ RegisterValue.RefinesList inj argsY argsX
+  | _, _ => False
+
+theorem TraceEvent.Refines.refl : ∀ (e : TraceEvent), TraceEvent.Refines .id e e
+  | .volatileLoad _ _ bs => ⟨rfl, rfl, ByteArrayRefines.refl bs⟩
+  | .volatileStore _ _ bs => ⟨rfl, rfl, ByteArrayRefines.refl bs⟩
+  | .externalCall _ args => ⟨rfl, RegisterValue.RefinesList.refl args⟩
+
+theorem TraceEvent.Refines.trans {f g : MemoryInjection} :
+    ∀ {e1 e2 e3 : TraceEvent},
+      TraceEvent.Refines f e1 e2 → TraceEvent.Refines g e2 e3 →
+      TraceEvent.Refines (f.comp g) e1 e3
+  | .volatileLoad _ _ _, .volatileLoad _ _ _, .volatileLoad _ _ _, h12, h23 =>
+      ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1, ByteArrayRefines.trans h12.2.2 h23.2.2⟩
+  | .volatileStore _ _ _, .volatileStore _ _ _, .volatileStore _ _ _, h12, h23 =>
+      ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1, ByteArrayRefines.trans h12.2.2 h23.2.2⟩
+  | .externalCall _ _, .externalCall _ _, .externalCall _ _, h12, h23 =>
+      ⟨h12.1.trans h23.1, RegisterValue.RefinesList.trans h12.2 h23.2⟩
+  | .volatileLoad .., .volatileStore .., _, h12, _
+  | .volatileLoad .., .externalCall .., _, h12, _
+  | .volatileStore .., .volatileLoad .., _, h12, _
+  | .volatileStore .., .externalCall .., _, h12, _
+  | .externalCall .., .volatileLoad .., _, h12, _
+  | .externalCall .., .volatileStore .., _, h12, _ => False.elim h12
+  | .volatileLoad .., .volatileLoad .., .volatileStore .., _, h23
+  | .volatileLoad .., .volatileLoad .., .externalCall .., _, h23
+  | .volatileStore .., .volatileStore .., .volatileLoad .., _, h23
+  | .volatileStore .., .volatileStore .., .externalCall .., _, h23
+  | .externalCall .., .externalCall .., .volatileLoad .., _, h23
+  | .externalCall .., .externalCall .., .volatileStore .., _, h23 => False.elim h23
+
+/-- Trace (event-list) refinement under a `MemoryInjection`. -/
+def Trace.Refines (inj : MemoryInjection) : List TraceEvent → List TraceEvent → Prop
+  | [], [] => True
+  | eY :: restY, eX :: restX => TraceEvent.Refines inj eY eX ∧ Trace.Refines inj restY restX
+  | _, _ => False
+
+theorem Trace.Refines.refl : ∀ (tr : List TraceEvent), Trace.Refines .id tr tr
+  | [] => trivial
+  | e :: rest => ⟨TraceEvent.Refines.refl e, Trace.Refines.refl rest⟩
+
+theorem Trace.Refines.trans {f g : MemoryInjection} :
+    ∀ {t1 t2 t3 : List TraceEvent},
+      Trace.Refines f t1 t2 → Trace.Refines g t2 t3 → Trace.Refines (f.comp g) t1 t3
+  | [], [], [], _, _ => trivial
+  | _ :: _, _ :: _, _ :: _, h12, h23 =>
+      ⟨TraceEvent.Refines.trans h12.1 h23.1, Trace.Refines.trans h12.2 h23.2⟩
+  | [], _ :: _, _, h12, _ | _ :: _, [], _, h12, _ => False.elim h12
+  | [], [], _ :: _, _, h23 | _ :: _, _ :: _, [], _, h23 => False.elim h23
+
+/-! ### Explicit Small-Step Call Frame & Abstract Machine State -/
+
+/-- Return continuation recorded in a caller's frame when awaiting a callee return. -/
+structure ReturnDest : Type where
+  destId   : InstructionId
+  retTy    : LlvmRetType
+  fmf      : FastMathFlags := {}
+  retAttrs : List ValueAttr := []
+deriving Repr
+
+/-- Explicit activation record on the small-step call stack (mirrors `llubi::Frame`). -/
+structure CallFrame : Type where
+  defn          : Definition
+  curBlock      : BlockId
+  remainingCode : Code
+  terminator    : InstructionId × Terminator
+  registers     : AssocMap Identifier RegisterValue := ∅
+  frameAllocas  : List AllocId := []
+  returnDest?   : Option ReturnDest := none
+
+namespace CallFrame
+
+/-- Advance `remainingCode` after executing one instruction and optionally binding a register. -/
+@[simp, simp_llvm]
+def advance : CallFrame → Code → AssocMap Identifier RegisterValue → List AllocId → CallFrame
+  | ⟨defn, curBlk, _, term, _, _, retDest?⟩, code', regs', allocas' =>
+    ⟨defn, curBlk, code', term, regs', allocas', retDest?⟩
+
+@[simp, simp_llvm]
+def withRegisters : CallFrame → AssocMap Identifier RegisterValue → CallFrame
+  | ⟨defn, curBlk, code, term, _, allocas, retDest?⟩, regs' =>
+    ⟨defn, curBlk, code, term, regs', allocas, retDest?⟩
+
+@[simp, simp_llvm]
+def withReturnDest : CallFrame → Option ReturnDest → CallFrame
+  | ⟨defn, curBlk, code, term, regs, allocas, _⟩, retDest? =>
+    ⟨defn, curBlk, code, term, regs, allocas, retDest?⟩
+
+@[simp, simp_llvm]
+def jumpTo : CallFrame → BlockId → Code → (InstructionId × Terminator) →
+    AssocMap Identifier RegisterValue → CallFrame
+  | ⟨defn, _, _, _, _, allocas, retDest?⟩, nextBlk, code', term', regs' =>
+    ⟨defn, nextBlk, code', term', regs', allocas, retDest?⟩
+
+end CallFrame
+
+/-- Pure small-step machine state (no `OracleState` or `fuel` — purely semantic). -/
+structure MachineState : Type where
+  frames       : List CallFrame
+  memory       : MemoryState := {}
+  config       : SemanticsConfig := .modern
+  dataLayout   : DataLayout := .default64LE
+  functions    : AssocMap FunctionId Definition := ∅
+  declarations : AssocMap FunctionId Declaration := ∅
+
+instance : Inhabited MachineState := ⟨{ frames := [] }⟩
+
+namespace MachineState
+
+@[simp, simp_llvm]
+def withFrames : MachineState → List CallFrame → MachineState
+  | ⟨_, mem, cfg, dl, fns, decls⟩, frames' =>
+    ⟨frames', mem, cfg, dl, fns, decls⟩
+
+@[simp, simp_llvm]
+def withFramesAndMemory : MachineState → List CallFrame → MemoryState → MachineState
+  | ⟨_, _, cfg, dl, fns, decls⟩, frames', mem' =>
+    ⟨frames', mem', cfg, dl, fns, decls⟩
+
+@[simp, simp_llvm]
+def withMemory : MachineState → MemoryState → MachineState
+  | ⟨frames, _, cfg, dl, fns, decls⟩, mem' =>
+    ⟨frames, mem', cfg, dl, fns, decls⟩
+
+end MachineState
+
+/-- Small-step abstract machine configuration. -/
+inductive Config : Type where
+  | running       (st : MachineState)
+  | halted        (retVal : RegisterValue) (finalMem : MemoryState)
+  | ub            (msg : String)
+  | staticError   (msg : String)
+  | resourceError (err : ExecError)
+
+namespace Config
+
+@[simp]
+def ofError : ExecError → Config
+  | .immediateUB msg => .ub msg
+  | .staticError msg => .staticError msg
+  | err => .resourceError err
+
+def toExcept : Config → Except ExecError RegisterValue
+  | .halted v _ => .ok v
+  | .ub msg => .error (.immediateUB msg)
+  | .staticError msg => .error (.staticError msg)
+  | .resourceError e => .error e
+  | .running _ => .error .outOfFuel
+
+end Config
+
+/-! ### Frame & Block Helpers (shared by `Step` and `Exec`) -/
+
+/-- Partition leading `phi` instructions from the remaining body of a basic block. -/
+@[simp_llvm]
+def splitPhis : Code → Code × Code
+  | [] => ([], [])
+  | (iid, .phi ty fmf inc) :: rest =>
+    match splitPhis rest with
+    | (phis, body) => ((iid, .phi ty fmf inc) :: phis, body)
+  | code => ([], code)
+
+/-- Free all stack `alloca` allocations belonging to a departing call frame. -/
+@[simp_llvm]
+def freeAllocaList (mem : MemoryState) : List AllocId → MemoryState
+  | [] => mem
+  | aid :: rest => freeAllocaList (mem.freeObject aid) rest
+
+theorem freeAllocaList_preserves_wf {mem : MemoryState} (hwf : MemoryState.WellFormed mem)
+    (allocas : List AllocId) : MemoryState.WellFormed (freeAllocaList mem allocas) := by
+  induction allocas generalizing mem with
+  | nil => exact hwf
+  | cons a rest ih => exact ih (MemoryState.freeObject_preserves_wf hwf a)
+
+/-- Write an SSA register result for an instruction ID (void IDs are no-ops). -/
+@[simp_llvm]
+def writeFrameReg (regs : AssocMap Identifier RegisterValue) (id : InstructionId)
+    (val : RegisterValue) : AssocMap Identifier RegisterValue :=
+  match id with
+  | .id rid => regs.insert (.local_id rid) val
+  | .void _ => regs
+
+/-- Structural check that a runtime `RegisterValue` matches an `LlvmType` (top-level shape & widths). -/
+@[simp, simp_llvm]
+def RegisterValue.matchesType : LlvmType → RegisterValue → Bool
+  | .int wTy, .bv wVal _ => wTy == wVal
+  | .float ft1, .float ft2 _ => ft1 == ft2
+  | .ptr as1, .ptr as2 _ => as1 == as2
+  | .vector n _, .vector _ elems => n == elems.length
+  | .array n _, .array _ elems => n == elems.length
+  | .struct p1 fs1, .struct p2 _ fs2 => p1 == p2 && fs1.length == fs2.length
+  | _, _ => false
+
+/-- Bind formal parameters of a `Definition` to argument values, type-checking and applying callee parameter attributes. -/
+@[simp_llvm]
+def bindFrameArgs (dl : DataLayout) (mem : MemoryState)
+    (argTys : List LlvmType) (isVarArg : Bool) (argAttrs : List (List ValueAttr))
+    (argNames : List LocalId) (argVals : List RegisterValue) :
+    Except ExecError (AssocMap Identifier RegisterValue) :=
+  let countBad :=
+    argNames.length != argTys.length ||
+    (if isVarArg then argVals.length < argNames.length else argVals.length != argNames.length)
+  if countBad then
+    .error (.staticError s!"Argument count mismatch: expected {argNames.length}, got {argVals.length}")
+  else
+    let rec go (i : Nat) : List LlvmType → List LocalId → List RegisterValue →
+        AssocMap Identifier RegisterValue → Except ExecError (AssocMap Identifier RegisterValue)
+      | ty :: ts, nm :: nms, v :: vs, acc =>
+        if !v.matchesType ty then
+          .error (.staticError s!"Unmatched argument type for %{nm}: expected [{ty.print}], got {v}")
+        else
+          let attrs := argAttrs.getD i []
+          match applyValueAttrsPure dl mem ty v attrs with
+          | .error e => .error e
+          | .ok v' => go (i + 1) ts nms vs (acc.insert (.local_id nm) v')
+      | _, _, _, acc => .ok acc
+    go 0 argTys argNames argVals ∅
+
+/-- Apply return-site FastMathFlags (non-input output flags) and return `ValueAttr`s. -/
+@[simp_llvm]
+def applyRetFMFAndAttrsPure (dl : DataLayout) (mem : MemoryState)
+    (retTy : LlvmRetType) (fmf : FastMathFlags) (retAttrs : List ValueAttr)
+    (retVal : RegisterValue) : Except ExecError RegisterValue :=
+  match retTy with
+  | .void => .ok .void
+  | .ret rTy =>
+    let v1Res := if fmf.any then
+      liftUnaryPure rTy.scalarType retVal fun
+        | .float ft (.value flt) => .ok (.float ft (handleFMF fmf false false flt))
+        | other => .ok other
+    else .ok retVal
+    match v1Res with
+    | .error e => .error e
+    | .ok v1 => applyValueAttrsPure dl mem rTy v1 retAttrs
+
+/-- Construct an initial `CallFrame` for entering `defn` with `argVals` (validating signature & param attrs). -/
+@[simp_llvm]
+def mkEntryFrame (dl : DataLayout) (mem : MemoryState) (defn : Definition)
+    (argVals : List RegisterValue) : Except ExecError CallFrame :=
+  match defn.prototype.type with
+  | .function _ argTys isVarArg =>
+    match defn.blocks with
+    | [] => .error (.staticError s!"Function @{defn.prototype.name} has no basic blocks")
+    | entryBlk :: _ =>
+      match bindFrameArgs dl mem argTys isVarArg defn.prototype.argAttrs defn.args argVals with
+      | .error e => .error e
+      | .ok regs =>
+        match splitPhis entryBlk.code with
+        | (phis, body) =>
+          if !phis.isEmpty then
+            .error (.staticError s!"Entry block %{entryBlk.id} of @{defn.prototype.name} cannot contain phi nodes")
+          else
+            .ok {
+              defn := defn
+              curBlock := entryBlk.id
+              remainingCode := body
+              terminator := entryBlk.terminator
+              registers := regs
+              frameAllocas := []
+              returnDest? := none
+            }
+  | ty => .error (.staticError s!"Expected function type for prototype, found [{ty.print}]")
+
+/-- Construct the initial small-step `Config` for calling `defn` with `argVals` in `(cfg, dl, initMem)`. -/
+@[simp_llvm]
+def initCallConfig (cfg : SemanticsConfig) (dl : DataLayout) (initMem : MemoryState)
+    (fns : AssocMap FunctionId Definition := ∅) (decls : AssocMap FunctionId Declaration := ∅)
+    (defn : Definition) (argVals : List RegisterValue) : Config :=
+  match mkEntryFrame dl initMem defn argVals with
+  | .ok frame =>
+    .running {
+      frames := [frame]
+      memory := initMem
+      config := cfg
+      dataLayout := dl
+      functions := fns
+      declarations := decls
+    }
+  | .error e => Config.ofError e
+
+/-- Helper: extract the `LlvmRetType` from a `Definition`'s prototype. -/
+@[simp, simp_llvm]
+def _root_.LeanNanoLlvm.AST.Definition.retType? (defn : Definition) : Option LlvmRetType :=
+  match defn.prototype.type with
+  | .function retTy _ _ => some retTy
+  | _ => none
+
+end LeanNanoLlvm.Semantics

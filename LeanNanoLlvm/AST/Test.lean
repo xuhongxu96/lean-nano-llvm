@@ -11,7 +11,7 @@ B:
   %i0 = add i32 0, 1
   ret i32 %i0
 } -/
-def llvm_0_plus_1 : TopLevel 0 := ⟨[
+def llvm_0_plus_1 : TopLevel := ⟨[
   .definition {
     prototype := {
       name := .name "f",
@@ -48,6 +48,8 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-instruction-id| void (3)]
 
 #check [llvm-type| i8]
+#check fun (w : Nat) => [llvm-type| i$(w)]
+#check fun (w : Nat) => [llvm-type| i$(w + 1)]
 #check [llvm-type| half]
 #check [llvm-type| bfloat]
 #check [llvm-type| float]
@@ -59,10 +61,10 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-type| [2 x float]]
 #check [llvm-type| { i32, i64 }]
 #check [llvm-type| <{ i8, i32 }>]
-#check [llvm-64-type| i$0]
-#check [llvm-64-type| i8()]
-#check [llvm-64-type| i8(i32, i16)]
-#check [llvm-64-type| void(i32, i16)]
+#check [llvm-type| i8()]
+#check [llvm-type| i8(i32, i16)]
+#check [llvm-type| void(i32, i16)]
+#check [llvm-type| i32(ptr, ...)]
 
 #check [llvm-exp| %1]
 #check [llvm-exp| %a]
@@ -81,7 +83,7 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-exp| [i32 10, i32 20]]
 #check [llvm-exp| { i32 1, float 2.0 }]
 
-#check let temp := 10; [llvm-exp| <temp:int>]
+#check fun (temp : Int) => [llvm-exp| <temp:int>]
 
 #check [llvm-int-bin-op| add]
 #check [llvm-int-bin-op| add nuw]
@@ -100,11 +102,11 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-conversion-op| sitofp]
 
 #check [llvm-instruction| add i8 %1, %3]
-#check [llvm-64-0-instruction| add nuw i8 %1, %a]
-#check [llvm-64-0-instruction| trunc nuw i32 %b to i8]
-#check [llvm-64-0-instruction| zext i8 %b to i16]
-#check [llvm-64-0-instruction| freeze i8 %1]
-#check [llvm-64-10-instruction| add i8 undef, undef]
+#check [llvm-instruction| add nuw i8 %1, %a]
+#check [llvm-instruction| trunc nuw i32 %b to i8]
+#check [llvm-instruction| zext i8 %b to i16]
+#check [llvm-instruction| freeze i8 %1]
+#check [llvm-instruction| add i8 undef, undef]
 #check [llvm-instruction| fadd nnan ninf float 1.5, 2.5]
 #check [llvm-instruction| fneg nsz double -0.0]
 #check [llvm-instruction| icmp slt i32 %a, 10]
@@ -113,35 +115,36 @@ open scoped LeanNanoLlvm.AST.Syntax
 #check [llvm-instruction| alloca i32, align 4]
 #check [llvm-instruction| alloca i32, i64 4, align 8]
 #check [llvm-instruction| load i32, ptr %p, align 4, !noundef]
-#check [llvm-instruction| load i32, ptr %p, !noundef]
-#check [llvm-instruction| store i32 42, ptr %p, align 4]
+#check [llvm-instruction| load volatile i32, ptr %p, !noundef]
+#check [llvm-instruction| store volatile i32 42, ptr %p, align 4]
 #check [llvm-instruction| getelementptr inbounds { i32, i64 }, ptr %p, i64 0, i32 1]
 #check [llvm-instruction| extractvalue { i32, i64 } %s, 1]
 #check [llvm-instruction| insertvalue { i32, i64 } %s, i64 9, 1]
 #check [llvm-instruction| extractelement <4 x i32> %v, i32 2]
 #check [llvm-instruction| insertelement <4 x i32> %v, i32 7, i32 1]
 #check [llvm-instruction| shufflevector <2 x i32> %v1, <2 x i32> %v2, <2 x i32> <i32 1, i32 2>]
-#check [llvm-instruction| call i32 @helper(i32 %a, ptr %p)]
+#check [llvm-instruction| call noundef i32 @helper(i32 noundef %a, ptr nonnull align 4 %p)]
 
 #check [llvm-terminator| ret void]
-#check [llvm-64-terminator| ret i8 %1]
+#check [llvm-terminator| ret i8 %1]
 #check [llvm-terminator| br label %next]
 #check [llvm-terminator| br i1 %c, label %t, label %f]
 #check [llvm-terminator| switch i32 %v, label %dflt [ i32 0, label %l0 i32 1, label %l1 ]]
 #check [llvm-terminator| unreachable]
 
 #check [llvm-declaration| declare i32 @puts(i8, i32)]
+#check [llvm-declaration| declare noundef i32 @printf(ptr nonnull, ...)]
 
 #check [llvm-codeline| %1 = add i8 %0, %a]
-#check [llvm-64-1-codeline| freeze i8 %a]
+#check [llvm-codeline| freeze i8 %a]
 
-#check [llvm-64-1-code|
+#check [llvm-code|
 %1 = add i8 %0, %a
 %d = add i8 %2, %b
 freeze i8 %1
 ]
 
-#check [llvm-64-1-block|
+#check [llvm-block|
 entry:
   %1 = add i8 %0, %a
   %d = add i8 %2, %b
@@ -149,7 +152,7 @@ entry:
   ret void
 ]
 
-#check [llvm-64-definition|
+#check [llvm-definition|
 define void @f() {
 entry:
   %1 = add i8 %0, %a
@@ -159,11 +162,18 @@ entry:
 }
 ]
 
-#check [llvm-1-definition|
-define i$0 @f(i$0 %a) {
+#check fun (w : Nat) => [llvm-definition|
+define i$(w) @f(i$(w) %a) {
 entry:
-  %1 = add i$0 %a, 0
-  ret i$0 %1
+  %1 = add i$(w) %a, 0
+  ret i$(w) %1
+}
+]
+
+#check [llvm-definition|
+define noundef i32 @with_attrs(ptr nonnull dereferenceable(4) %p, i32 range(0, 10) %x) {
+entry:
+  ret i32 %x
 }
 ]
 

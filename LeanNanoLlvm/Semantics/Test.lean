@@ -12,9 +12,9 @@ open scoped LeanNanoLlvm.AST.Syntax
 
 /-! ### Helper Runners -/
 
-def runCodeToMsg {φ : Nat} (c : @AST.Code φ) (resKey : AST.Identifier) : String :=
-  match runNanoLlvmStateMWithState (evalNanoLlvmCode c) with
-  | .ok ((_, st), _) => s!"ok: {st.registers.get? resKey}"
+def runCodeToMsg (c : AST.Code) (resKey : AST.Identifier) : String :=
+  match runCode c with
+  | .ok (regs, _) => s!"ok: {regs.get? resKey}"
   | .error e => s!"error: {e}"
 
 #eval runCodeToMsg [llvm-code|
@@ -23,9 +23,10 @@ def runCodeToMsg {φ : Nat} (c : @AST.Code φ) (resKey : AST.Identifier) : Strin
 ] [llvm-identifier| %2]
 
 @[simp]
-def runDefinitionRet {φ : Nat} (d : @AST.Definition φ) (args : List RegisterValue)
-    (st : NanoLlvmState := default) (u : UndefState := default) : Except ExecError RegisterValue :=
-  runNanoLlvmStateM (evalNanoLlvmDefinition d args) st u
+def runDefinitionRet (d : AST.Definition) (args : List RegisterValue)
+    (cfg : SemanticsConfig := .modern) (dl : AST.DataLayout := .default64LE)
+    (o : OracleState := default) : Except ExecError RegisterValue :=
+  runDefinition d args cfg dl o
 
 def isImmediateUB {α : Type} : Except ExecError α → Bool
   | .error (.immediateUB _) => true
@@ -37,77 +38,61 @@ def isStaticError {α : Type} : Except ExecError α → Bool
 
 /-! ### 1. Core Integer Arithmetic, Poison, Freeze & Well-Formedness -/
 
-theorem add_two_i32 : ∀ (a b : ℤ),
+theorem add_two_i32 : ∀ (a b : Int),
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
-      [llvm-code| %1 = add i32 <a:int>, <b:int>]
-    ))
-    pure (match st.registers.get? [llvm-identifier| %1] with
+    let (regs, _) ← runCode [llvm-code| %1 = add i32 <a:int>, <b:int>]
+    pure (match regs.get? [llvm-identifier| %1] with
       | some (.bv 32 v) => some v
       | _ => none)
-  ) = .ok (some (.value ((a : BitVec 32) + (b : BitVec 32)))) := by
-  intros
-  simp [simp_llvm]
+  ) = .ok (some (.value (BitVec.ofInt 32 a + BitVec.ofInt 32 b))) := by
+  intro a b
   rfl
 
-theorem add_two_i32_then_trunc_to_i8 : ∀ (a b : ℤ),
+theorem add_two_i32_then_trunc_to_i8 : ∀ (a b : Int),
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
-      [llvm-code|
-        %1 = add i32 <a:int>, <b:int>
-        %2 = trunc i32 %1 to i8
-      ]
-    ))
-    pure (match st.registers.get? [llvm-identifier| %2] with
+    let (regs, _) ← runCode [llvm-code|
+      %1 = add i32 <a:int>, <b:int>
+      %2 = trunc i32 %1 to i8
+    ]
+    pure (match regs.get? [llvm-identifier| %2] with
       | some (.bv 8 v) => some v
       | _ => none)
-  ) = .ok (some (.value ((a : BitVec 32) + (b : BitVec 32) |>.setWidth 8))) := by
-  intros
-  simp [simp_llvm]
+  ) = .ok (some (.value ((BitVec.ofInt 32 a + BitVec.ofInt 32 b).setWidth 8))) := by
+  intro a b
   rfl
 
 theorem poison_propagates_through_add :
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
-      [llvm-code|
-        %p = add nsw i8 127, 1
-        %y = add i8 %p, 1
-      ]
-    ))
-    pure (match st.registers.get? [llvm-identifier| %y] with
+    let (regs, _) ← runCode [llvm-code|
+      %p = add nsw i8 127, 1
+      %y = add i8 %p, 1
+    ]
+    pure (match regs.get? [llvm-identifier| %y] with
       | some (.bv 8 v) => some v
       | _ => none)
-  ) = .ok (some (.poison)) := by
-  simp [simp_llvm]
-  rfl
+  ) = .ok (some .poison) := by
+  decide +kernel
 
 theorem freeze_of_nonpoison_is_identity :
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
-      [llvm-code| %f = freeze i8 7]
-    ))
-    pure (match st.registers.get? [llvm-identifier| %f] with
+    let (regs, _) ← runCode [llvm-code| %f = freeze i8 7]
+    pure (match regs.get? [llvm-identifier| %f] with
       | some (.bv 8 v) => some v
       | _ => none)
   ) = .ok (some (.value (7 : BitVec 8))) := by
-  simp [simp_llvm]
-  rfl
+  decide +kernel
 
 theorem freeze_of_poison_returns_zero_legacy_compat :
   (do
-    let ((_, st), _) ← runNanoLlvmStateMWithState (evalNanoLlvmCode (
-      [llvm-code|
-        %p = add nsw i8 127, 1
-        %f = freeze i8 %p
-      ]
-    )) { config := .legacyCompat }
-    pure (match st.registers.get? [llvm-identifier| %f] with
+    let (regs, _) ← runCode [llvm-code|
+      %p = add nsw i8 127, 1
+      %f = freeze i8 %p
+    ] .legacyCompat
+    pure (match regs.get? [llvm-identifier| %f] with
       | some (.bv 8 v) => some v
       | _ => none)
   ) = .ok (some (.value (0 : BitVec 8))) := by
-  have hov : (127#8).saddOverflow 1#8 = true := by decide
-  simp [simp_llvm, simp_llvm_option, SemanticsConfig.legacyCompat, hov]
-  rfl
+  decide +kernel
 
 theorem freeze_of_poison_draws_from_oracle_modern :
   runDefinitionRet
@@ -120,11 +105,11 @@ theorem freeze_of_poison_draws_from_oracle_modern :
       }
     ]
     []
-    { config := .modern }
-    ⟨[42], 0⟩
+    .modern
+    .default64LE
+    ⟨NondetOracle.ofList [42], 0⟩
     = .ok (.bv 8 (.value (42 : BitVec 8))) := by
-  have hov : (127#8).saddOverflow 1#8 = true := by decide
-  simp [simp_llvm, simp_llvm_option, SemanticsConfig.modern, drawBitVec, hov]
+  decide +kernel
 
 theorem eval_definition_ret_void :
   runDefinitionRet
@@ -136,9 +121,9 @@ theorem eval_definition_ret_void :
     ]
     []
     = .ok .void := by
-  simp [simp_llvm]
+  decide +kernel
 
-def wfDefinition : @AST.Definition 0 :=
+def wfDefinition : AST.Definition :=
   [llvm-definition|
     define i8 @f(i8 %a) {
     entry:
@@ -154,7 +139,7 @@ theorem wfDefinition_wellFormed : wfDefinition.WellFormed := by
     simp [AST.Declaration.WellFormedType, wfDefinition]
   · simp [wfDefinition, simp_wellform]
 
-def badDefinitionDuplicateArgs : @AST.Definition 0 :=
+def badDefinitionDuplicateArgs : AST.Definition :=
   [llvm-definition|
     define i8 @f(i8 %a, i8 %a) {
     entry:
@@ -167,7 +152,7 @@ theorem badDefinitionDuplicateArgs_not_wellFormed :
   rw [AST.definition_wellFormed_iff, AST.definition_wellFormedWith_iff]
   simp [badDefinitionDuplicateArgs, simp_wellform]
 
-def badDefinitionUnboundRet : @AST.Definition 0 :=
+def badDefinitionUnboundRet : AST.Definition :=
   [llvm-definition|
     define i8 @f() {
     entry:
@@ -182,32 +167,36 @@ theorem badDefinitionUnboundRet_not_wellFormed :
 
 theorem wfDefinition_argValuesWellFormed :
     Semantics.Definition.ArgValuesWellFormed wfDefinition [RegisterValue.bv 8 (.value (7 : BitVec 8))] := by
-  simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedFor, wfDefinition]
+  simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
+        Semantics.RegisterValue.WellFormedFor, wfDefinition]
 
 theorem wfDefinition_argValuesIllFormed_wrongWidth :
     ¬ Semantics.Definition.ArgValuesWellFormed wfDefinition [RegisterValue.bv 16 (.value (7 : BitVec 16))] := by
-  simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedFor, wfDefinition]
+  simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
+        Semantics.RegisterValue.WellFormedFor, wfDefinition]
 
 theorem wfDefinition_argValuesIllFormed_wrongArity :
     ¬ Semantics.Definition.ArgValuesWellFormed wfDefinition [] := by
-  simp [Semantics.Definition.ArgValuesWellFormed, wfDefinition]
+  simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, wfDefinition]
 
-abbrev singletonWidths (w : Nat) : List.Vector Nat 1 := ⟨[w], by simp⟩
-
-theorem runInstantiatedDefinition_poly :
-    runInstantiatedDefinition (singletonWidths 8) [llvm-1-definition|
-    define i$0 @f(i$0 %a) {
+/-- Width-parametric definition using plain Lean `Nat` antiquotation `i$(w)`. -/
+def addOneDef (w : Nat) : AST.Definition :=
+  [llvm-definition|
+    define i$(w) @f(i$(w) %a) {
     entry:
-      %x = add i$0 %a, 1
-      ret i$0 %x
+      %x = add i$(w) %a, 1
+      ret i$(w) %x
     }
-  ] [ .bv 8 (.value (2 : BitVec 8)) ]
-      = .ok (.bv 8 (.value (3 : BitVec 8))) := by
-  simp [simp_llvm, simp_llvm_option, singletonWidths]
+  ]
+
+theorem runDefinition_width_antiquot :
+    runDefinition (addOneDef 8) [.bv 8 (.value (2 : BitVec 8))] =
+      .ok (.bv 8 (.value (3 : BitVec 8))) := by
+  decide +kernel
 
 /-! ### 2. Optional `undef` Switch (`disabled` vs `nondet` vs `zero`) -/
 
-def undefUseDef : @AST.Definition 0 :=
+def undefUseDef : AST.Definition :=
   [llvm-definition|
     define i8 @f() {
     entry:
@@ -228,20 +217,20 @@ theorem undef_allowed_when_enabled_wf : undefUseDef.WellFormedWith .withUndef :=
   · simp [undefUseDef, simp_wellform, SemanticsConfig.withUndef]
 
 theorem undef_rejected_at_runtime_modern :
-    isStaticError (runDefinitionRet undefUseDef [] { config := .modern }) = true := by
+    isStaticError (runDefinitionRet undefUseDef [] .modern) = true := by
   decide +kernel
 
 theorem undef_nondet_draws_from_oracle :
-    runDefinitionRet undefUseDef [] { config := .withUndef } ⟨[41], 0⟩ =
+    runDefinitionRet undefUseDef [] .withUndef .default64LE ⟨NondetOracle.ofList [41], 0⟩ =
       .ok (.bv 8 (.value (42 : BitVec 8))) := by
   decide +kernel
 
 theorem undef_deterministic_returns_zero :
-    runDefinitionRet undefUseDef [] { config := .deterministic } =
+    runDefinitionRet undefUseDef [] .deterministic =
       .ok (.bv 8 (.value (1 : BitVec 8))) := by
   decide +kernel
 
-def uninitAllocaLoadDef : @AST.Definition 0 :=
+def uninitAllocaLoadDef : AST.Definition :=
   [llvm-definition|
     define i8 @f() {
     entry:
@@ -252,13 +241,14 @@ def uninitAllocaLoadDef : @AST.Definition 0 :=
   ]
 
 theorem uninit_alloca_is_poison_when_undef_disabled :
-    runDefinitionRet uninitAllocaLoadDef [] { config := .modern } =
+    runDefinitionRet uninitAllocaLoadDef [] .modern =
       .ok (.bv 8 .poison) := by
   decide +kernel
 
 /-- Bit-granular `undef` memory draws 1 bit per uninitialized bit (LSB-first `[0,1,0,1,1,0,1,0]` = `0x5A`). -/
 theorem uninit_alloca_is_oracle_value_when_undef_enabled :
-    runDefinitionRet uninitAllocaLoadDef [] { config := .withUndef } ⟨[0, 1, 0, 1, 1, 0, 1, 0], 0⟩ =
+    runDefinitionRet uninitAllocaLoadDef [] .withUndef .default64LE
+        ⟨NondetOracle.ofList [0, 1, 0, 1, 1, 0, 1, 0], 0⟩ =
       .ok (.bv 8 (.value (0x5A : BitVec 8))) := by
   decide +kernel
 
@@ -348,7 +338,7 @@ theorem assume_false_is_immediate_ub :
 
 /-! ### 4. Memory, Endianness, Struct Layout, Provenance & Heap (`llubi`-aligned) -/
 
-def endianByte0Def : @AST.Definition 0 :=
+def endianByte0Def : AST.Definition :=
   [llvm-definition|
     define i8 @f() {
     entry:
@@ -361,13 +351,13 @@ def endianByte0Def : @AST.Definition 0 :=
 
 /-- `0x01020304 = 16909060`: byte 0 is `0x04` under little-endian. -/
 theorem memory_load_little_endian :
-    runDefinitionRet endianByte0Def [] { dataLayout := .default64LE } =
+    runDefinitionRet endianByte0Def [] .modern .default64LE =
       .ok (.bv 8 (.value (0x04 : BitVec 8))) := by
   decide +kernel
 
 /-- `0x01020304 = 16909060`: byte 0 is `0x01` under big-endian. -/
 theorem memory_load_big_endian :
-    runDefinitionRet endianByte0Def [] { dataLayout := .default64BE } =
+    runDefinitionRet endianByte0Def [] .modern .default64BE =
       .ok (.bv 8 (.value (0x01 : BitVec 8))) := by
   decide +kernel
 
@@ -625,7 +615,7 @@ theorem misaligned_load_is_immediate_ub :
   decide +kernel
 
 /-- Global variables: mutable global reads/writes succeed; writing to a `constant` global is Immediate UB. -/
-def globalsModule : @AST.TopLevel 0 := [llvm|
+def globalsModule : AST.TopLevel := [llvm|
   @g = global i32 40, align 4
   @c = constant i32 2, align 4
 
@@ -656,7 +646,7 @@ theorem globals_write_constant_is_immediate_ub :
   decide +kernel
 
 /-- Returning a pointer to a callee's `alloca` and dereferencing it in caller causes Immediate UB. -/
-def danglingStackModule : @AST.TopLevel 0 := [llvm|
+def danglingStackModule : AST.TopLevel := [llvm|
   define ptr @make_dangling() {
   entry:
     %loc = alloca i32, align 4
@@ -840,7 +830,7 @@ theorem fp_intrinsics_suite :
   decide +kernel
 
 /-- Rounding mode test: `1.0f / 3.0f` rounds down (`0x3EAAAAAB` in RNE vs `0x3EAAAAAA` in RTZ). -/
-def oneThirdDef : @AST.Definition 0 :=
+def oneThirdDef : AST.Definition :=
   [llvm-definition|
     define i32 @f() {
     entry:
@@ -851,16 +841,16 @@ def oneThirdDef : @AST.Definition 0 :=
   ]
 
 theorem fp_rounding_rne_vs_rtz :
-    runDefinitionRet oneThirdDef [] { config := { roundingMode := .RNE } } =
+    runDefinitionRet oneThirdDef [] { roundingMode := .RNE } =
       .ok (.bv 32 (.value (0x3EAAAAAB : BitVec 32))) ∧
-    runDefinitionRet oneThirdDef [] { config := { roundingMode := .RTZ } } =
+    runDefinitionRet oneThirdDef [] { roundingMode := .RTZ } =
       .ok (.bv 32 (.value (0x3EAAAAAA : BitVec 32))) := by
   decide +kernel
 
 /-! ### 6. Control Flow, Parallel `phi`, `switch`, Recursion, Indirect Calls, Aggregates & Vectors -/
 
 /-- Parallel `phi` test via Fibonacci loop (`fib(10) = 55`). -/
-def fibDef : @AST.Definition 0 :=
+def fibDef : AST.Definition :=
   [llvm-definition|
     define i32 @fib(i32 %n) {
     entry:
@@ -886,7 +876,7 @@ theorem cfg_loop_parallel_phi_fib10 :
   decide +kernel
 
 /-- `switch` terminator test. -/
-def switchDef : @AST.Definition 0 :=
+def switchDef : AST.Definition :=
   [llvm-definition|
     define i32 @sw(i32 %x) {
     entry:
@@ -909,7 +899,7 @@ theorem cfg_switch_cases_and_default :
   decide +kernel
 
 /-- Recursive function call (`fact(5) = 120`) and indirect call through a function pointer. -/
-def callsModule : @AST.TopLevel 0 := [llvm|
+def callsModule : AST.TopLevel := [llvm|
   define i32 @fact(i32 %n) {
   entry:
     %base = icmp sle i32 %n, 1
@@ -994,5 +984,90 @@ theorem integer_intrinsics_suite :
       }
     ] [] = .ok (.bv 32 (.value (296 : BitVec 32))) := by
   decide +kernel
+
+/-! ### 7. Small-Step Traces, Single-Block Param Attrs, Varargs & `runSteps_sound` -/
+
+/-- Volatile loads and stores emit observable `TraceEvent`s in program order. -/
+def volatileMemDef : AST.Definition :=
+  [llvm-definition|
+    define i8 @vol() {
+    entry:
+      %p = alloca i8, align 1
+      store volatile i8 42, ptr %p, align 1
+      %v = load volatile i8, ptr %p, align 1
+      ret i8 %v
+    }
+  ]
+
+theorem volatile_store_and_load_emit_trace_events :
+    let (tr, cfg, _) := runDefinitionWithTrace volatileMemDef []
+    tr.length = 2 ∧
+    (match tr with
+     | [.volatileStore 0 _ bs1, .volatileLoad 0 _ bs2] => bs1.size == 1 && bs2.size == 1
+     | _ => false) = true ∧
+    cfg.toExcept = .ok (.bv 8 (.value (42 : BitVec 8))) := by
+  decide +kernel
+
+/-- Single-block functions enforce callee parameter attributes (`noundef` on `poison` → Immediate UB). -/
+def singleBlockNoundefDef : AST.Definition :=
+  [llvm-definition|
+    define i8 @f(i8 noundef %x) {
+    entry:
+      ret i8 %x
+    }
+  ]
+
+theorem single_block_noundef_param_poison_is_ub :
+    isImmediateUB (runDefinitionRet singleBlockNoundefDef [.bv 8 .poison]) = true := by
+  decide +kernel
+
+theorem single_block_noundef_param_value_ok :
+    runDefinitionRet singleBlockNoundefDef [.bv 8 (.value (9 : BitVec 8))] =
+      .ok (.bv 8 (.value (9 : BitVec 8))) := by
+  decide +kernel
+
+/-- Varargs function accepts extra arguments beyond fixed parameters. -/
+def varargsModule : AST.TopLevel := [llvm|
+  define i32 @first_arg(i32 %x, ...) {
+  entry:
+    ret i32 %x
+  }
+
+  define i32 @main() {
+  entry:
+    %r = call i32 @first_arg(i32 42, i32 99, i8 7)
+    ret i32 %r
+  }
+]
+
+theorem varargs_call_returns_first_arg :
+    runModuleFunction varargsModule (.name "main") =
+      .ok (.bv 32 (.value (42 : BitVec 32))) := by
+  decide +kernel
+
+private theorem exists_halted_of_toExcept_ok {c : Config} {v : RegisterValue}
+    (h : c.toExcept = .ok v) : ∃ m, c = .halted v m := by
+  cases c with
+  | halted v' m => simp [Config.toExcept] at h; subst h; exact ⟨m, rfl⟩
+  | running _ | ub _ | staticError _ | resourceError _ => simp [Config.toExcept] at h
+
+/-- End-to-end soundness bridge: `runSteps_sound` turns a kernel-evaluated execution
+    into a genuine relational `Terminates` (`StarStep`) derivation of `fib(10) = 55`. -/
+theorem fib10_terminates_in_step_semantics :
+    ∃ finalMem,
+      Terminates
+        (initCallConfig .modern .default64LE {} ∅ ∅ fibDef [.bv 32 (.value (10 : BitVec 32))])
+        [] (.bv 32 (.value (55 : BitVec 32))) finalMem := by
+  let c0 := initCallConfig .modern .default64LE {} ∅ ∅ fibDef [.bv 32 (.value (10 : BitVec 32))]
+  have hwf0 : Config.WellFormed c0 := by
+    dsimp only [c0, initCallConfig, mkEntryFrame, bindFrameArgs, Config.WellFormed]
+    exact MemoryState.empty_wf
+  have hsound := runSteps_sound 100 default c0 hwf0
+  have htr : (runSteps 100 default c0).1 = [] := by decide +kernel
+  have hval : (runSteps 100 default c0).2.1.toExcept = .ok (.bv 32 (.value (55 : BitVec 32))) := by
+    decide +kernel
+  obtain ⟨finalMem, hcfg⟩ := exists_halted_of_toExcept_ok hval
+  rw [htr, hcfg] at hsound
+  exact ⟨finalMem, hsound⟩
 
 end

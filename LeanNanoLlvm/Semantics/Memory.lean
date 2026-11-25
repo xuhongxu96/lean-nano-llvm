@@ -40,11 +40,11 @@ def null (dl : DataLayout) (addrSpace : Nat := 0) : Pointer :=
 def isNull (p : Pointer) (dl : DataLayout) (addrSpace : Nat := 0) : Bool :=
   p.addr.toNat == dl.getNullPtrValue addrSpace
 
-def withNewAddr (p : Pointer) (newAddr : BitVec p.addrWidth) : Pointer :=
-  { p with addr := newAddr }
+def withNewAddr : Pointer → (w : Nat) → BitVec w → Pointer
+  | ⟨prov, _, _⟩, w, newAddr => ⟨prov, w, newAddr⟩
 
-def withNewProv (p : Pointer) (newProv : Provenance) : Pointer :=
-  { p with prov := newProv }
+def withNewProv : Pointer → Provenance → Pointer
+  | ⟨_, w, addr⟩, newProv => ⟨newProv, w, addr⟩
 
 def toString (p : Pointer) : String :=
   let hex := String.ofList (Nat.toDigits 16 p.addr.toNat)
@@ -254,6 +254,10 @@ instance : Inhabited MemoryState := ⟨{}⟩
 
 namespace MemoryState
 
+/-- All currently tracked allocation IDs in `mem`. -/
+def allocIds (mem : MemoryState) : List AllocId :=
+  mem.objects.entries.map Prod.fst
+
 /-- Check whether `size` exceeds the largest signed integer of the index type (matches `llubi::exceedsMaxObjectSize`). -/
 def exceedsMaxObjectSize (dl : DataLayout) (size addrSpace : Nat) : Bool :=
   let idxBits := dl.getIndexSizeInBits addrSpace
@@ -281,46 +285,240 @@ private def moWithStateBytes : MemoryObject → MemoryObjectState → Array MemB
   | ⟨allocId, baseAddr, size, align, addrSpace, name, _, allocKind, isConstant, _⟩, st, bs =>
     ⟨allocId, baseAddr, size, align, addrSpace, name, st, allocKind, isConstant, bs⟩
 
+/-- Structural well-formedness invariant on `MemoryState`:
+    `nextAllocId` is strictly above all existing IDs, and `nextAddr` is strictly above
+    every allocated object's address range (so deterministic bump allocation is disjoint). -/
+structure WellFormed (mem : MemoryState) : Prop where
+  nextAllocId_pos : 1 ≤ mem.nextAllocId
+  nextAddr_ge : 8 ≤ mem.nextAddr
+  objects_wf : ∀ id mo, mem.objects.get? id = some mo →
+    mo.allocId = id ∧
+    id < mem.nextAllocId ∧
+    1 ≤ mo.baseAddr ∧
+    mo.baseAddr + max 1 mo.size < mem.nextAddr
+
+theorem empty_wf : WellFormed ({} : MemoryState) where
+  nextAllocId_pos := Nat.le_refl 1
+  nextAddr_ge := Nat.le_refl 8
+  objects_wf := by
+    intro id mo h
+    simp at h
+
+/-- Helper: `alignTo n align ≥ n`. -/
+theorem alignTo_ge (n align : Nat) : n ≤ DataLayout.alignTo n align := by
+  unfold DataLayout.alignTo
+  split
+  · exact Nat.le_refl n
+  · rename_i h
+    have hpos : 0 < align := by omega
+    have hdiv := Nat.div_add_mod (n + align - 1) align
+    have hmod := Nat.mod_lt (n + align - 1) hpos
+    rw [Nat.mul_comm] at hdiv
+    omega
+
+/-- Helper: `alignTo n align` is divisible by `align` whenever `align ≥ 1`. -/
+theorem alignTo_mod (n align : Nat) (h : 1 ≤ align) : DataLayout.alignTo n align % align = 0 := by
+  unfold DataLayout.alignTo
+  split
+  · rename_i hle
+    have : align = 1 := by omega
+    subst this
+    exact Nat.mod_one n
+  · exact Nat.mul_mod_left ((n + align - 1) / align) align
+
+/--
+Relational nondeterministic allocation specification used by the primary inductive `Step` relation.
+Any non-null, properly aligned address fitting in the target address space and disjoint from
+all existing objects is permitted — enabling sound proofs of dead-`alloca` elimination and
+allocation reordering without committing to a concrete allocator address layout.
+-/
+structure AllocSpec (mem : MemoryState) (dl : DataLayout) (cfg : SemanticsConfig)
+    (size align : Nat) (name : String) (addrSpace : Nat)
+    (initKind : MemInitKind) (allocKind : MemAllocKind) (isConstant : Bool)
+    (obj : MemoryObject) (mem' : MemoryState) : Prop where
+  size_ok : exceedsMaxObjectSize dl size addrSpace = false
+  mem_budget : cfg.maxMem = 0 ∨ mem.usedMem + max 1 size ≤ cfg.maxMem
+  id_eq : obj.allocId = mem.nextAllocId
+  size_eq : obj.size = size
+  align_eq : obj.align = max 1 align
+  as_eq : obj.addrSpace = addrSpace
+  name_eq : obj.name = name
+  kind_eq : obj.allocKind = allocKind
+  const_eq : obj.isConstant = isConstant
+  state_eq : obj.state = match initKind with | .poisoned => .dead | _ => .alive
+  bytes_eq : obj.bytes = Array.replicate size (match initKind with
+    | .zeroed => MemByte.zero
+    | .uninitialized => MemByte.uninitFor cfg
+    | .poisoned => MemByte.poison)
+  addr_pos : 1 ≤ obj.baseAddr
+  addr_aligned : obj.baseAddr % max 1 align = 0
+  addr_in_space : obj.baseAddr + max 1 size < (1 <<< dl.getAddressSizeInBits addrSpace)
+  disjoint : ∀ id mo, mem.objects.get? id = some mo →
+    obj.baseAddr + max 1 size ≤ mo.baseAddr ∨ mo.baseAddr + max 1 mo.size ≤ obj.baseAddr
+  mem'_eq : mem' =
+    ⟨mem.nextAllocId + 1, max mem.nextAddr (obj.baseAddr + max 1 size + 1),
+     mem.usedMem + max 1 size, mem.objects.insert obj.allocId obj,
+     mem.exposedGeneration, mem.exposedProvenances,
+     mem.globalAddrs, mem.funcAddrs, mem.addrToFunc⟩
+
+/-- `AllocSpec` preserves `MemoryState.WellFormed`. -/
+theorem AllocSpec.preserves_wf {mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem'}
+    (hwf : WellFormed mem)
+    (hspec : AllocSpec mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem') :
+    WellFormed mem' := by
+  rw [hspec.mem'_eq]
+  refine ⟨by dsimp only [AllocId]; have := hwf.nextAllocId_pos; omega,
+          by dsimp only; have := hwf.nextAddr_ge; omega, ?_⟩
+  intro id mo hget
+  dsimp only at hget ⊢
+  rw [AssocMap.get?_insert] at hget
+  by_cases heq : (obj.allocId == id) = true
+  · simp only [heq, ↓reduceIte, Option.some.injEq] at hget
+    subst hget
+    have hid : obj.allocId = id := eq_of_beq heq
+    refine ⟨hid, by rw [← hid, hspec.id_eq]; exact Nat.lt_succ_self _, hspec.addr_pos, ?_⟩
+    rw [hspec.size_eq]
+    exact Nat.lt_of_lt_of_le (Nat.lt_succ_self _) (Nat.le_max_right _ _)
+  · have hne : (obj.allocId == id) = false := Bool.eq_false_iff.mpr heq
+    simp only [hne, Bool.false_eq_true, ↓reduceIte] at hget
+    obtain ⟨h1, h2, h3, h4⟩ := hwf.objects_wf id mo hget
+    exact ⟨h1, Nat.lt_succ_of_lt h2, h3, Nat.lt_of_lt_of_le h4 (Nat.le_max_left _ _)⟩
+
 /-- Allocate a new memory object with monotonically increasing aligned address + guard byte. -/
 def allocate : MemoryState → DataLayout → SemanticsConfig →
     Nat → Nat → String → Nat → MemInitKind → MemAllocKind → (isConstant : Bool := false) →
     Except ExecError (MemoryObject × MemoryState)
   | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩,
-    dl, cfg, size, align, name, addrSpace, initKind, allocKind, isConstant => do
+    dl, cfg, size, align, name, addrSpace, initKind, allocKind, isConstant =>
   if exceedsMaxObjectSize dl size addrSpace then
     .error (.immediateUB s!"Allocation size {size} exceeds maximum object size")
-  let effAlign := max 1 align
-  let allocSpace := max 1 size
-  if cfg.maxMem != 0 && usedMem + allocSpace > cfg.maxMem then
-    .error .outOfMemory
-  let alignedAddr := DataLayout.alignTo nextAddr effAlign
-  let addrBits := dl.getAddressSizeInBits addrSpace
-  if alignedAddr + allocSpace ≥ (1 <<< addrBits) then
-    .error .outOfMemory
-  let fillByte := match initKind with
-    | .zeroed        => MemByte.zero
-    | .uninitialized => MemByte.uninitFor cfg
-    | .poisoned      => MemByte.poison
-  let initState := match initKind with
-    | .poisoned => MemoryObjectState.dead
-    | _         => MemoryObjectState.alive
-  let obj : MemoryObject := {
-    allocId    := nextAllocId
-    baseAddr   := alignedAddr
-    size       := size
-    align      := effAlign
-    addrSpace  := addrSpace
-    name       := name
-    state      := initState
-    allocKind  := allocKind
-    isConstant := isConstant
-    bytes      := Array.replicate size fillByte
-  }
-  let mem' : MemoryState :=
-    ⟨nextAllocId + 1, alignedAddr + allocSpace + 1, usedMem + allocSpace,
-     objects.insert obj.allocId obj, exposedGeneration, exposedProvenances,
-     globalAddrs, funcAddrs, addrToFunc⟩
-  .ok (obj, mem')
+  else
+    let effAlign := max 1 align
+    let allocSpace := max 1 size
+    if cfg.maxMem != 0 && usedMem + allocSpace > cfg.maxMem then
+      .error .outOfMemory
+    else
+      let alignedAddr := DataLayout.alignTo nextAddr effAlign
+      let addrBits := dl.getAddressSizeInBits addrSpace
+      if alignedAddr + allocSpace ≥ (1 <<< addrBits) then
+        .error .outOfMemory
+      else
+        let fillByte := match initKind with
+          | .zeroed        => MemByte.zero
+          | .uninitialized => MemByte.uninitFor cfg
+          | .poisoned      => MemByte.poison
+        let initState := match initKind with
+          | .poisoned => MemoryObjectState.dead
+          | _         => MemoryObjectState.alive
+        let obj : MemoryObject := {
+          allocId    := nextAllocId
+          baseAddr   := alignedAddr
+          size       := size
+          align      := effAlign
+          addrSpace  := addrSpace
+          name       := name
+          state      := initState
+          allocKind  := allocKind
+          isConstant := isConstant
+          bytes      := Array.replicate size fillByte
+        }
+        let mem' : MemoryState :=
+          ⟨nextAllocId + 1, alignedAddr + allocSpace + 1, usedMem + allocSpace,
+           objects.insert obj.allocId obj, exposedGeneration, exposedProvenances,
+           globalAddrs, funcAddrs, addrToFunc⟩
+        .ok (obj, mem')
+
+/-- Soundness of deterministic bump `allocate` w.r.t. relational `AllocSpec`. -/
+theorem allocate_satisfies_AllocSpec {mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem'}
+    (hwf : WellFormed mem)
+    (h : allocate mem dl cfg size align name addrSpace initKind allocKind isConstant = .ok (obj, mem')) :
+    AllocSpec mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem' := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc =>
+    simp only [allocate] at h
+    split at h
+    · simp at h
+    · rename_i hSizeOk
+      simp only [Bool.not_eq_true] at hSizeOk
+      split at h
+      · simp at h
+      · rename_i hMemOk
+        split at h
+        · simp at h
+        · rename_i hSpaceOk
+          simp only [Except.ok.injEq, Prod.mk.injEq] at h
+          obtain ⟨rfl, rfl⟩ := h
+          have hAlignGe : nextAddr ≤ DataLayout.alignTo nextAddr (max 1 align) :=
+            alignTo_ge nextAddr (max 1 align)
+          have hNextGe : 8 ≤ nextAddr := hwf.nextAddr_ge
+          have hBudget : cfg.maxMem = 0 ∨ usedMem + max 1 size ≤ cfg.maxMem := by
+            simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq, not_and] at hMemOk
+            by_cases h0 : cfg.maxMem = 0
+            · exact Or.inl h0
+            · have := hMemOk h0
+              exact Or.inr (by omega)
+          have hSpace : DataLayout.alignTo nextAddr (max 1 align) + max 1 size <
+              1 <<< dl.getAddressSizeInBits addrSpace := by
+            omega
+          refine {
+            size_ok := hSizeOk
+            mem_budget := hBudget
+            id_eq := rfl
+            size_eq := rfl
+            align_eq := rfl
+            as_eq := rfl
+            name_eq := rfl
+            kind_eq := rfl
+            const_eq := rfl
+            state_eq := by cases initKind <;> rfl
+            bytes_eq := by cases initKind <;> rfl
+            addr_pos := by dsimp only; omega
+            addr_aligned := alignTo_mod nextAddr (max 1 align) (by omega)
+            addr_in_space := hSpace
+            disjoint := ?_
+            mem'_eq := ?_
+          }
+          · intro id mo hget
+            obtain ⟨_, _, _, hlt⟩ := hwf.objects_wf id mo hget
+            dsimp only at hlt ⊢
+            exact Or.inr (by omega)
+          · have hmax : max nextAddr (DataLayout.alignTo nextAddr (max 1 align) + max 1 size + 1) =
+                DataLayout.alignTo nextAddr (max 1 align) + max 1 size + 1 := by omega
+            dsimp only
+            rw [hmax]
+
+theorem allocate_preserves_wf {mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem'}
+    (hwf : WellFormed mem)
+    (h : allocate mem dl cfg size align name addrSpace initKind allocKind isConstant = .ok (obj, mem')) :
+    WellFormed mem' :=
+  (allocate_satisfies_AllocSpec hwf h).preserves_wf hwf
+
+/-- Exhaustive classification of `MemoryState.allocate` errors. -/
+theorem allocate_error_cases {mem : MemoryState} {dl : DataLayout} {cfg : SemanticsConfig}
+    {size align : Nat} {name : String} {addrSpace : Nat} {initKind : MemInitKind}
+    {allocKind : MemAllocKind} {isConstant : Bool} {e : ExecError}
+    (h : allocate mem dl cfg size align name addrSpace initKind allocKind isConstant = .error e) :
+    (e = .outOfMemory ∧
+      ((cfg.maxMem ≠ 0 ∧ mem.usedMem + max 1 size > cfg.maxMem) ∨
+       DataLayout.alignTo mem.nextAddr (max 1 align) + max 1 size ≥ 1 <<< dl.getAddressSizeInBits addrSpace)) ∨
+    (∃ msg, e = .immediateUB msg ∧ exceedsMaxObjectSize dl size addrSpace = true) := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGen exposedProvs globalAddrs funcAddrs addrToFunc =>
+    unfold allocate at h
+    dsimp only at h
+    by_cases hsz : exceedsMaxObjectSize dl size addrSpace = true
+    · rw [if_pos hsz] at h; cases h; exact Or.inr ⟨_, rfl, hsz⟩
+    · rw [if_neg hsz] at h
+      split at h
+      · rename_i hmem
+        cases h
+        simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq] at hmem
+        exact Or.inl ⟨rfl, Or.inl hmem⟩
+      · split at h
+        · rename_i hsp
+          cases h
+          exact Or.inl ⟨rfl, Or.inr hsp⟩
+        · cases h
 
 /-- Create a concrete pointer at offset 0 of `obj`. -/
 def derivePointer (dl : DataLayout) (obj : MemoryObject) : Pointer :=
@@ -329,11 +527,13 @@ def derivePointer (dl : DataLayout) (obj : MemoryObject) : Pointer :=
 
 /-- Free an allocated memory object (marks `state := .freed`, clears bytes, removes exposed entries). -/
 def freeObject : MemoryState → AllocId → MemoryState
-  | mem@⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, allocId =>
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, allocId =>
     match objects.get? allocId with
-    | none => mem
+    | none =>
+      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
     | some obj =>
-      if obj.state == .freed then mem
+      if obj.state == .freed then
+        ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
       else
         let allocSpace := max 1 obj.size
         let freedObj := moWithStateBytes obj .freed #[]
@@ -341,9 +541,37 @@ def freeObject : MemoryState → AllocId → MemoryState
          exposedGeneration, exposedProvenances.filter (fun (id, _) => id != allocId),
          globalAddrs, funcAddrs, addrToFunc⟩
 
+theorem freeObject_preserves_wf {mem : MemoryState} (hwf : WellFormed mem) (allocId : AllocId) :
+    WellFormed (freeObject mem allocId) := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc =>
+    simp only [freeObject]
+    cases hget : objects.get? allocId with
+    | none => exact hwf
+    | some obj =>
+      dsimp only
+      by_cases hf : (obj.state == .freed) = true
+      · simp only [if_pos hf]; exact hwf
+      · simp only [if_neg hf]
+        refine ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, ?_⟩
+        intro id mo hmo
+        dsimp only at hmo ⊢
+        rw [AssocMap.get?_insert] at hmo
+        by_cases heq : (allocId == id) = true
+        · simp only [heq, ↓reduceIte, Option.some.injEq] at hmo
+          subst hmo
+          have hid : allocId = id := eq_of_beq heq
+          subst hid
+          obtain ⟨h1, h2, h3, h4⟩ := hwf.objects_wf allocId obj hget
+          cases obj
+          exact ⟨h1, h2, h3, h4⟩
+        · have hne : (allocId == id) = false := Bool.eq_false_iff.mpr heq
+          simp only [hne, Bool.false_eq_true, ↓reduceIte] at hmo
+          exact hwf.objects_wf id mo hmo
+
 /-- Expose provenance on `ptrtoint` (matches `llubi::Context::exposeProvenance`). -/
 def exposeProvenance : MemoryState → Provenance → MemoryState
-  | mem@⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, prov =>
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, prov =>
     match prov with
     | .concrete allocId =>
       match objects.get? allocId with
@@ -352,9 +580,31 @@ def exposeProvenance : MemoryState → Provenance → MemoryState
           let nextGen := exposedGeneration + 1
           ⟨nextAllocId, nextAddr, usedMem, objects, nextGen,
            exposedProvenances ++ [(allocId, nextGen)], globalAddrs, funcAddrs, addrToFunc⟩
-        else mem
-      | none => mem
-    | _ => mem
+        else
+          ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+      | none =>
+        ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+    | _ =>
+      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+
+theorem exposeProvenance_preserves_wf {mem : MemoryState} (hwf : WellFormed mem) (prov : Provenance) :
+    WellFormed (exposeProvenance mem prov) := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc =>
+    simp only [exposeProvenance]
+    cases prov with
+    | nullary => exact hwf
+    | wildcard _ _ => exact hwf
+    | concrete allocId =>
+      dsimp only
+      cases hget : objects.get? allocId with
+      | none => exact hwf
+      | some obj =>
+        dsimp only
+        by_cases ha : (obj.state == .alive) = true
+        · simp only [if_pos ha]
+          exact ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, hwf.objects_wf⟩
+        · simp only [if_neg ha]; exact hwf
 
 /-- Create a wildcard provenance snapshot on `inttoptr` (matches `llubi::Context::getWildcardProvenance`). -/
 def getWildcardProvenance (mem : MemoryState) : Provenance :=
@@ -378,17 +628,12 @@ def resolveObject? (mem : MemoryState) (ptr : Pointer) : Option MemoryObject :=
     let rec findExposed : List (AllocId × Nat) → Option MemoryObject
       | [] => none
       | (id, expGen) :: rest =>
-        if expGen ≤ gen then
-          let knownOk := match known? with
-            | none => true
-            | some k => k == id
-          if knownOk then
-            match mem.objects.get? id with
-            | some mo =>
-              if mo.state != .freed && mo.inBounds addr then some mo
-              else findExposed rest
-            | none => findExposed rest
-          else findExposed rest
+        if expGen ≤ gen && (known?.map (· == id)).getD true then
+          match mem.objects.get? id with
+          | some mo =>
+            if mo.state != .freed && mo.inBounds addr then some mo
+            else findExposed rest
+          | none => findExposed rest
         else findExposed rest
     findExposed mem.exposedProvenances
 
@@ -399,7 +644,7 @@ Note: Loading from a `.dead` (out-of-lifetime) stack object is allowed and yield
 whereas storing to a `.dead` object or accessing a `.freed` object is Immediate UB.
 -/
 def verifyMemAccess (mem : MemoryState) (ptr : Pointer) (accessSize alignment : Nat)
-    (isStore : Bool) : Except ExecError (MemoryObject × Nat) := do
+    (isStore : Bool) : Except ExecError (MemoryObject × Nat) :=
   match mem.resolveObject? ptr with
   | none =>
     .error (.immediateUB s!"Invalid memory access via pointer with invalid/nullary provenance: {ptr}")
@@ -407,18 +652,21 @@ def verifyMemAccess (mem : MemoryState) (ptr : Pointer) (accessSize alignment : 
     let badState := if isStore then mo.state != .alive else mo.state == .freed
     if badState then
       .error (.immediateUB s!"Access to dead/freed memory object '{mo.name}' via {ptr}")
-    if isStore && mo.isConstant then
+    else if isStore && mo.isConstant then
       .error (.immediateUB s!"Write to constant memory object '{mo.name}' via {ptr}")
-    let effAlign := max 1 alignment
-    let addr := ptr.addr.toNat
-    if addr % effAlign != 0 then
-      .error (.immediateUB s!"Misaligned memory access: addr=0x{String.ofList (Nat.toDigits 16 addr)}, align={effAlign}")
-    if accessSize > mo.size || addr < mo.baseAddr then
-      .error (.immediateUB s!"Out-of-bounds memory access: size={accessSize}, ptr={ptr}, obj=[0x{String.ofList (Nat.toDigits 16 mo.baseAddr)}, +{mo.size})")
-    let offset := addr - mo.baseAddr
-    if offset > mo.size - accessSize then
-      .error (.immediateUB s!"Out-of-bounds memory access: offset={offset}, size={accessSize}, objSize={mo.size}")
-    .ok (mo, offset)
+    else
+      let effAlign := max 1 alignment
+      let addr := ptr.addr.toNat
+      if addr % effAlign != 0 then
+        .error (.immediateUB s!"Misaligned memory access: addr=0x{String.ofList (Nat.toDigits 16 addr)}, align={effAlign}")
+      else if accessSize > mo.size || addr < mo.baseAddr then
+        .error (.immediateUB s!"Out-of-bounds memory access: size={accessSize}, ptr={ptr}, obj=[0x{String.ofList (Nat.toDigits 16 mo.baseAddr)}, +{mo.size})")
+      else
+        let offset := addr - mo.baseAddr
+        if offset > mo.size - accessSize then
+          .error (.immediateUB s!"Out-of-bounds memory access: offset={offset}, size={accessSize}, objSize={mo.size}")
+        else
+          .ok (mo, offset)
 
 /-- Read `len` raw bytes from `mo` starting at `offset` (returns poison bytes if `mo.state == .dead`). -/
 def readObjectBytes (mo : MemoryObject) (offset len : Nat) : Array MemByte :=
@@ -429,10 +677,11 @@ def readObjectBytes (mo : MemoryObject) (offset len : Nat) : Array MemByte :=
 
 /-- Write `newBytes` into object `allocId` starting at `offset`. -/
 def writeObjectBytes : MemoryState → AllocId → Nat → Array MemByte → MemoryState
-  | mem@⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩,
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩,
     allocId, offset, newBytes =>
     match objects.get? allocId with
-    | none => mem
+    | none =>
+      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
     | some mo =>
       let rec go (i : Nat) : Nat → Array MemByte → Array MemByte
         | 0, arr => arr
@@ -443,6 +692,32 @@ def writeObjectBytes : MemoryState → AllocId → Nat → Array MemByte → Mem
       let updated := go 0 newBytes.size mo.bytes
       ⟨nextAllocId, nextAddr, usedMem, objects.insert allocId (moWithBytes mo updated),
        exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+
+theorem writeObjectBytes_preserves_wf {mem : MemoryState} (hwf : WellFormed mem)
+    (allocId offset : Nat) (newBytes : Array MemByte) :
+    WellFormed (writeObjectBytes mem allocId offset newBytes) := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc =>
+    simp only [writeObjectBytes]
+    cases hget : objects.get? allocId with
+    | none => exact hwf
+    | some obj =>
+      dsimp only
+      refine ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, ?_⟩
+      intro id mo hmo
+      dsimp only at hmo ⊢
+      rw [AssocMap.get?_insert] at hmo
+      by_cases heq : (allocId == id) = true
+      · simp only [heq, ↓reduceIte, Option.some.injEq] at hmo
+        subst hmo
+        have hid : allocId = id := eq_of_beq heq
+        subst hid
+        obtain ⟨h1, h2, h3, h4⟩ := hwf.objects_wf allocId obj hget
+        cases obj
+        exact ⟨h1, h2, h3, h4⟩
+      · have hne : (allocId == id) = false := Bool.eq_false_iff.mpr heq
+        simp only [hne, Bool.false_eq_true, ↓reduceIte] at hmo
+        exact hwf.objects_wf id mo hmo
 
 /-- Execute `llvm.lifetime.start` (makes stack object alive with fresh uninit/poison bytes). -/
 def lifetimeStart (mem : MemoryState) (cfg : SemanticsConfig) (ptr : Pointer) : MemoryState :=
@@ -465,6 +740,503 @@ def lifetimeEnd (mem : MemoryState) (ptr : Pointer) : MemoryState :=
       let mo' := moWithStateBytes mo .dead (Array.replicate mo.size MemByte.poison)
       mem.withObjects (mem.objects.insert mo.allocId mo')
 
+private theorem findExposed_in_objects {mem : MemoryState} {gen : Nat} {known? : Option AllocId}
+    {addr : Nat} {mo : MemoryObject} :
+    ∀ l, resolveObject?.findExposed mem gen known? addr l = some mo →
+      ∃ id, mem.objects.get? id = some mo
+  | [], h0 => by simp [resolveObject?.findExposed] at h0
+  | (id, expGen) :: rest, h0 => by
+    unfold resolveObject?.findExposed at h0
+    split at h0
+    · split at h0
+      · rename_i m hobj
+        split at h0
+        · cases h0; exact ⟨id, hobj⟩
+        · exact findExposed_in_objects rest h0
+      · exact findExposed_in_objects rest h0
+    · exact findExposed_in_objects rest h0
+
+private theorem resolveObject?_in_objects {mem : MemoryState} {ptr : Pointer} {mo : MemoryObject}
+    (h : mem.resolveObject? ptr = some mo) :
+    ∃ id, mem.objects.get? id = some mo := by
+  unfold resolveObject? at h
+  cases hp : ptr.prov with
+  | nullary => simp [hp] at h
+  | concrete id => rw [hp] at h; exact ⟨id, h⟩
+  | wildcard gen known? =>
+    rw [hp] at h
+    exact findExposed_in_objects mem.exposedProvenances h
+
+theorem lifetimeStart_preserves_wf {mem : MemoryState} (hwf : WellFormed mem)
+    (cfg : SemanticsConfig) (ptr : Pointer) :
+    WellFormed (lifetimeStart mem cfg ptr) := by
+  unfold lifetimeStart
+  cases hres : mem.resolveObject? ptr with
+  | none => exact hwf
+  | some mo =>
+    dsimp only
+    split
+    · exact hwf
+    · obtain ⟨id0, hget0⟩ := resolveObject?_in_objects hres
+      obtain ⟨hid0, hlt0, hbase0, hbound0⟩ := hwf.objects_wf id0 mo hget0
+      cases mem
+      refine ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, ?_⟩
+      intro id m hm
+      dsimp only [withObjects] at hm ⊢
+      rw [AssocMap.get?_insert] at hm
+      by_cases heq : (mo.allocId == id) = true
+      · simp only [heq, ↓reduceIte, Option.some.injEq] at hm
+        subst hm
+        have hid : mo.allocId = id := eq_of_beq heq
+        subst hid
+        cases mo
+        exact ⟨rfl, by rw [hid0]; exact hlt0, hbase0, hbound0⟩
+      · have hne : (mo.allocId == id) = false := Bool.eq_false_iff.mpr heq
+        simp only [hne, Bool.false_eq_true, ↓reduceIte] at hm
+        exact hwf.objects_wf id m hm
+
+theorem lifetimeEnd_preserves_wf {mem : MemoryState} (hwf : WellFormed mem) (ptr : Pointer) :
+    WellFormed (lifetimeEnd mem ptr) := by
+  unfold lifetimeEnd
+  cases hres : mem.resolveObject? ptr with
+  | none => exact hwf
+  | some mo =>
+    dsimp only
+    split
+    · exact hwf
+    · obtain ⟨id0, hget0⟩ := resolveObject?_in_objects hres
+      obtain ⟨hid0, hlt0, hbase0, hbound0⟩ := hwf.objects_wf id0 mo hget0
+      cases mem
+      refine ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, ?_⟩
+      intro id m hm
+      dsimp only [withObjects] at hm ⊢
+      rw [AssocMap.get?_insert] at hm
+      by_cases heq : (mo.allocId == id) = true
+      · simp only [heq, ↓reduceIte, Option.some.injEq] at hm
+        subst hm
+        have hid : mo.allocId = id := eq_of_beq heq
+        subst hid
+        cases mo
+        exact ⟨rfl, by rw [hid0]; exact hlt0, hbase0, hbound0⟩
+      · have hne : (mo.allocId == id) = false := Bool.eq_false_iff.mpr heq
+        simp only [hne, Bool.false_eq_true, ↓reduceIte] at hm
+        exact hwf.objects_wf id m hm
+
+theorem insertGlobalAddr_preserves_wf {mem : MemoryState} (hwf : WellFormed mem)
+    (name : AST.GlobalId) (ptr : Pointer) :
+    WellFormed (insertGlobalAddr mem name ptr) := by
+  cases mem; exact ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, hwf.objects_wf⟩
+
+theorem insertFuncAddr_preserves_wf {mem : MemoryState} (hwf : WellFormed mem)
+    (name : AST.FunctionId) (baseAddr : Nat) (ptr : Pointer) :
+    WellFormed (insertFuncAddr mem name baseAddr ptr) := by
+  cases mem; exact ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, hwf.objects_wf⟩
+
+/-- Every allocation ID listed in `mem.allocIds` is strictly below `mem.nextAllocId`. -/
+theorem allocId_lt_nextAllocId_of_mem_allocIds {mem : MemoryState}
+    (hwf : WellFormed mem) {id : AllocId} (hid : id ∈ mem.allocIds) :
+    id < mem.nextAllocId := by
+  obtain ⟨mo, hget⟩ := AssocMap.get?_isSome_of_mem_keys mem.objects hid
+  exact (hwf.objects_wf id mo hget).2.1
+
+theorem objects_get?_writeObjectBytes_ne (mem : MemoryState) (aid offset : Nat)
+    (bs : Array MemByte) {id : AllocId} (hne : aid ≠ id) :
+    (mem.writeObjectBytes aid offset bs).objects.get? id = mem.objects.get? id := by
+  cases mem with
+  | mk nA nAd uM objs eG eP gA fA aF =>
+    simp only [writeObjectBytes]
+    cases objs.get? aid with
+    | none => rfl
+    | some mo =>
+      dsimp only
+      rw [AssocMap.get?_insert, beq_false_of_ne hne]; rfl
+
+theorem objects_get?_freeObject_ne (mem : MemoryState) (aid : AllocId)
+    {id : AllocId} (hne : aid ≠ id) :
+    (mem.freeObject aid).objects.get? id = mem.objects.get? id := by
+  cases mem with
+  | mk nA nAd uM objs eG eP gA fA aF =>
+    simp only [freeObject]
+    cases objs.get? aid with
+    | none => rfl
+    | some mo =>
+      dsimp only
+      by_cases hf : (mo.state == .freed) = true
+      · rw [if_pos hf]
+      · rw [if_neg hf]
+        dsimp only
+        rw [AssocMap.get?_insert, beq_false_of_ne hne]; rfl
+
+theorem verifyMemAccess_error_is_ub {mem : MemoryState} {ptr : Pointer}
+    {accessSize alignment : Nat} {isStore : Bool} {err : ExecError}
+    (h : mem.verifyMemAccess ptr accessSize alignment isStore = .error err) :
+    ∃ msg, err = .immediateUB msg := by
+  unfold verifyMemAccess at h
+  cases hres : mem.resolveObject? ptr with
+  | none => rw [hres] at h; cases h; exact ⟨_, rfl⟩
+  | some mo =>
+    rw [hres] at h; dsimp only at h
+    by_cases h1 : (if isStore = true then mo.state != MemoryObjectState.alive else mo.state == MemoryObjectState.freed) = true
+    · rw [if_pos h1] at h; cases h; exact ⟨_, rfl⟩
+    · rw [if_neg h1] at h
+      by_cases h2 : (isStore && mo.isConstant) = true
+      · rw [if_pos h2] at h; cases h; exact ⟨_, rfl⟩
+      · rw [if_neg h2] at h
+        by_cases h3 : (ptr.addr.toNat % max 1 alignment != 0) = true
+        · rw [if_pos h3] at h; cases h; exact ⟨_, rfl⟩
+        · rw [if_neg h3] at h
+          by_cases h4 : (decide (accessSize > mo.size) || decide (ptr.addr.toNat < mo.baseAddr)) = true
+          · rw [if_pos h4] at h; cases h; exact ⟨_, rfl⟩
+          · rw [if_neg h4] at h
+            by_cases h5 : ptr.addr.toNat - mo.baseAddr > mo.size - accessSize
+            · rw [if_pos h5] at h; cases h; exact ⟨_, rfl⟩
+            · rw [if_neg h5] at h; cases h
+
+theorem resolveObject?_writeObjectBytes_same {mem : MemoryState}
+    (hwf : WellFormed mem) {ptr : Pointer} {mo : MemoryObject}
+    (hres : mem.resolveObject? ptr = some mo) (offset : Nat) (bs : Array MemByte) :
+    let mo' := { mo with bytes := writeObjectBytes.go offset bs 0 bs.size mo.bytes }
+    (mem.writeObjectBytes mo.allocId offset bs).resolveObject? ptr = some mo' := by
+  intro mo'
+  have hgetSame : mem.objects.get? mo.allocId = some mo := by
+    obtain ⟨aid, haid⟩ := resolveObject?_in_objects hres
+    have hid := (hwf.objects_wf aid mo haid).1
+    rw [hid]; exact haid
+  have hmoEq : moWithBytes mo (writeObjectBytes.go offset bs 0 bs.size mo.bytes) = mo' := by
+    cases mo; rfl
+  have hgetWrite : ∀ id, (mem.writeObjectBytes mo.allocId offset bs).objects.get? id =
+      if mo.allocId == id then some mo' else mem.objects.get? id := by
+    intro id
+    cases mem with
+    | mk nA nAd uM objs eG eP gA fA aF =>
+      dsimp only [writeObjectBytes] at hgetSame ⊢
+      rw [hgetSame]; dsimp only
+      rw [hmoEq, AssocMap.get?_insert]
+  cases hp : ptr.prov with
+  | nullary => simp [resolveObject?, hp] at hres
+  | concrete aid =>
+    simp only [resolveObject?, hp] at hres ⊢
+    have hid := (hwf.objects_wf aid mo hres).1
+    rw [hgetWrite aid, hid, beq_self_eq_true]; rfl
+  | wildcard gen known? =>
+    simp only [resolveObject?, hp] at hres ⊢
+    have hexp : (mem.writeObjectBytes mo.allocId offset bs).exposedProvenances = mem.exposedProvenances := by
+      cases mem; dsimp only [writeObjectBytes] at hgetSame ⊢; rw [hgetSame]
+    rw [hexp]
+    have hgo : ∀ l, resolveObject?.findExposed mem gen known? ptr.addr.toNat l = some mo →
+        resolveObject?.findExposed (mem.writeObjectBytes mo.allocId offset bs) gen known? ptr.addr.toNat l = some mo' := by
+      intro l
+      induction l with
+      | nil => intro h; simp [resolveObject?.findExposed] at h
+      | cons hd rest ih =>
+        obtain ⟨id, expGen⟩ := hd
+        intro h
+        unfold resolveObject?.findExposed at h ⊢
+        by_cases hcond : (decide (expGen ≤ gen) && (known?.map (fun x => x == id)).getD true) = true
+        · rw [if_pos hcond] at h ⊢
+          rw [hgetWrite id]
+          by_cases hid : (mo.allocId == id) = true
+          · rw [if_pos hid]
+            have hidEq : mo.allocId = id := eq_of_beq hid
+            rw [← hidEq, hgetSame] at h
+            dsimp only at h ⊢
+            by_cases hok : (mo.state != MemoryObjectState.freed && mo.inBounds ptr.addr.toNat) = true
+            · have hok' : (mo'.state != MemoryObjectState.freed && mo'.inBounds ptr.addr.toNat) = true := hok
+              rw [if_pos hok']
+            · have hok' : ¬ (mo'.state != MemoryObjectState.freed && mo'.inBounds ptr.addr.toNat) = true := hok
+              rw [if_neg hok] at h
+              rw [if_neg hok']
+              exact ih h
+          · rw [if_neg hid]
+            cases hobj : mem.objects.get? id with
+            | none => rw [hobj] at h; exact ih h
+            | some m =>
+              rw [hobj] at h; dsimp only at h ⊢
+              by_cases hok : (m.state != MemoryObjectState.freed && m.inBounds ptr.addr.toNat) = true
+              · rw [if_pos hok] at h ⊢
+                cases h
+                have hcontra := (hwf.objects_wf id mo hobj).1
+                exact False.elim (hid (by simp [hcontra]))
+              · rw [if_neg hok] at h ⊢; exact ih h
+        · rw [if_neg hcond] at h ⊢; exact ih h
+    exact hgo mem.exposedProvenances hres
+
+theorem verifyMemAccess_writeObjectBytes_same {mem : MemoryState}
+    (hwf : WellFormed mem) {ptr : Pointer} {accessSize alignment : Nat}
+    {isStore : Bool} {mo : MemoryObject} {offset : Nat}
+    (hver : mem.verifyMemAccess ptr accessSize alignment isStore = .ok (mo, offset))
+    (wOff : Nat) (bs : Array MemByte) :
+    let mo' := { mo with bytes := writeObjectBytes.go wOff bs 0 bs.size mo.bytes }
+    (mem.writeObjectBytes mo.allocId wOff bs).verifyMemAccess ptr accessSize alignment isStore = .ok (mo', offset) := by
+  intro mo'
+  unfold verifyMemAccess at hver ⊢
+  cases hres : mem.resolveObject? ptr with
+  | none => rw [hres] at hver; cases hver
+  | some mo0 =>
+    rw [hres] at hver; dsimp only at hver
+    by_cases h1 : (if isStore = true then mo0.state != MemoryObjectState.alive else mo0.state == MemoryObjectState.freed) = true
+    · rw [if_pos h1] at hver; cases hver
+    · rw [if_neg h1] at hver
+      by_cases h2 : (isStore && mo0.isConstant) = true
+      · rw [if_pos h2] at hver; cases hver
+      · rw [if_neg h2] at hver
+        by_cases h3 : (ptr.addr.toNat % max 1 alignment != 0) = true
+        · rw [if_pos h3] at hver; cases hver
+        · rw [if_neg h3] at hver
+          by_cases h4 : (decide (accessSize > mo0.size) || decide (ptr.addr.toNat < mo0.baseAddr)) = true
+          · rw [if_pos h4] at hver; cases hver
+          · rw [if_neg h4] at hver
+            by_cases h5 : ptr.addr.toNat - mo0.baseAddr > mo0.size - accessSize
+            · rw [if_pos h5] at hver; cases hver
+            · rw [if_neg h5] at hver
+              cases hver
+              have hres1 := resolveObject?_writeObjectBytes_same hwf hres wOff bs
+              rw [hres1]; dsimp only
+              rw [if_neg h1, if_neg h2, if_neg h3, if_neg h4, if_neg h5]
+
+theorem writeObjectBytes_overwrite_singleton (mem : MemoryState) (aid offset : Nat)
+    (b1 b2 : MemByte) :
+    (mem.writeObjectBytes aid offset #[b1]).writeObjectBytes aid offset #[b2] =
+      mem.writeObjectBytes aid offset #[b2] := by
+  cases mem with
+  | mk nA nAd uM objs eG eP gA fA aF =>
+    simp only [writeObjectBytes]
+    cases hget : objs.get? aid with
+    | none => simp [hget]
+    | some mo =>
+      dsimp only
+      rw [AssocMap.get?_insert, beq_self_eq_true]
+      simp only [↓reduceIte, moWithBytes, AssocMap.insert_insert_same]
+      have hsz1 : (#[b1] : Array MemByte).size = 1 := rfl
+      have hsz2 : (#[b2] : Array MemByte).size = 1 := rfl
+      rw [hsz1, hsz2]
+      dsimp only [writeObjectBytes.go]
+      cases mo with
+      | mk mId mBase mSz mAl mAs mNm mSt mAk mC mBs =>
+        dsimp only
+        by_cases hlt : offset < mBs.size
+        · simp only [Nat.add_zero, hlt, ↓reduceDIte, Array.size_set, Array.set_set]
+        · simp only [Nat.add_zero, hlt, ↓reduceDIte]
+
 end MemoryState
+
+/-! ### Memory Injections & Bit/Byte/Memory Refinement (CompCert / Alive2 style) -/
+
+/--
+Partial bijection mapping target `AllocId`s (in `y`) to source `AllocId`s (in `x`),
+used to relate pointers, memory bytes, and traces across optimizations that add, remove,
+or reorder internal allocations (`alloca` / `malloc`).
+-/
+structure MemoryInjection : Type where
+  map       : AllocId → Option AllocId
+  injective : ∀ a1 a2 b, map a1 = some b → map a2 = some b → a1 = a2
+
+namespace MemoryInjection
+
+/-- Identity injection (`id ↦ some id`). -/
+def id : MemoryInjection where
+  map := some
+  injective := by
+    intro a1 a2 b h1 h2
+    cases h1
+    cases h2
+    rfl
+
+/-- Composition of injections (`f` maps `z → y`, `g` maps `y → x`, yielding `z → x`). -/
+def comp (f g : MemoryInjection) : MemoryInjection where
+  map := fun a => (f.map a).bind g.map
+  injective := by
+    intro a1 a2 b h1 h2
+    cases hf1 : f.map a1 with
+    | none => simp [hf1] at h1
+    | some m1 =>
+      rw [hf1] at h1
+      cases hf2 : f.map a2 with
+      | none => simp [hf2] at h2
+      | some m2 =>
+        rw [hf2] at h2
+        have hm : m1 = m2 := g.injective m1 m2 b h1 h2
+        subst hm
+        exact f.injective a1 a2 m1 hf1 hf2
+
+/-- An injection fixes every allocation ID in `ids` to itself (caller-owned / global objects). -/
+def IdOn (inj : MemoryInjection) (ids : List AllocId) : Prop :=
+  ∀ id ∈ ids, inj.map id = some id
+
+theorem id_idOn (ids : List AllocId) : id.IdOn ids := by
+  intro _ _; rfl
+
+theorem comp_idOn {f g : MemoryInjection} {ids : List AllocId}
+    (hf : f.IdOn ids) (hg : g.IdOn ids) : (comp f g).IdOn ids := by
+  intro i hi
+  simp [comp, hf i hi, hg i hi]
+
+end MemoryInjection
+
+/-- Provenance refinement under a `MemoryInjection` (`py` refines `px`). -/
+def Provenance.Refines (inj : MemoryInjection) : Provenance → Provenance → Prop
+  | .nullary, .nullary => True
+  | .concrete ay, .concrete ax => inj.map ay = some ax
+  | .wildcard _ ky, .wildcard _ kx =>
+    match ky, kx with
+    | some ay, some ax => inj.map ay = some ax
+    | some _, none => True
+    | none, none => True
+    | none, some _ => False
+  | _, _ => False
+
+theorem Provenance.Refines.refl (p : Provenance) : Provenance.Refines .id p p := by
+  cases p with
+  | nullary => trivial
+  | concrete _ => rfl
+  | wildcard _ k => cases k <;> trivial
+
+theorem Provenance.Refines.trans {f g : MemoryInjection} {p1 p2 p3 : Provenance}
+    (h12 : Provenance.Refines f p1 p2) (h23 : Provenance.Refines g p2 p3) :
+    Provenance.Refines (f.comp g) p1 p3 := by
+  cases p1 <;> cases p2 <;> cases p3
+  all_goals simp only [Provenance.Refines] at h12 h23 ⊢
+  all_goals try exact trivial
+  all_goals try exact False.elim h12
+  all_goals try exact False.elim h23
+  · simp [MemoryInjection.comp, h12, h23]
+  · rename_i k1 _ k2 _ k3
+    cases k1 <;> cases k2 <;> cases k3 <;> simp_all [MemoryInjection.comp]
+
+/-- Pointer refinement under a `MemoryInjection` (matching address bitvector and refined provenance). -/
+def Pointer.Refines (inj : MemoryInjection) (py px : Pointer) : Prop :=
+  (∃ h : px.addrWidth = py.addrWidth, h ▸ px.addr = py.addr) ∧
+  Provenance.Refines inj py.prov px.prov
+
+theorem Pointer.Refines.refl (p : Pointer) : Pointer.Refines .id p p :=
+  ⟨⟨rfl, rfl⟩, Provenance.Refines.refl p.prov⟩
+
+theorem Pointer.Refines.trans {f g : MemoryInjection} {p1 p2 p3 : Pointer}
+    (h12 : Pointer.Refines f p1 p2) (h23 : Pointer.Refines g p2 p3) :
+    Pointer.Refines (f.comp g) p1 p3 := by
+  obtain ⟨⟨hw12, ha12⟩, hp12⟩ := h12
+  obtain ⟨⟨hw23, ha23⟩, hp23⟩ := h23
+  refine ⟨⟨hw23.trans hw12, ?_⟩, Provenance.Refines.trans hp12 hp23⟩
+  cases p1; cases p2; cases p3
+  dsimp only at hw12 hw23 ha12 ha23 ⊢
+  subst hw23; subst hw12
+  exact ha23.trans ha12
+
+/-- Single memory-bit refinement (`poison`/`undef` in source refine to anything; concrete bits must match under `inj`). -/
+def MemBit.Refines (inj : MemoryInjection) : MemBit → MemBit → Prop
+  | _, .poison => True
+  | _, .undef => True
+  | .concrete by_ py, .concrete bx px =>
+    by_ = bx ∧
+    match py, px with
+    | none, none => True
+    | some (p1, i1), some (p2, i2) => i1 = i2 ∧ Provenance.Refines inj p1 p2
+    | _, _ => False
+  | _, _ => False
+
+theorem MemBit.Refines.refl (b : MemBit) : MemBit.Refines .id b b := by
+  cases b with
+  | poison => trivial
+  | undef => trivial
+  | concrete bit pb =>
+    refine ⟨rfl, ?_⟩
+    cases pb with
+    | none => trivial
+    | some p => exact ⟨rfl, Provenance.Refines.refl p.1⟩
+
+theorem MemBit.Refines.trans {f g : MemoryInjection} {b1 b2 b3 : MemBit}
+    (h12 : MemBit.Refines f b1 b2) (h23 : MemBit.Refines g b2 b3) :
+    MemBit.Refines (f.comp g) b1 b3 := by
+  cases b3 with
+  | poison => trivial
+  | undef => trivial
+  | concrete bx px =>
+    cases b2 with
+    | poison => cases h23
+    | undef => cases h23
+    | concrete bm pm =>
+      cases b1 with
+      | poison => cases h12
+      | undef => cases h12
+      | concrete by_ py =>
+        obtain ⟨hb12, hp12⟩ := h12
+        obtain ⟨hb23, hp23⟩ := h23
+        refine ⟨hb12.trans hb23, ?_⟩
+        cases py <;> cases pm <;> cases px
+        all_goals dsimp only at hp12 hp23 ⊢
+        all_goals try exact trivial
+        all_goals try exact False.elim hp12
+        all_goals try exact False.elim hp23
+        exact ⟨hp12.1.trans hp23.1, Provenance.Refines.trans hp12.2 hp23.2⟩
+
+/-- Byte-level memory refinement (all 8 bits refine under `inj`). -/
+def MemByte.Refines (inj : MemoryInjection) (by_ bx : MemByte) : Prop :=
+  ∀ i < 8, MemBit.Refines inj (by_.getBit i) (bx.getBit i)
+
+theorem MemByte.Refines.refl (b : MemByte) : MemByte.Refines .id b b :=
+  fun i _ => MemBit.Refines.refl (b.getBit i)
+
+theorem MemByte.Refines.trans {f g : MemoryInjection} {b1 b2 b3 : MemByte}
+    (h12 : MemByte.Refines f b1 b2) (h23 : MemByte.Refines g b2 b3) :
+    MemByte.Refines (f.comp g) b1 b3 :=
+  fun i hi => MemBit.Refines.trans (h12 i hi) (h23 i hi)
+
+/--
+Caller-visible memory refinement (`memY` refines `memX` on all `callerIds` under `inj`).
+Every caller/global allocation in `callerIds` must exist with identical size and lifecycle state,
+and its byte contents in `memY` must refine those in `memX` under `inj`.
+Internal allocations (`alloca` / non-leaked `malloc`) outside `callerIds` may differ freely.
+-/
+def MemoryState.Refines (inj : MemoryInjection) (callerIds : List AllocId)
+    (memY memX : MemoryState) : Prop :=
+  ∀ id ∈ callerIds,
+    match memY.objects.get? id, memX.objects.get? id with
+    | some moY, some moX =>
+      moY.size = moX.size ∧
+      moY.state = moX.state ∧
+      (moX.state ≠ .freed →
+        ∀ i < moX.size,
+          MemByte.Refines inj (moY.bytes.getD i MemByte.poison) (moX.bytes.getD i MemByte.poison))
+    | none, none => True
+    | _, _ => False
+
+theorem MemoryState.Refines.refl (callerIds : List AllocId) (mem : MemoryState) :
+    MemoryState.Refines .id callerIds mem mem := by
+  intro id _
+  cases mem.objects.get? id with
+  | none => trivial
+  | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.Refines.refl _⟩
+
+theorem MemoryState.Refines.trans {f g : MemoryInjection} {callerIds : List AllocId}
+    {m1 m2 m3 : MemoryState}
+    (h12 : MemoryState.Refines f callerIds m1 m2)
+    (h23 : MemoryState.Refines g callerIds m2 m3) :
+    MemoryState.Refines (f.comp g) callerIds m1 m3 := by
+  intro id hid
+  have r12 := h12 id hid
+  have r23 := h23 id hid
+  cases hm1 : m1.objects.get? id with
+  | none =>
+    cases hm2 : m2.objects.get? id with
+    | none =>
+      cases hm3 : m3.objects.get? id with
+      | none => trivial
+      | some _ => simp [hm2, hm3] at r23
+    | some _ => simp [hm1, hm2] at r12
+  | some mo1 =>
+    cases hm2 : m2.objects.get? id with
+    | none => simp [hm1, hm2] at r12
+    | some mo2 =>
+      cases hm3 : m3.objects.get? id with
+      | none => simp [hm2, hm3] at r23
+      | some mo3 =>
+        simp only [hm1, hm2, hm3] at r12 r23 ⊢
+        obtain ⟨hs12, hst12, hb12⟩ := r12
+        obtain ⟨hs23, hst23, hb23⟩ := r23
+        refine ⟨hs12.trans hs23, hst12.trans hst23, ?_⟩
+        intro hnf i hi
+        have hnf2 : mo2.state ≠ MemoryObjectState.freed := by rw [hst23]; exact hnf
+        have hi2 : i < mo2.size := by rw [hs23]; exact hi
+        exact MemByte.Refines.trans (hb12 hnf2 i hi2) (hb23 hnf i hi)
 
 end LeanNanoLlvm.Semantics

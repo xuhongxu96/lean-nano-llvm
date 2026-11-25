@@ -8,8 +8,8 @@ def Identifier.print : Identifier → String
 
 mutual
 
-def LlvmType.print : LlvmType φ → String
-  | .int w => w.print
+def LlvmType.print : LlvmType → String
+  | .int w => s!"i{w}"
   | .float ft => ft.print
   | .ptr 0 => "ptr"
   | .ptr as => s!"ptr addrspace({as})"
@@ -25,11 +25,11 @@ def LlvmType.print : LlvmType φ → String
       let argStrs := LlvmType.printList args ++ (if isVarArg then ["..."] else [])
       s!"{ret.print} ({String.intercalate ", " argStrs})"
 
-def LlvmType.printList : List (LlvmType φ) → List String
+def LlvmType.printList : List LlvmType → List String
   | [] => []
   | t :: ts => t.print :: LlvmType.printList ts
 
-def LlvmRetType.print : LlvmRetType φ → String
+def LlvmRetType.print : LlvmRetType → String
   | .void => "void"
   | .ret t => t.print
 
@@ -72,7 +72,7 @@ def GEPFlags.print (f : GEPFlags) : String :=
     (if f.nuw then ["nuw"] else [])
   if parts.isEmpty then "" else " " ++ String.intercalate " " parts
 
-def ValueAttr.print : ValueAttr φ → String
+def ValueAttr.print : ValueAttr → String
   | .noundef => "noundef"
   | .nonnull => "nonnull"
   | .align a => s!"align {a}"
@@ -118,7 +118,7 @@ private def formatFlags (flags : List String) : String :=
 
 mutual
 
-def Exp.print : Exp φ → String
+def Exp.print : Exp → String
   | .identifier id => id.print
   | .bool b => s!"{b}"
   | .int i => s!"{i}"
@@ -128,7 +128,7 @@ def Exp.print : Exp φ → String
       if e == 0 then s!"{sgn}{m}.0" else s!"{sgn}{m}e{e}"
   | .null => "null"
   | .zeroinitializer => "zeroinitializer"
-  | .undef rawid => s!"undef!{rawid}"
+  | .undef => "undef"
   | .poison => "poison"
   | .array elems =>
       "[" ++ String.intercalate ", " (Exp.printTypedList elems) ++ "]"
@@ -150,19 +150,19 @@ def Exp.print : Exp φ → String
       let (name, flags) := op.printNameAndFlags
       s!"{name}{formatFlags flags} ({ty.print} {v1.print}, {ty.print} {v2.print})"
 
-def Exp.printTypedList : List (LlvmType φ × Exp φ) → List String
+def Exp.printTypedList : List (LlvmType × Exp) → List String
   | [] => []
   | (ty, e) :: rest => s!"{ty.print} {e.print}" :: Exp.printTypedList rest
 
 end
 
-private def printBinOp (op : String) (flags : List String) (t : LlvmType φ) (v1 v2 : Exp φ) : String :=
+private def printBinOp (op : String) (flags : List String) (t : LlvmType) (v1 v2 : Exp) : String :=
   s!"{op}{formatFlags flags} {t.print} {v1.print}, {v2.print}"
 
-private def printConversionOp (op : String) (flags : List String) (fromTy : LlvmType φ) (v : Exp φ) (toTy : LlvmType φ) : String :=
+private def printConversionOp (op : String) (flags : List String) (fromTy : LlvmType) (v : Exp) (toTy : LlvmType) : String :=
   s!"{op}{formatFlags flags} {fromTy.print} {v.print} to {toTy.print}"
 
-def Instruction.print : @Instruction φ → String
+def Instruction.print : Instruction → String
   | .intBinaryOp op t v1 v2 =>
       let (name, flags) := op.printNameAndFlags
       printBinOp name flags t v1 v2
@@ -237,7 +237,7 @@ def Instruction.print : @Instruction φ → String
   | .freeze ⟨ty, v⟩ =>
       s!"freeze {ty.print} {v.print}"
 
-def Terminator.print : @Terminator φ → String
+def Terminator.print : Terminator → String
   | .retVoid => "ret void"
   | .ret ⟨ty, v⟩ => s!"ret {ty.print} {v.print}"
   | .br dest => s!"br label %{dest.ToString}"
@@ -247,11 +247,10 @@ def Terminator.print : @Terminator φ → String
       s!"switch {ty.print} {cond.print}, label %{defDest.ToString} [ {caseStr} ]"
   | .unreachable => "unreachable"
 
-def printInstructionWithId (id : InstructionId) (instruction : @Instruction φ ⊕ @Terminator φ) : String :=
+def printInstructionWithId (id : InstructionId) (instruction : Instruction ⊕ Terminator) : String :=
   let instructionStr := match instruction with
     | .inl instruction => instruction.print
     | .inr terminator => terminator.print
-
   match id with
   | .id id =>
     let id := Identifier.local_id id
@@ -264,47 +263,58 @@ private def indentString (indent : Nat) (s : String) : String :=
   | 0 => ""
   | n + 1 => s ++ indentString n s
 
-def printCode (indent : Nat) : @Code φ → String
+def printCode (indent : Nat) : Code → String
   | .nil => ""
   | .cons ⟨id, instruction⟩ tail =>
     indentString indent " " ++ printInstructionWithId id (.inl instruction) ++ "\n" ++ printCode indent tail
 
-def Block.print (block : @Block φ) : String :=
+def Block.print (block : Block) : String :=
   let indentSize := 2
   s!"{block.id.ToString}:\n"
   ++ printCode indentSize block.code
   ++ indentString indentSize " " ++ printInstructionWithId block.terminator.fst (.inr block.terminator.snd) ++ "\n"
 
-def Declaration.printSignature (decl : @Declaration φ) : String :=
+def Declaration.printSignature (decl : Declaration) : String :=
   let id := Identifier.global_id decl.name
+  let retAttrPrefix :=
+    if decl.retAttrs.isEmpty then "" else String.intercalate " " (decl.retAttrs.map ValueAttr.print) ++ " "
   match decl.type with
   | .function ret args isVarArg =>
-    let argStrs := args.map (fun ty => ty.print) ++ (if isVarArg then ["..."] else [])
-    let argStr := String.intercalate ", " argStrs
-    s!"{ret.print} {id.print}({argStr})"
+    let argStrs := (List.range args.length).map fun i =>
+      let ty := args[i]!
+      let attrs := decl.argAttrs.getD i []
+      s!"{ty.print}{formatFlags (attrs.map ValueAttr.print)}"
+    let allArgs := argStrs ++ (if isVarArg then ["..."] else [])
+    let argStr := String.intercalate ", " allArgs
+    s!"{retAttrPrefix}{ret.print} {id.print}({argStr})"
   | _ => s!"<invalid-fn-type> {id.print}()"
 
-def Definition.printSignature (definition : @Definition φ) : String :=
+def Definition.printSignature (definition : Definition) : String :=
   let decl := definition.prototype
   let id := Identifier.global_id decl.name
+  let retAttrPrefix :=
+    if decl.retAttrs.isEmpty then "" else String.intercalate " " (decl.retAttrs.map ValueAttr.print) ++ " "
   match decl.type with
   | .function ret args isVarArg =>
-    let argPairs := args.zip (definition.args.map (Identifier.local_id ·))
-    let argStrs := argPairs.map (fun ⟨ty, arg⟩ => s!"{ty.print} {arg.print}") ++
-      (if isVarArg then ["..."] else [])
-    let argStr := String.intercalate ", " argStrs
-    s!"{ret.print} {id.print}({argStr})"
+    let argStrs := (List.range (min args.length definition.args.length)).map fun i =>
+      let ty := args[i]!
+      let arg := Identifier.local_id definition.args[i]!
+      let attrs := decl.argAttrs.getD i []
+      s!"{ty.print}{formatFlags (attrs.map ValueAttr.print)} {arg.print}"
+    let allArgs := argStrs ++ (if isVarArg then ["..."] else [])
+    let argStr := String.intercalate ", " allArgs
+    s!"{retAttrPrefix}{ret.print} {id.print}({argStr})"
   | _ => s!"<invalid-fn-type> {id.print}()"
 
-def Declaration.print (decl : @Declaration φ) : String :=
+def Declaration.print (decl : Declaration) : String :=
   s!"declare {decl.printSignature}"
 
-def Definition.print (definition : @Definition φ) : String :=
+def Definition.print (definition : Definition) : String :=
   let sig := definition.printSignature
   let blocksStr := String.join (definition.blocks.map Block.print)
   s!"define {sig} " ++ "{\n" ++ blocksStr ++ "}"
 
-def GlobalVariable.print (gv : @GlobalVariable φ) : String :=
+def GlobalVariable.print (gv : GlobalVariable) : String :=
   let kind := if gv.isConstant then "constant" else "global"
   let asStr := if gv.addrSpace == 0 then "" else s!"addrspace({gv.addrSpace}) "
   let initStr := match gv.initializer with
@@ -315,12 +325,12 @@ def GlobalVariable.print (gv : @GlobalVariable φ) : String :=
     | none => ""
   s!"@{gv.name.ToString} = {asStr}{kind} {gv.ty.print}{initStr}{alignStr}"
 
-def TopLevelEntity.print : @TopLevelEntity φ → String
+def TopLevelEntity.print : TopLevelEntity → String
   | .global gv => gv.print
   | .declaration decl => decl.print
   | .definition defn => defn.print
 
-def TopLevel.print : @TopLevel φ → String
+def TopLevel.print : TopLevel → String
   | ⟨.nil⟩ => ""
   | ⟨.cons entity tail⟩ => entity.print ++ "\n" ++ TopLevel.print ⟨tail⟩
 

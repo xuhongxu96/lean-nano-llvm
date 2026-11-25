@@ -1,14 +1,12 @@
-import LeanNanoLlvm.Semantics.Eval
-import LeanNanoLlvm.Semantics.State
+import LeanNanoLlvm.AST.AST
+import LeanNanoLlvm.Semantics.Value
 import LeanNanoLlvm.Tactic
 
 namespace LeanNanoLlvm
 namespace AST
 
-variable {φ : Nat}
-
 @[simp_wellform]
-def Exp.WellFormedFor (cfg : SemanticsConfig := .modern) (ty : LlvmType φ) : Exp φ → Prop
+def Exp.WellFormedFor (cfg : SemanticsConfig := .modern) (ty : LlvmType) : Exp → Prop
   | .identifier (.local_id _) => ty.isFirstClass = true
   | .identifier (.global_id _) => ty.asPtr?.isSome = true
   | .bool _ => ty = LlvmType.i1
@@ -17,7 +15,7 @@ def Exp.WellFormedFor (cfg : SemanticsConfig := .modern) (ty : LlvmType φ) : Ex
   | .floatDec _ _ _ => ty.asFloat?.isSome = true
   | .null => ty.asPtr?.isSome = true
   | .zeroinitializer => ty.isFirstClass = true
-  | .undef _ => cfg.allowUndef = true ∧ ty.isFirstClass = true
+  | .undef => cfg.allowUndef = true ∧ ty.isFirstClass = true
   | .poison => ty.isFirstClass = true
   | .array elems =>
       match ty with
@@ -41,7 +39,7 @@ def Exp.WellFormedFor (cfg : SemanticsConfig := .modern) (ty : LlvmType φ) : Ex
 
 mutual
 @[simp_wellform]
-def Exp.WellScopedTo (locals : List LocalId) : Exp φ → Prop
+def Exp.WellScopedTo (locals : List LocalId) : Exp → Prop
   | .identifier (.local_id id) => id ∈ locals
   | .identifier (.global_id _) => True
   | .array elems => Exp.TypedListWellScopedTo locals elems
@@ -54,7 +52,7 @@ def Exp.WellScopedTo (locals : List LocalId) : Exp φ → Prop
   | _ => True
 
 @[simp_wellform]
-def Exp.TypedListWellScopedTo (locals : List LocalId) : List (LlvmType φ × Exp φ) → Prop
+def Exp.TypedListWellScopedTo (locals : List LocalId) : List (LlvmType × Exp) → Prop
   | [] => True
   | (_, e) :: rest => e.WellScopedTo locals ∧ Exp.TypedListWellScopedTo locals rest
 end
@@ -70,7 +68,7 @@ def InstructionId.IsVoid : InstructionId → Prop
   | .void _ => True
 
 @[simp_wellform]
-def Code.definedIds : @Code φ → List LocalId
+def Code.definedIds : Code → List LocalId
   | [] => []
   | (instrId, _) :: rest =>
       match instrId with
@@ -78,20 +76,8 @@ def Code.definedIds : @Code φ → List LocalId
       | .void _ => Code.definedIds rest
 
 @[simp_wellform]
-def Width.CanTruncateTo (fromW toW : Width φ) : Prop :=
-  match fromW.toNat?, toW.toNat? with
-  | some fromW, some toW => toW < fromW
-  | _, _ => True
-
-@[simp_wellform]
-def Width.CanExtendTo (fromW toW : Width φ) : Prop :=
-  match fromW.toNat?, toW.toNat? with
-  | some fromW, some toW => fromW < toW
-  | _, _ => True
-
-@[simp_wellform]
 def Instruction.WellFormedWith (cfg : SemanticsConfig) (locals : List LocalId)
-    (labels : List BlockId) (instrId : InstructionId) : @Instruction φ → Prop
+    (labels : List BlockId) (instrId : InstructionId) : Instruction → Prop
   | .intBinaryOp _ ty v1 v2 =>
       instrId.DefinesLocal
       ∧ ty.isIntOrIntVector = true
@@ -132,11 +118,11 @@ def Instruction.WellFormedWith (cfg : SemanticsConfig) (locals : List LocalId)
       ∧ match op with
         | .trunc _ _ =>
           match fromTy.scalarType, toTy.scalarType with
-          | .int fromW, .int toW => fromW.CanTruncateTo toW
+          | .int fromW, .int toW => toW < fromW
           | _, _ => False
         | .zext _ | .sext =>
           match fromTy.scalarType, toTy.scalarType with
-          | .int fromW, .int toW => fromW.CanExtendTo toW
+          | .int fromW, .int toW => fromW < toW
           | _, _ => False
         | .fptrunc _ =>
           match fromTy.scalarType, toTy.scalarType with
@@ -234,7 +220,7 @@ def Instruction.WellFormedWith (cfg : SemanticsConfig) (locals : List LocalId)
 
 @[simp_wellform]
 def Code.WellFormedFrom (cfg : SemanticsConfig) (locals : List LocalId)
-    (labels : List BlockId) : @Code φ → Prop
+    (labels : List BlockId) : Code → Prop
   | [] => True
   | (instrId, instr) :: rest =>
       instr.WellFormedWith cfg locals labels instrId
@@ -243,9 +229,9 @@ def Code.WellFormedFrom (cfg : SemanticsConfig) (locals : List LocalId)
         | .void _ => Code.WellFormedFrom cfg locals labels rest
 
 @[simp_wellform]
-def Terminator.WellFormedWith (cfg : SemanticsConfig) (retTy : LlvmRetType φ)
+def Terminator.WellFormedWith (cfg : SemanticsConfig) (retTy : LlvmRetType)
     (locals : List LocalId) (labels : List BlockId) :
-    (InstructionId × @Terminator φ) → Prop
+    (InstructionId × Terminator) → Prop
   | (.void _, .retVoid) => retTy = .void
   | (.void _, .ret ⟨ty, exp⟩) =>
       retTy = .ret ty
@@ -266,24 +252,24 @@ def Terminator.WellFormedWith (cfg : SemanticsConfig) (retTy : LlvmRetType φ)
   | _ => False
 
 @[simp_wellform]
-def Declaration.WellFormedType : LlvmType φ → Prop
+def Declaration.WellFormedType : LlvmType → Prop
   | .function retTy argTys _ =>
       (retTy.isVoid? ∨ (∃ retRetTy, retTy.asRet? = some retRetTy ∧ retRetTy.isFirstClass = true))
       ∧ (∀ argTy ∈ argTys, argTy.isFirstClass = true)
   | _ => False
 
-inductive Declaration.WellFormed (decl : @Declaration φ) : Prop where
+inductive Declaration.WellFormed (decl : Declaration) : Prop where
   | mk : Declaration.WellFormedType decl.type → WellFormed decl
 
 @[simp_wellform]
-def Block.WellFormedWith (cfg : SemanticsConfig) (retTy : LlvmRetType φ)
-    (allLocals : List LocalId) (labels : List BlockId) (blk : @Block φ) : Prop :=
+def Block.WellFormedWith (cfg : SemanticsConfig) (retTy : LlvmRetType)
+    (allLocals : List LocalId) (labels : List BlockId) (blk : Block) : Prop :=
   blk.code.WellFormedFrom cfg allLocals labels
   ∧ Terminator.WellFormedWith cfg retTy (allLocals ++ Code.definedIds blk.code) labels blk.terminator
 
 /-- Config-aware well-formedness for single-block and multi-block LLVM definitions. -/
-inductive Definition.WellFormedWith (cfg : SemanticsConfig) (defn : @Definition φ) : Prop where
-  | mk (retTy : LlvmRetType φ) (argTys : List (LlvmType φ)) (isVarArg : Bool) :
+inductive Definition.WellFormedWith (cfg : SemanticsConfig) (defn : Definition) : Prop where
+  | mk (retTy : LlvmRetType) (argTys : List LlvmType) (isVarArg : Bool) :
     defn.prototype.WellFormed →
     defn.prototype.type = LlvmType.function retTy argTys isVarArg →
     defn.args.length = argTys.length →
@@ -304,18 +290,18 @@ inductive Definition.WellFormedWith (cfg : SemanticsConfig) (defn : @Definition 
     WellFormedWith cfg defn
 
 /-- Default well-formedness (`undef` disabled, matching modern LLVM). -/
-abbrev Definition.WellFormed (defn : @Definition φ) : Prop :=
+abbrev Definition.WellFormed (defn : Definition) : Prop :=
   Definition.WellFormedWith .modern defn
 
 @[simp_wellform]
-theorem declaration_wellFormed_iff (decl : @Declaration φ) :
+theorem declaration_wellFormed_iff (decl : Declaration) :
     decl.WellFormed ↔ Declaration.WellFormedType decl.type := by
   constructor
   · intro h; cases h with | mk h => exact h
   · intro h; exact .mk h
 
 @[simp_wellform]
-theorem definition_wellFormedWith_iff (cfg : SemanticsConfig) (defn : @Definition φ) :
+theorem definition_wellFormedWith_iff (cfg : SemanticsConfig) (defn : Definition) :
     defn.WellFormedWith cfg ↔
       ∃ retTy argTys isVarArg,
         defn.prototype.WellFormed
@@ -344,7 +330,7 @@ theorem definition_wellFormedWith_iff (cfg : SemanticsConfig) (defn : @Definitio
     exact .mk retTy argTys isVarArg hproto htype hlen hnodup hne hblks hbody
 
 @[simp_wellform]
-theorem definition_wellFormed_iff (defn : @Definition φ) :
+theorem definition_wellFormed_iff (defn : Definition) :
     defn.WellFormed ↔ defn.WellFormedWith .modern := Iff.rfl
 
 end AST
@@ -353,8 +339,8 @@ namespace Semantics
 
 mutual
 @[simp_wellform]
-def RegisterValue.WellFormedFor : AST.LlvmType φ → RegisterValue → Prop
-  | .int (.concrete wTy), .bv wVal _ => wTy = wVal
+def RegisterValue.WellFormedFor : AST.LlvmType → RegisterValue → Prop
+  | .int wTy, .bv wVal _ => wTy = wVal
   | .float ft1, .float ft2 _ => ft1 = ft2
   | .ptr as1, .ptr as2 _ => as1 = as2
   | .vector n elemTy, .vector _ elems =>
@@ -366,21 +352,21 @@ def RegisterValue.WellFormedFor : AST.LlvmType φ → RegisterValue → Prop
   | _, _ => False
 
 @[simp_wellform]
-def RegisterValue.WellFormedForUniform (elemTy : AST.LlvmType φ) : List RegisterValue → Prop
+def RegisterValue.WellFormedForUniform (elemTy : AST.LlvmType) : List RegisterValue → Prop
   | [] => True
   | e :: es => RegisterValue.WellFormedFor elemTy e ∧ RegisterValue.WellFormedForUniform elemTy es
 
 @[simp_wellform]
-def RegisterValue.WellFormedForList : List (AST.LlvmType φ) → List RegisterValue → Prop
+def RegisterValue.WellFormedForList : List AST.LlvmType → List RegisterValue → Prop
   | [], [] => True
   | t :: ts, v :: vs => RegisterValue.WellFormedFor t v ∧ RegisterValue.WellFormedForList ts vs
   | _, _ => False
 end
 
 @[simp_wellform]
-def Definition.ArgValuesWellFormed (defn : @AST.Definition φ) (argVals : List RegisterValue) : Prop :=
+def Definition.ArgValuesWellFormed (defn : AST.Definition) (argVals : List RegisterValue) : Prop :=
   match defn.prototype.type with
-  | .function _ argTys _ => List.Forall₂ RegisterValue.WellFormedFor argTys argVals
+  | .function _ argTys _ => RegisterValue.WellFormedForList argTys argVals
   | _ => False
 
 end Semantics

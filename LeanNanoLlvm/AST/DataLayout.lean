@@ -101,9 +101,9 @@ def floatABIAlign : FloatType → Nat
 
 mutual
 
-/-- Compute `(sizeInBits, abiAlignInBytes)` structurally for a concrete `LlvmType 0`. -/
-def typeLayout (dl : DataLayout) : LlvmType 0 → Nat × Nat
-  | .int (.concrete w) => (w, intABIAlign w)
+/-- Compute `(sizeInBits, abiAlignInBytes)` structurally for an `LlvmType`. -/
+def typeLayout (dl : DataLayout) : LlvmType → Nat × Nat
+  | .int w => (w, intABIAlign w)
   | .float ft => (ft.bitWidth, floatABIAlign ft)
   | .ptr as => (dl.getPointerSizeInBits as, dl.getPointerABIAlign as)
   | .vector n elem =>
@@ -130,7 +130,7 @@ For unpacked structs, each field is aligned to its ABI alignment and total size
 is padded to the struct's ABI alignment (matching `llvm::StructLayout`).
 -/
 def structLayoutAux (dl : DataLayout) (packed : Bool) (offset maxAlign : Nat) :
-    List (LlvmType 0) → List Nat × Nat × Nat
+    List LlvmType → List Nat × Nat × Nat
   | [] => ([], offset, maxAlign)
   | f :: fs =>
       match dl.typeLayout f with
@@ -144,27 +144,27 @@ def structLayoutAux (dl : DataLayout) (packed : Bool) (offset maxAlign : Nat) :
 
 end
 
-/-- Compute the ABI alignment in bytes for a concrete `LlvmType 0`. -/
-def typeABIAlign (dl : DataLayout) (ty : LlvmType 0) : Nat :=
+/-- Compute the ABI alignment in bytes for an `LlvmType`. -/
+def typeABIAlign (dl : DataLayout) (ty : LlvmType) : Nat :=
   (dl.typeLayout ty).2
 
-def structFieldsMaxAlign (dl : DataLayout) (fields : List (LlvmType 0)) : Nat :=
+def structFieldsMaxAlign (dl : DataLayout) (fields : List LlvmType) : Nat :=
   (dl.structLayoutAux false 0 1 fields).2.2
 
 /-- Exact size in bits (matches `DataLayout::getTypeSizeInBits`). -/
-def typeSizeInBits (dl : DataLayout) (ty : LlvmType 0) : Nat :=
+def typeSizeInBits (dl : DataLayout) (ty : LlvmType) : Nat :=
   (dl.typeLayout ty).1
 
 /-- Store size in bytes (matches `DataLayout::getTypeStoreSize`). -/
-def typeStoreSize (dl : DataLayout) (ty : LlvmType 0) : Nat :=
+def typeStoreSize (dl : DataLayout) (ty : LlvmType) : Nat :=
   (dl.typeSizeInBits ty + 7) / 8
 
 /-- Allocation size in bytes (matches `DataLayout::getTypeAllocSize`). -/
-def typeAllocSize (dl : DataLayout) (ty : LlvmType 0) : Nat :=
+def typeAllocSize (dl : DataLayout) (ty : LlvmType) : Nat :=
   alignTo (dl.typeStoreSize ty) (dl.typeABIAlign ty)
 
 /-- Compute `(fieldOffsets, totalSizeInBytes)` for a struct type. -/
-def structLayout (dl : DataLayout) (packed : Bool) (fields : List (LlvmType 0)) :
+def structLayout (dl : DataLayout) (packed : Bool) (fields : List LlvmType) :
     List Nat × Nat :=
   match dl.structLayoutAux packed 0 1 fields with
   | (offsets, rawEnd, maxAlign) =>
@@ -172,7 +172,7 @@ def structLayout (dl : DataLayout) (packed : Bool) (fields : List (LlvmType 0)) 
     (offsets, alignTo rawEnd sAlign)
 
 /-- Byte offset of field `idx` in a struct (returns `none` if out of bounds). -/
-def structFieldOffset? (dl : DataLayout) (packed : Bool) (fields : List (LlvmType 0))
+def structFieldOffset? (dl : DataLayout) (packed : Bool) (fields : List LlvmType)
     (idx : Nat) : Option Nat :=
   (dl.structLayout packed fields).1[idx]?
 

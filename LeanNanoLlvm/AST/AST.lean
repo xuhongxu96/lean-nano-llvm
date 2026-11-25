@@ -1,30 +1,6 @@
-import LeanNanoLlvm.Util.ConcreteOrMVar
 import LeanNanoLlvm.Util.IEEEFloat
 
 namespace LeanNanoLlvm.AST
-
-abbrev Width (φ : Nat) := ConcreteOrMVar Nat φ
-abbrev Width.concrete : Nat -> Width φ := ConcreteOrMVar.concrete
-abbrev Width.mvar : Fin φ -> Width φ := ConcreteOrMVar.mvar
-
-def Width.print : Width φ → String
-  | .concrete w => s!"i{w}"
-  | .mvar i => s!"i${i}"
-
-def Width.toNat? : Width φ → Option Nat
-  | .concrete w => some w
-  | .mvar _ => none
-
-@[simp]
-def Width.instantiate (ws : List.Vector Nat φ) : Width φ → Width 0
-  | w => .concrete <| ConcreteOrMVar.instantiate ws w
-
-@[simp]
-theorem Width.toNat?_concrete (w : Nat) : Width.toNat? (.concrete w : Width φ) = some w := rfl
-
-@[simp]
-theorem Width.toNat?_mvar (i : Fin φ) : Width.toNat? (.mvar i : Width φ) = none := rfl
-
 
 inductive RawId : Type where
   | name (s : String) -- Named identifiers: %arg, %val, %x
@@ -66,7 +42,7 @@ inductive FloatType : Type where
   | float
   | double
   | fp128
-deriving Repr, DecidableEq, Inhabited, Lean.ToExpr
+deriving Repr, DecidableEq, Inhabited
 
 namespace FloatType
 
@@ -91,10 +67,6 @@ def print : FloatType → String
 end FloatType
 
 
-section
-
-variable (φ : Nat)
-
 mutual
 
 inductive LlvmRetType : Type where
@@ -103,7 +75,7 @@ inductive LlvmRetType : Type where
 deriving Repr
 
 inductive LlvmType : Type where
-  | int (w : Width φ)
+  | int (w : Nat)
   | float (ft : FloatType)
   | ptr (addrSpace : Nat := 0)
   | vector (len : Nat) (elem : LlvmType)
@@ -114,17 +86,15 @@ deriving Repr
 
 end
 
-end
-
 section TypeEq
 
 mutual
-def LlvmRetType.beq {φ : Nat} : LlvmRetType φ → LlvmRetType φ → Bool
+def LlvmRetType.beq : LlvmRetType → LlvmRetType → Bool
   | .void, .void => true
   | .ret t1, .ret t2 => LlvmType.beq t1 t2
   | _, _ => false
 
-def LlvmType.beq {φ : Nat} : LlvmType φ → LlvmType φ → Bool
+def LlvmType.beq : LlvmType → LlvmType → Bool
   | .int w1, .int w2 => w1 == w2
   | .float f1, .float f2 => f1 == f2
   | .ptr a1, .ptr a2 => a1 == a2
@@ -135,17 +105,17 @@ def LlvmType.beq {φ : Nat} : LlvmType φ → LlvmType φ → Bool
       v1 == v2 && LlvmRetType.beq r1 r2 && LlvmType.beqList a1 a2
   | _, _ => false
 
-def LlvmType.beqList {φ : Nat} : List (LlvmType φ) → List (LlvmType φ) → Bool
+def LlvmType.beqList : List LlvmType → List LlvmType → Bool
   | [], [] => true
   | x :: xs, y :: ys => LlvmType.beq x y && LlvmType.beqList xs ys
   | _, _ => false
 end
 
-instance {φ : Nat} : BEq (LlvmType φ) := ⟨LlvmType.beq⟩
-instance {φ : Nat} : BEq (LlvmRetType φ) := ⟨LlvmRetType.beq⟩
+instance : BEq LlvmType := ⟨LlvmType.beq⟩
+instance : BEq LlvmRetType := ⟨LlvmRetType.beq⟩
 
 mutual
-def LlvmRetType.decEq {φ : Nat} : (a b : LlvmRetType φ) → Decidable (a = b)
+def LlvmRetType.decEq : (a b : LlvmRetType) → Decidable (a = b)
   | .void, .void => isTrue rfl
   | .ret t1, .ret t2 =>
     match LlvmType.decEq t1 t2 with
@@ -154,7 +124,7 @@ def LlvmRetType.decEq {φ : Nat} : (a b : LlvmRetType φ) → Decidable (a = b)
   | .void, .ret _ => isFalse (by intro h; cases h)
   | .ret _, .void => isFalse (by intro h; cases h)
 
-def LlvmType.decEq {φ : Nat} : (a b : LlvmType φ) → Decidable (a = b)
+def LlvmType.decEq : (a b : LlvmType) → Decidable (a = b)
   | .int w1, .int w2 =>
     if h : w1 = w2 then isTrue (by rw [h]) else isFalse (by intro heq; cases heq; exact h rfl)
   | .float f1, .float f2 =>
@@ -195,7 +165,7 @@ def LlvmType.decEq {φ : Nat} : (a b : LlvmType φ) → Decidable (a = b)
   | .function _ _ _, .int _ | .function _ _ _, .float _ | .function _ _ _, .ptr _ | .function _ _ _, .vector _ _ | .function _ _ _, .array _ _ | .function _ _ _, .struct _ _ =>
     isFalse (by intro h; cases h)
 
-def LlvmType.decEqList {φ : Nat} : (a b : List (LlvmType φ)) → Decidable (a = b)
+def LlvmType.decEqList : (a b : List LlvmType) → Decidable (a = b)
   | [], [] => isTrue rfl
   | x :: xs, y :: ys =>
     match LlvmType.decEq x y, LlvmType.decEqList xs ys with
@@ -205,106 +175,107 @@ def LlvmType.decEqList {φ : Nat} : (a b : List (LlvmType φ)) → Decidable (a 
   | [], _ :: _ | _ :: _, [] => isFalse (by intro h; cases h)
 end
 
-instance {φ : Nat} : DecidableEq (LlvmType φ) := LlvmType.decEq
-instance {φ : Nat} : DecidableEq (LlvmRetType φ) := LlvmRetType.decEq
+instance : DecidableEq LlvmType := LlvmType.decEq
+instance : DecidableEq LlvmRetType := LlvmRetType.decEq
+instance : Inhabited LlvmType := ⟨.int 32⟩
+instance : Inhabited LlvmRetType := ⟨.void⟩
 
 end TypeEq
 
 section TypeHelpers
 
-variable {φ : Nat}
-
 @[simp]
-def LlvmRetType.isVoid? : LlvmRetType φ → Bool
+def LlvmRetType.isVoid? : LlvmRetType → Bool
   | .void => true
   | .ret _ => false
 
 @[simp]
-def LlvmRetType.asRet? : LlvmRetType φ → Option (LlvmType φ)
+def LlvmRetType.asRet? : LlvmRetType → Option LlvmType
   | .void => none
   | .ret ty => some ty
 
 @[simp]
-def LlvmType.asInt? : LlvmType φ → Option (Width φ)
+def LlvmType.asInt? : LlvmType → Option Nat
   | .int w => some w
   | _ => none
 
 @[simp]
-def LlvmType.asFloat? : LlvmType φ → Option FloatType
+def LlvmType.asFloat? : LlvmType → Option FloatType
   | .float ft => some ft
   | _ => none
 
 @[simp]
-def LlvmType.asPtr? : LlvmType φ → Option Nat
+def LlvmType.asPtr? : LlvmType → Option Nat
   | .ptr addrSpace => some addrSpace
   | _ => none
 
 @[simp]
-def LlvmType.asVector? : LlvmType φ → Option (Nat × LlvmType φ)
+def LlvmType.asVector? : LlvmType → Option (Nat × LlvmType)
   | .vector n elem => some (n, elem)
   | _ => none
 
 @[simp]
-def LlvmType.asArray? : LlvmType φ → Option (Nat × LlvmType φ)
+def LlvmType.asArray? : LlvmType → Option (Nat × LlvmType)
   | .array n elem => some (n, elem)
   | _ => none
 
 @[simp]
-def LlvmType.asStruct? : LlvmType φ → Option (Bool × List (LlvmType φ))
+def LlvmType.asStruct? : LlvmType → Option (Bool × List LlvmType)
   | .struct packed fields => some (packed, fields)
   | _ => none
 
 @[simp]
-def LlvmType.asFunction? : LlvmType φ → Option (LlvmRetType φ × List (LlvmType φ))
+def LlvmType.asFunction? : LlvmType → Option (LlvmRetType × List LlvmType)
   | .function ret argTys _ => some (ret, argTys)
   | _ => none
 
 @[simp]
-def LlvmType.isScalar : LlvmType φ → Bool
+def LlvmType.isScalar : LlvmType → Bool
   | .int _ | .float _ | .ptr _ => true
   | _ => false
 
 @[simp]
-def LlvmType.isFirstClass : LlvmType φ → Bool
+def LlvmType.isFirstClass : LlvmType → Bool
   | .function .. => false
   | _ => true
 
 @[simp]
-def LlvmType.isIntOrIntVector : LlvmType φ → Bool
+def LlvmType.isIntOrIntVector : LlvmType → Bool
   | .int _ => true
   | .vector _ (.int _) => true
   | _ => false
 
 @[simp]
-def LlvmType.isFloatOrFloatVector : LlvmType φ → Bool
+def LlvmType.isFloatOrFloatVector : LlvmType → Bool
   | .float _ => true
   | .vector _ (.float _) => true
   | _ => false
 
 @[simp]
-def LlvmType.isPtrOrPtrVector : LlvmType φ → Bool
+def LlvmType.isPtrOrPtrVector : LlvmType → Bool
   | .ptr _ => true
   | .vector _ (.ptr _) => true
   | _ => false
 
-def LlvmType.scalarType : LlvmType φ → LlvmType φ
+def LlvmType.scalarType : LlvmType → LlvmType
   | .vector _ elem => elem
   | ty => ty
 
-def LlvmType.i (w : Width φ) : LlvmType φ := .int w
+@[simp]
+def LlvmType.i (w : Nat) : LlvmType := .int w
 
-abbrev LlvmType.i1 : LlvmType φ := .i 1
-abbrev LlvmType.i8 : LlvmType φ := .i 8
-abbrev LlvmType.i16 : LlvmType φ := .i 16
-abbrev LlvmType.i32 : LlvmType φ := .i 32
-abbrev LlvmType.i64 : LlvmType φ := .i 64
-abbrev LlvmType.f16 : LlvmType φ := .float .half
-abbrev LlvmType.bf16 : LlvmType φ := .float .bfloat
-abbrev LlvmType.f32 : LlvmType φ := .float .float
-abbrev LlvmType.f64 : LlvmType φ := .float .double
-abbrev LlvmType.f128 : LlvmType φ := .float .fp128
+abbrev LlvmType.i1 : LlvmType := .int 1
+abbrev LlvmType.i8 : LlvmType := .int 8
+abbrev LlvmType.i16 : LlvmType := .int 16
+abbrev LlvmType.i32 : LlvmType := .int 32
+abbrev LlvmType.i64 : LlvmType := .int 64
+abbrev LlvmType.f16 : LlvmType := .float .half
+abbrev LlvmType.bf16 : LlvmType := .float .bfloat
+abbrev LlvmType.f32 : LlvmType := .float .float
+abbrev LlvmType.f64 : LlvmType := .float .double
+abbrev LlvmType.f128 : LlvmType := .float .fp128
 
-abbrev TypedIdentifier (φ : Nat) := Identifier × LlvmType φ
+abbrev TypedIdentifier := Identifier × LlvmType
 
 end TypeHelpers
 
@@ -318,7 +289,7 @@ structure FastMathFlags : Type where
   contract : Bool := false
   afn      : Bool := false
   reassoc  : Bool := false
-deriving Repr, DecidableEq, Inhabited, Lean.ToExpr
+deriving Repr, DecidableEq, Inhabited
 
 namespace FastMathFlags
 
@@ -379,7 +350,7 @@ inductive ICmpPred : Type where
   | eq | ne
   | ugt | uge | ult | ule
   | sgt | sge | slt | sle
-deriving Repr, DecidableEq, Inhabited, Lean.ToExpr
+deriving Repr, DecidableEq, Inhabited
 
 /-- Floating-point comparison predicates (`fcmp`). -/
 inductive FCmpPred : Type where
@@ -387,7 +358,7 @@ inductive FCmpPred : Type where
   | oeq | ogt | oge | olt | ole | one | ord
   | ueq | ugt | uge | ult | ule | une | uno
   | ftrue
-deriving Repr, DecidableEq, Inhabited, Lean.ToExpr
+deriving Repr, DecidableEq, Inhabited
 
 /-- LLVM conversion / cast opcodes. -/
 inductive ConversionOp : Type where
@@ -412,7 +383,7 @@ structure GEPFlags : Type where
   inbounds : Bool := false
   nusw     : Bool := false
   nuw      : Bool := false
-deriving Repr, DecidableEq, Inhabited, Lean.ToExpr
+deriving Repr, DecidableEq, Inhabited
 
 namespace GEPFlags
   def none : GEPFlags := {}
@@ -421,7 +392,7 @@ namespace GEPFlags
 end GEPFlags
 
 /-- Parameter / return value attributes affecting poison & immediate UB (matches `llubi`). -/
-inductive ValueAttr (φ : Nat) : Type where
+inductive ValueAttr : Type where
   | noundef
   | nonnull
   | align (a : Nat)
@@ -429,11 +400,11 @@ inductive ValueAttr (φ : Nat) : Type where
   | dereferenceableOrNull (bytes : Nat)
   | range (lo hi : Int)
   | nofpclass (mask : Nat)
-  | byval (ty : LlvmType φ)
-deriving Repr
+  | byval (ty : LlvmType)
+deriving Repr, DecidableEq
 
-/-- LLVM operand expressions and constants (parameterized by symbolic width arity `φ`). -/
-inductive Exp (φ : Nat := 0) : Type where
+/-- LLVM operand expressions and constants. -/
+inductive Exp : Type where
   | identifier      (id : Identifier)
   | bool            (b : Bool)
   | int             (x : Int)
@@ -441,297 +412,108 @@ inductive Exp (φ : Nat := 0) : Type where
   | floatDec        (neg : Bool) (mantissa : Nat) (exp10 : Int)
   | null
   | zeroinitializer
-  | undef           (id : RawId)
+  | undef
   | poison
-  | array           (elems : List (LlvmType φ × Exp φ))
-  | struct          (packed : Bool) (fields : List (LlvmType φ × Exp φ))
-  | vector          (elems : List (LlvmType φ × Exp φ))
-  | splat           (elem : LlvmType φ × Exp φ)
-  | gepConst        (flags : GEPFlags) (baseTy : LlvmType φ)
-                    (ptr : LlvmType φ × Exp φ) (indices : List (LlvmType φ × Exp φ))
-  | convConst       (op : ConversionOp) (fromTy : LlvmType φ) (val : Exp φ) (toTy : LlvmType φ)
-  | binConst        (op : IntBinaryOp) (ty : LlvmType φ) (v1 v2 : Exp φ)
+  | array           (elems : List (LlvmType × Exp))
+  | struct          (packed : Bool) (fields : List (LlvmType × Exp))
+  | vector          (elems : List (LlvmType × Exp))
+  | splat           (elem : LlvmType × Exp)
+  | gepConst        (flags : GEPFlags) (baseTy : LlvmType)
+                    (ptr : LlvmType × Exp) (indices : List (LlvmType × Exp))
+  | convConst       (op : ConversionOp) (fromTy : LlvmType) (val : Exp) (toTy : LlvmType)
+  | binConst        (op : IntBinaryOp) (ty : LlvmType) (v1 v2 : Exp)
 deriving Repr
 
-abbrev TypedExp (φ : Nat) := LlvmType φ × Exp φ
-
-section
-
-variable {φ : Nat}
+abbrev TypedExp := LlvmType × Exp
 
 /-- LLVM IR instructions (covering integer, FP, comparisons, casts, memory, aggregates, vectors, calls, phi, freeze). -/
 inductive Instruction : Type where
-  | intBinaryOp    (op : IntBinaryOp) (t : LlvmType φ) (v1 : Exp φ) (v2 : Exp φ)
-  | floatUnaryOp   (op : FloatUnaryOp) (t : LlvmType φ) (v : Exp φ)
-  | floatBinaryOp  (op : FloatBinaryOp) (t : LlvmType φ) (v1 : Exp φ) (v2 : Exp φ)
-  | icmp           (samesign : Bool) (pred : ICmpPred) (t : LlvmType φ) (v1 : Exp φ) (v2 : Exp φ)
-  | fcmp           (fmf : FastMathFlags) (pred : FCmpPred) (t : LlvmType φ) (v1 : Exp φ) (v2 : Exp φ)
-  | conversionOp   (op : ConversionOp) (fromTy : LlvmType φ) (v : Exp φ) (toTy : LlvmType φ)
-  | select         (fmf : FastMathFlags) (condTy : LlvmType φ) (cond : Exp φ)
-                   (valTy : LlvmType φ) (tv : Exp φ) (fv : Exp φ)
-  | phi            (ty : LlvmType φ) (fmf : FastMathFlags) (incoming : List (Exp φ × BlockId))
-  | alloca         (allocTy : LlvmType φ) (numElements : Option (LlvmType φ × Exp φ))
+  | intBinaryOp    (op : IntBinaryOp) (t : LlvmType) (v1 : Exp) (v2 : Exp)
+  | floatUnaryOp   (op : FloatUnaryOp) (t : LlvmType) (v : Exp)
+  | floatBinaryOp  (op : FloatBinaryOp) (t : LlvmType) (v1 : Exp) (v2 : Exp)
+  | icmp           (samesign : Bool) (pred : ICmpPred) (t : LlvmType) (v1 : Exp) (v2 : Exp)
+  | fcmp           (fmf : FastMathFlags) (pred : FCmpPred) (t : LlvmType) (v1 : Exp) (v2 : Exp)
+  | conversionOp   (op : ConversionOp) (fromTy : LlvmType) (v : Exp) (toTy : LlvmType)
+  | select         (fmf : FastMathFlags) (condTy : LlvmType) (cond : Exp)
+                   (valTy : LlvmType) (tv : Exp) (fv : Exp)
+  | phi            (ty : LlvmType) (fmf : FastMathFlags) (incoming : List (Exp × BlockId))
+  | alloca         (allocTy : LlvmType) (numElements : Option (LlvmType × Exp))
                    (align : Option Nat) (addrSpace : Nat := 0)
-  | load           (ty : LlvmType φ) (ptrTy : LlvmType φ) (ptr : Exp φ)
+  | load           (ty : LlvmType) (ptrTy : LlvmType) (ptr : Exp)
                    (align : Option Nat) (isVolatile : Bool := false) (noundef : Bool := false)
-  | store          (valTy : LlvmType φ) (val : Exp φ) (ptrTy : LlvmType φ) (ptr : Exp φ)
+  | store          (valTy : LlvmType) (val : Exp) (ptrTy : LlvmType) (ptr : Exp)
                    (align : Option Nat) (isVolatile : Bool := false)
-  | getelementptr  (flags : GEPFlags) (baseTy : LlvmType φ) (ptrTy : LlvmType φ)
-                   (ptr : Exp φ) (indices : List (LlvmType φ × Exp φ))
-  | extractvalue   (aggTy : LlvmType φ) (agg : Exp φ) (indices : List Nat)
-  | insertvalue    (aggTy : LlvmType φ) (agg : Exp φ) (valTy : LlvmType φ) (val : Exp φ) (indices : List Nat)
-  | extractelement (vecTy : LlvmType φ) (vec : Exp φ) (idxTy : LlvmType φ) (idx : Exp φ)
-  | insertelement  (vecTy : LlvmType φ) (vec : Exp φ) (valTy : LlvmType φ) (val : Exp φ)
-                   (idxTy : LlvmType φ) (idx : Exp φ)
-  | shufflevector  (vecTy : LlvmType φ) (v1 : Exp φ) (v2 : Exp φ) (mask : List (Option Nat))
-  | call           (retTy : LlvmRetType φ) (fmf : FastMathFlags) (callee : Exp φ)
-                   (args : List (LlvmType φ × Exp φ × List (ValueAttr φ)))
-                   (retAttrs : List (ValueAttr φ) := [])
-  | freeze         (v : TypedExp φ)
+  | getelementptr  (flags : GEPFlags) (baseTy : LlvmType) (ptrTy : LlvmType)
+                   (ptr : Exp) (indices : List (LlvmType × Exp))
+  | extractvalue   (aggTy : LlvmType) (agg : Exp) (indices : List Nat)
+  | insertvalue    (aggTy : LlvmType) (agg : Exp) (valTy : LlvmType) (val : Exp) (indices : List Nat)
+  | extractelement (vecTy : LlvmType) (vec : Exp) (idxTy : LlvmType) (idx : Exp)
+  | insertelement  (vecTy : LlvmType) (vec : Exp) (valTy : LlvmType) (val : Exp)
+                   (idxTy : LlvmType) (idx : Exp)
+  | shufflevector  (vecTy : LlvmType) (v1 : Exp) (v2 : Exp) (mask : List (Option Nat))
+  | call           (retTy : LlvmRetType) (fmf : FastMathFlags) (callee : Exp)
+                   (args : List (LlvmType × Exp × List ValueAttr))
+                   (retAttrs : List ValueAttr := [])
+  | freeze         (v : TypedExp)
 deriving Repr
 
 /-- LLVM IR block terminators. -/
 inductive Terminator : Type where
   | retVoid
-  | ret         (v : TypedExp φ)
+  | ret         (v : TypedExp)
   | br          (dest : BlockId)
-  | condBr      (cond : Exp φ) (trueDest : BlockId) (falseDest : BlockId)
-  | switch      (ty : LlvmType φ) (cond : Exp φ) (defaultDest : BlockId) (cases : List (Int × BlockId))
+  | condBr      (cond : Exp) (trueDest : BlockId) (falseDest : BlockId)
+  | switch      (ty : LlvmType) (cond : Exp) (defaultDest : BlockId) (cases : List (Int × BlockId))
   | unreachable
 deriving Repr
 
 structure Declaration where
   name     : FunctionId
-  type     : LlvmType φ
-  argAttrs : List (List (ValueAttr φ)) := []
-  retAttrs : List (ValueAttr φ) := []
+  type     : LlvmType
+  argAttrs : List (List ValueAttr) := []
+  retAttrs : List ValueAttr := []
 deriving Repr
 
-abbrev Code := List (InstructionId × @Instruction φ)
+abbrev Code := List (InstructionId × Instruction)
 
 structure Block where
   id         : BlockId
-  code       : @Code φ
-  terminator : InstructionId × @Terminator φ
+  code       : Code
+  terminator : InstructionId × Terminator
 deriving Repr
 
 structure Definition where
-  prototype : @Declaration φ
+  prototype : Declaration
   args      : List LocalId
-  blocks    : List (@Block φ)
+  blocks    : List Block
 deriving Repr
 
 /-- Convenience accessor for single-block definitions (returns entry block if non-empty). -/
 @[simp]
-def Definition.entryBlock? (d : @Definition φ) : Option (@Block φ) :=
+def Definition.entryBlock? (d : Definition) : Option Block :=
   d.blocks.head?
 
 /-- Convenience lookup of a block by label in a definition. -/
-def Definition.findBlock? (d : @Definition φ) (bid : BlockId) : Option (@Block φ) :=
+def Definition.findBlock? (d : Definition) (bid : BlockId) : Option Block :=
   d.blocks.find? (fun b => b.id == bid)
-
-/-- Construct a single-block definition (backwards-compatible helper). -/
-@[simp]
-def Definition.mkSingle (prototype : @Declaration φ) (args : List LocalId) (body : @Block φ) : @Definition φ :=
-  ⟨prototype, args, [body]⟩
 
 structure GlobalVariable where
   name        : GlobalId
-  ty          : LlvmType φ
+  ty          : LlvmType
   isConstant  : Bool := false
-  initializer : Option (Exp φ) := none
+  initializer : Option Exp := none
   align       : Option Nat := none
   addrSpace   : Nat := 0
 deriving Repr
 
 inductive TopLevelEntity where
-  | global      (gv : @GlobalVariable φ)
-  | declaration (decl : @Declaration φ)
-  | definition  (defn : @Definition φ)
+  | global      (gv : GlobalVariable)
+  | declaration (decl : Declaration)
+  | definition  (defn : Definition)
 deriving Repr
 
-structure TopLevel (φ : Nat) where
-  entities : List (@TopLevelEntity φ)
+structure TopLevel where
+  entities : List TopLevelEntity
 deriving Repr
-
-end
-
-
-/-! ### Width Instantiation -/
-
-section InstantiateWidths
-
-mutual
-
-@[simp]
-def LlvmRetType.instantiateWidths (ws : List.Vector Nat φ) : LlvmRetType φ → LlvmRetType 0
-  | .void => .void
-  | .ret ty => .ret <| ty.instantiateWidths ws
-
-@[simp]
-def LlvmType.instantiateWidths (ws : List.Vector Nat φ) : LlvmType φ → LlvmType 0
-  | .int w => .int <| Width.instantiate ws w
-  | .float ft => .float ft
-  | .ptr as => .ptr as
-  | .vector n elem => .vector n (elem.instantiateWidths ws)
-  | .array n elem => .array n (elem.instantiateWidths ws)
-  | .struct packed fields => .struct packed (LlvmType.instantiateWidthsList ws fields)
-  | .function ret args isVarArg =>
-      .function (ret.instantiateWidths ws) (LlvmType.instantiateWidthsList ws args) isVarArg
-
-@[simp]
-def LlvmType.instantiateWidthsList (ws : List.Vector Nat φ) : List (LlvmType φ) → List (LlvmType 0)
-  | [] => []
-  | t :: ts => t.instantiateWidths ws :: LlvmType.instantiateWidthsList ws ts
-
-end
-
-@[simp]
-def ValueAttr.instantiateWidths (ws : List.Vector Nat φ) : ValueAttr φ → ValueAttr 0
-  | .noundef => .noundef
-  | .nonnull => .nonnull
-  | .align a => .align a
-  | .dereferenceable b => .dereferenceable b
-  | .dereferenceableOrNull b => .dereferenceableOrNull b
-  | .range lo hi => .range lo hi
-  | .nofpclass m => .nofpclass m
-  | .byval ty => .byval (ty.instantiateWidths ws)
-
-mutual
-
-@[simp]
-def Exp.instantiateWidths (ws : List.Vector Nat φ) : Exp φ → Exp 0
-  | .identifier id => .identifier id
-  | .bool b => .bool b
-  | .int x => .int x
-  | .floatBits b => .floatBits b
-  | .floatDec neg m e => .floatDec neg m e
-  | .null => .null
-  | .zeroinitializer => .zeroinitializer
-  | .undef id => .undef id
-  | .poison => .poison
-  | .array elems => .array (Exp.instantiateWidthsTypedList ws elems)
-  | .struct packed fields => .struct packed (Exp.instantiateWidthsTypedList ws fields)
-  | .vector elems => .vector (Exp.instantiateWidthsTypedList ws elems)
-  | .splat (ty, e) => .splat (ty.instantiateWidths ws, e.instantiateWidths ws)
-  | .gepConst flags baseTy (pTy, pExp) idxs =>
-      .gepConst flags (baseTy.instantiateWidths ws)
-        (pTy.instantiateWidths ws, pExp.instantiateWidths ws)
-        (Exp.instantiateWidthsTypedList ws idxs)
-  | .convConst op fromTy v toTy =>
-      .convConst op (fromTy.instantiateWidths ws) (v.instantiateWidths ws) (toTy.instantiateWidths ws)
-  | .binConst op ty v1 v2 =>
-      .binConst op (ty.instantiateWidths ws) (v1.instantiateWidths ws) (v2.instantiateWidths ws)
-
-@[simp]
-def Exp.instantiateWidthsTypedList (ws : List.Vector Nat φ) :
-    List (LlvmType φ × Exp φ) → List (LlvmType 0 × Exp 0)
-  | [] => []
-  | (ty, e) :: rest => (ty.instantiateWidths ws, e.instantiateWidths ws) :: Exp.instantiateWidthsTypedList ws rest
-
-end
-
-@[simp]
-def TypedExp.instantiateWidths (ws : List.Vector Nat φ) : TypedExp φ → TypedExp 0
-  | (ty, exp) => (ty.instantiateWidths ws, exp.instantiateWidths ws)
-
-@[simp]
-def Instruction.instantiateWidths (ws : List.Vector Nat φ) : @Instruction φ → @Instruction 0
-  | .intBinaryOp op t v1 v2 =>
-      .intBinaryOp op (t.instantiateWidths ws) (v1.instantiateWidths ws) (v2.instantiateWidths ws)
-  | .floatUnaryOp op t v =>
-      .floatUnaryOp op (t.instantiateWidths ws) (v.instantiateWidths ws)
-  | .floatBinaryOp op t v1 v2 =>
-      .floatBinaryOp op (t.instantiateWidths ws) (v1.instantiateWidths ws) (v2.instantiateWidths ws)
-  | .icmp ss pred t v1 v2 =>
-      .icmp ss pred (t.instantiateWidths ws) (v1.instantiateWidths ws) (v2.instantiateWidths ws)
-  | .fcmp fmf pred t v1 v2 =>
-      .fcmp fmf pred (t.instantiateWidths ws) (v1.instantiateWidths ws) (v2.instantiateWidths ws)
-  | .conversionOp op fromTy v toTy =>
-      .conversionOp op (fromTy.instantiateWidths ws) (v.instantiateWidths ws) (toTy.instantiateWidths ws)
-  | .select fmf cTy c vTy tv fv =>
-      .select fmf (cTy.instantiateWidths ws) (c.instantiateWidths ws)
-        (vTy.instantiateWidths ws) (tv.instantiateWidths ws) (fv.instantiateWidths ws)
-  | .phi ty fmf incoming =>
-      .phi (ty.instantiateWidths ws) fmf (incoming.map fun (e, b) => (e.instantiateWidths ws, b))
-  | .alloca allocTy numEl align as =>
-      .alloca (allocTy.instantiateWidths ws) (numEl.map fun (t, e) => (t.instantiateWidths ws, e.instantiateWidths ws)) align as
-  | .load ty ptrTy ptr align isVol noundef =>
-      .load (ty.instantiateWidths ws) (ptrTy.instantiateWidths ws) (ptr.instantiateWidths ws) align isVol noundef
-  | .store valTy val ptrTy ptr align isVol =>
-      .store (valTy.instantiateWidths ws) (val.instantiateWidths ws)
-        (ptrTy.instantiateWidths ws) (ptr.instantiateWidths ws) align isVol
-  | .getelementptr flags baseTy ptrTy ptr idxs =>
-      .getelementptr flags (baseTy.instantiateWidths ws) (ptrTy.instantiateWidths ws) (ptr.instantiateWidths ws)
-        (idxs.map fun (t, e) => (t.instantiateWidths ws, e.instantiateWidths ws))
-  | .extractvalue aggTy agg idxs =>
-      .extractvalue (aggTy.instantiateWidths ws) (agg.instantiateWidths ws) idxs
-  | .insertvalue aggTy agg valTy val idxs =>
-      .insertvalue (aggTy.instantiateWidths ws) (agg.instantiateWidths ws)
-        (valTy.instantiateWidths ws) (val.instantiateWidths ws) idxs
-  | .extractelement vecTy vec idxTy idx =>
-      .extractelement (vecTy.instantiateWidths ws) (vec.instantiateWidths ws)
-        (idxTy.instantiateWidths ws) (idx.instantiateWidths ws)
-  | .insertelement vecTy vec valTy val idxTy idx =>
-      .insertelement (vecTy.instantiateWidths ws) (vec.instantiateWidths ws)
-        (valTy.instantiateWidths ws) (val.instantiateWidths ws)
-        (idxTy.instantiateWidths ws) (idx.instantiateWidths ws)
-  | .shufflevector vecTy v1 v2 mask =>
-      .shufflevector (vecTy.instantiateWidths ws) (v1.instantiateWidths ws) (v2.instantiateWidths ws) mask
-  | .call retTy fmf callee args retAttrs =>
-      .call (retTy.instantiateWidths ws) fmf (callee.instantiateWidths ws)
-        (args.map fun (t, e, attrs) =>
-          (t.instantiateWidths ws, e.instantiateWidths ws, attrs.map (ValueAttr.instantiateWidths ws)))
-        (retAttrs.map (ValueAttr.instantiateWidths ws))
-  | .freeze (ty, v) =>
-      .freeze (ty.instantiateWidths ws, v.instantiateWidths ws)
-
-@[simp]
-def Terminator.instantiateWidths (ws : List.Vector Nat φ) : @Terminator φ → @Terminator 0
-  | .retVoid => .retVoid
-  | .ret tv => .ret <| tv.instantiateWidths ws
-  | .br dest => .br dest
-  | .condBr cond tDest fDest => .condBr (cond.instantiateWidths ws) tDest fDest
-  | .switch ty cond defDest cases =>
-      .switch (ty.instantiateWidths ws) (cond.instantiateWidths ws) defDest cases
-  | .unreachable => .unreachable
-
-@[simp]
-def Declaration.instantiateWidths (ws : List.Vector Nat φ) : @Declaration φ → @Declaration 0
-  | ⟨name, type, argAttrs, retAttrs⟩ =>
-      ⟨name, type.instantiateWidths ws,
-        argAttrs.map (·.map (ValueAttr.instantiateWidths ws)),
-        retAttrs.map (ValueAttr.instantiateWidths ws)⟩
-
-@[simp]
-def Code.instantiateWidths (ws : List.Vector Nat φ) : @Code φ → @Code 0
-  | code => code.map fun (instrId, instr) => (instrId, instr.instantiateWidths ws)
-
-@[simp]
-def Block.instantiateWidths (ws : List.Vector Nat φ) : @Block φ → @Block 0
-  | ⟨id, code, terminator⟩ =>
-      ⟨id, code.instantiateWidths ws, (terminator.fst, terminator.snd.instantiateWidths ws)⟩
-
-@[simp]
-def Definition.instantiateWidths (ws : List.Vector Nat φ) : @Definition φ → @Definition 0
-  | ⟨prototype, args, blocks⟩ =>
-      ⟨prototype.instantiateWidths ws, args, blocks.map (Block.instantiateWidths ws)⟩
-
-@[simp]
-def GlobalVariable.instantiateWidths (ws : List.Vector Nat φ) : @GlobalVariable φ → @GlobalVariable 0
-  | ⟨name, ty, isConst, init?, align?, as⟩ =>
-      ⟨name, ty.instantiateWidths ws, isConst, init?.map (Exp.instantiateWidths ws), align?, as⟩
-
-@[simp]
-def TopLevelEntity.instantiateWidths (ws : List.Vector Nat φ) : @TopLevelEntity φ → @TopLevelEntity 0
-  | .global gv => .global <| gv.instantiateWidths ws
-  | .declaration decl => .declaration <| decl.instantiateWidths ws
-  | .definition defn => .definition <| defn.instantiateWidths ws
-
-@[simp]
-def TopLevel.instantiateWidths (ws : List.Vector Nat φ) : @TopLevel φ → @TopLevel 0
-  | ⟨entities⟩ => ⟨entities.map (TopLevelEntity.instantiateWidths ws)⟩
-
-end InstantiateWidths
 
 end LeanNanoLlvm.AST
