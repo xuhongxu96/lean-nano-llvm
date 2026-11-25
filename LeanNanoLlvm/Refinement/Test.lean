@@ -14,17 +14,17 @@ private theorem refines_of_det_halted {initMem : MemoryState} {cY cX : Config}
     (hY : ¬ CanAbort cY ∧ ¬ Diverges cY ∧
       ∀ tr r m, Terminates cY tr r m → tr = [] ∧ r = retY ∧ m = memY)
     (hX_term : Terminates cX [] retX memX)
-    (hret : RegisterValue.Refines .id retY retX)
-    (hmem : MemoryState.Refines .id initMem.allocIds memY memX) :
+    (hret : RegisterValue.IsRefinedBy .id retX retY)
+    (hmem : MemoryState.IsRefinedBy .id initMem.allocIds memX memY) :
     CanAbort cX ∨
     (¬ CanAbort cY ∧
       (∀ trY rY mY, Terminates cY trY rY mY →
         ∃ trX rX mX inj,
           inj.IdOn initMem.allocIds ∧
           Terminates cX trX rX mX ∧
-          Trace.Refines inj trY trX ∧
-          RegisterValue.Refines inj rY rX ∧
-          MemoryState.Refines inj initMem.allocIds mY mX) ∧
+          Trace.IsRefinedBy inj trX trY ∧
+          RegisterValue.IsRefinedBy inj rX rY ∧
+          MemoryState.IsRefinedBy inj initMem.allocIds mX mY) ∧
       (Diverges cY → Diverges cX)) := by
   refine Or.inr ⟨hY.1, ?_, fun hd => False.elim (hY.2.1 hd)⟩
   intro trY rY mY ht
@@ -138,8 +138,8 @@ def addDef : AST.Definition := [llvm-definition|
   }
 ]
 
-theorem addDef_is_refined_by_itself : addDef ⊑ addDef :=
-  Definition.Refines.refl addDef
+theorem addDef_is_refined_by_itself : addDef ⊒ addDef :=
+  Definition.IsRefinedBy.refl addDef
 
 open scoped LeanNanoLlvm.AST.Syntax in
 def retXDef (w : Nat) : AST.Definition := [llvm-definition|
@@ -159,7 +159,7 @@ def retAddX0Def (w : Nat) : AST.Definition := [llvm-definition|
 ]
 
 theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
-    retXDef w ⊑ retAddX0Def w := by
+    retAddX0Def w ⊒ retXDef w := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨arg, _ | _⟩
@@ -194,12 +194,12 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
               (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
               (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, retAddX0Def]))))
           (StarStep.refl _)))
-      (RegisterValue.Refines.refl _)
-      (MemoryState.Refines.refl _ _)
+      (RegisterValue.IsRefinedBy.refl _)
+      (MemoryState.IsRefinedBy.refl _ _)
   · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, retAddX0Def] at hargs
 
 theorem ret_add_x_0_is_refined_by_ret_x :
-    retXDef 8 ⊑ retAddX0Def 8 :=
+    retAddX0Def 8 ⊒ retXDef 8 :=
   ret_add_x_0_is_refined_by_ret_x_generic 8
 
 /-! ### 2. Optional `undef` Refinement (Explicitly Enabled via `SemanticsConfig.withUndef`) -/
@@ -327,7 +327,7 @@ private theorem step_mul_undef_2_ret (w : Nat) (initMem : MemoryState) (b : BitV
   rfl
 
 theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
-    undefMul2DefGeneric w ⊑[SemanticsConfig.withUndef] undefAddDefGeneric w := by
+    undefAddDefGeneric w ⊒[SemanticsConfig.withUndef] undefMul2DefGeneric w := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   cases args with
@@ -370,14 +370,14 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
               (StarStep.refl _))
         exact ⟨[], .bv w (.value (b * BitVec.ofInt w 2)), initMem, .id,
           MemoryInjection.id_idOn _, hTermX, trivial,
-          RegisterValue.Refines.refl _, MemoryState.Refines.refl _ _⟩
+          RegisterValue.IsRefinedBy.refl _, MemoryState.IsRefinedBy.refl _ _⟩
     · intro hdiv
       obtain ⟨ev, c1, hs, hdiv1⟩ := Diverges.step_inv hdiv
       obtain ⟨rfl, b, rfl⟩ := hstep1 ev c1 hs
       exact False.elim ((det_step_to_halted (step_mul_undef_2_ret w initMem b)).2.1 hdiv1)
 
 theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) :
-    ¬ (undefAddDefGeneric w ⊑[SemanticsConfig.withUndef] undefMul2DefGeneric w) := by
+    ¬ (undefMul2DefGeneric w ⊒[SemanticsConfig.withUndef] undefAddDefGeneric w) := by
   rintro ⟨_, hbeh⟩
   have hstep1 := step_mul_undef_2_inv w {}
   have hinst := hbeh {} [] MemoryState.empty_wf
@@ -411,23 +411,23 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
     | step hs hrest =>
       obtain ⟨rfl, b, rfl⟩ := hstep1 _ _ hs
       obtain ⟨rfl, rfl, rfl⟩ := (det_step_to_halted (step_mul_undef_2_ret w {} b)).2.2 _ _ _ hrest
-      simp [RegisterValue.Refines] at hvalRef
+      simp [RegisterValue.IsRefinedBy] at hvalRef
       exact bitvec_mul_two_ne_one_generic hpos b (by simpa using hvalRef)
 
 theorem undef_add_is_refined_by_undef_mul2 :
-    undefMul2Def ⊑[SemanticsConfig.withUndef] undefAddDef :=
+    undefAddDef ⊒[SemanticsConfig.withUndef] undefMul2Def :=
   undef_add_is_refined_by_undef_mul2_generic 1
 
 theorem undef_mul2_is_not_refined_by_undef_add :
-    ¬ (undefAddDef ⊑[SemanticsConfig.withUndef] undefMul2Def) :=
+    ¬ (undefMul2Def ⊒[SemanticsConfig.withUndef] undefAddDef) :=
   undef_mul2_is_not_refined_by_undef_add_generic 1 (by omega)
 
 theorem undef_add_is_refined_by_undef_mul2_i8 :
-    undefMul2Def8 ⊑[SemanticsConfig.withUndef] undefAddDef8 :=
+    undefAddDef8 ⊒[SemanticsConfig.withUndef] undefMul2Def8 :=
   undef_add_is_refined_by_undef_mul2_generic 8
 
 theorem undef_mul2_is_not_refined_by_undef_add_i8 :
-    ¬ (undefAddDef8 ⊑[SemanticsConfig.withUndef] undefMul2Def8) :=
+    ¬ (undefMul2Def8 ⊒[SemanticsConfig.withUndef] undefAddDef8) :=
   undef_mul2_is_not_refined_by_undef_add_generic 8 (by omega)
 
 /-! ### 3. Poison Refinement -/
@@ -464,7 +464,7 @@ private theorem poisonDef_det (cfg : SemanticsConfig) (initMem : MemoryState) :
   rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 .poison) (by simp [evalPureLeafExp?, RegisterValue.poisonOf])]
   rfl
 
-theorem poison_is_refined_by_zero : zeroDef ⊑ poisonDef := by
+theorem poison_is_refined_by_zero : poisonDef ⊒ zeroDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   cases args with
@@ -474,9 +474,9 @@ theorem poison_is_refined_by_zero : zeroDef ⊑ poisonDef := by
     have hX : Terminates (initCallConfig .modern .default64LE initMem ∅ ∅ poisonDef [])
         [] (.bv 8 .poison) initMem :=
       StarStep.step ((poisonDef_det .modern initMem _ _).mpr ⟨rfl, rfl⟩) (StarStep.refl _)
-    exact refines_of_det_halted hY hX rfl (MemoryState.Refines.refl _ _)
+    exact refines_of_det_halted hY hX rfl (MemoryState.IsRefinedBy.refl _ _)
 
-theorem zero_is_not_refined_by_poison : ¬ (poisonDef ⊑ zeroDef) := by
+theorem zero_is_not_refined_by_poison : ¬ (zeroDef ⊒ poisonDef) := by
   rintro ⟨_, hbeh⟩
   have hinst := hbeh {} [] MemoryState.empty_wf
     (by simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, zeroDef])
@@ -488,7 +488,7 @@ theorem zero_is_not_refined_by_poison : ¬ (poisonDef ⊑ zeroDef) := by
       StarStep.step ((poisonDef_det .modern {} _ _).mpr ⟨rfl, rfl⟩) (StarStep.refl _)
     obtain ⟨trX, retX, memX, inj, _, hTermX, _, hvalRef, _⟩ := hterm [] _ {} hP
     obtain ⟨rfl, rfl, rfl⟩ := hZ.2.2 _ _ _ hTermX
-    simp [RegisterValue.Refines] at hvalRef
+    simp [RegisterValue.IsRefinedBy] at hvalRef
 
 /-! ### 4. Immediate UB Refinement (UB Refines to Any Behavior) -/
 
@@ -509,7 +509,7 @@ def udivZeroDef : AST.Definition := [llvm-definition|
   }
 ]
 
-theorem ret_42_refines_udiv_by_zero : ret42Def ⊑ udivZeroDef := by
+theorem ret_42_refines_udiv_by_zero : udivZeroDef ⊒ ret42Def := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨arg, _ | _⟩
@@ -598,7 +598,7 @@ private theorem step_freeze_poison_ret (initMem : MemoryState) (b : BitVec 8) :
   rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 (.value b)) (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
   rfl
 
-theorem zero_refines_freeze_poison : zeroDef ⊑ freezePoisonDef := by
+theorem zero_refines_freeze_poison : freezePoisonDef ⊒ zeroDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   cases args with
@@ -620,10 +620,10 @@ theorem zero_refines_freeze_poison : zeroDef ⊑ freezePoisonDef := by
               (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, freezePoisonDef]))))
           (StarStep.refl _))
     exact refines_of_det_halted hY hTermX
-      (RegisterValue.Refines.refl _)
-      (MemoryState.Refines.refl _ _)
+      (RegisterValue.IsRefinedBy.refl _)
+      (MemoryState.IsRefinedBy.refl _ _)
 
-theorem freeze_poison_refines_poison : freezePoisonDef ⊑ poisonDef := by
+theorem freeze_poison_refines_poison : poisonDef ⊒ freezePoisonDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   cases args with
@@ -651,13 +651,13 @@ theorem freeze_poison_refines_poison : freezePoisonDef ⊑ poisonDef := by
             [] (.bv 8 .poison) initMem :=
           StarStep.step ((poisonDef_det .modern initMem _ _).mpr ⟨rfl, rfl⟩) (StarStep.refl _)
         exact ⟨[], .bv 8 .poison, initMem, .id,
-          MemoryInjection.id_idOn _, hX, trivial, rfl, MemoryState.Refines.refl _ _⟩
+          MemoryInjection.id_idOn _, hX, trivial, rfl, MemoryState.IsRefinedBy.refl _ _⟩
     · intro hdiv
       obtain ⟨ev, c1, hs, hdiv1⟩ := Diverges.step_inv hdiv
       obtain ⟨rfl, b, rfl⟩ := hstep1 ev c1 hs
       exact False.elim ((det_step_to_halted (step_freeze_poison_ret initMem b)).2.1 hdiv1)
 
-theorem freeze_poison_not_refines_zero : ¬ (freezePoisonDef ⊑ zeroDef) := by
+theorem freeze_poison_not_refines_zero : ¬ (zeroDef ⊒ freezePoisonDef) := by
   rintro ⟨_, hbeh⟩
   have hinst := hbeh {} [] MemoryState.empty_wf
     (by simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, zeroDef])
@@ -680,7 +680,7 @@ theorem freeze_poison_not_refines_zero : ¬ (freezePoisonDef ⊑ zeroDef) := by
           (StarStep.refl _))
     obtain ⟨trX, retX, memX, inj, _, hTermX, _, hvalRef, _⟩ := hterm [] _ {} hTermY
     obtain ⟨rfl, rfl, rfl⟩ := hZ.2.2 _ _ _ hTermX
-    simp [RegisterValue.Refines] at hvalRef
+    simp [RegisterValue.IsRefinedBy] at hvalRef
 
 /-! ### 6. IEEE-754 Floating-Point Refinement (`fneg (fneg %x)` & Fast-Math Flags) -/
 
@@ -702,7 +702,7 @@ def fnegFnegDef : AST.Definition := [llvm-definition|
   }
 ]
 
-theorem fneg_fneg_is_refined_by_id : idFloatDef ⊑ fnegFnegDef := by
+theorem fneg_fneg_is_refined_by_id : fnegFnegDef ⊒ idFloatDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨arg, _ | _⟩
@@ -743,8 +743,8 @@ theorem fneg_fneg_is_refined_by_id : idFloatDef ⊑ fnegFnegDef := by
                 (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
                 (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, fnegFnegDef]))))
             (StarStep.refl _))))
-      (RegisterValue.Refines.refl _)
-      (MemoryState.Refines.refl _ _)
+      (RegisterValue.IsRefinedBy.refl _)
+      (MemoryState.IsRefinedBy.refl _ _)
   · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, fnegFnegDef] at hargs
 
 private theorem handleDenormal_ieee (x : IEEEFloat FloatFormat.single) (b1 b2 : Bool) :
@@ -763,7 +763,7 @@ private theorem evalFloatBinary_fadd_refines_nnan (va vb : FloatW .float) (o : O
         .ok (.float .float rt, o1) ∧
       evalFloatBinaryExec .modern (.fadd { «nnan» := true }) (.float .float) (.float .float va) (.float .float vb) o =
         .ok (.float .float rs, o2) ∧
-      RegisterValue.Refines .id (.float .float rt) (.float .float rs) := by
+      RegisterValue.IsRefinedBy .id (.float .float rs) (.float .float rt) := by
   unfold evalFloatBinaryExec
   dsimp only [↓reduceDIte]
   cases h1 : o.nextBool with | mk flipL o1 =>
@@ -811,7 +811,7 @@ def faddNnanDef : AST.Definition := [llvm-definition|
   }
 ]
 
-theorem fadd_refines_fadd_nnan : faddDef ⊑ faddNnanDef := by
+theorem fadd_refines_fadd_nnan : faddNnanDef ⊒ faddDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨a, _ | ⟨b, _ | _⟩⟩
@@ -829,7 +829,7 @@ theorem fadd_refines_fadd_nnan : faddDef ⊑ faddNnanDef := by
         ev = none ∧ ∃ (o : OracleState) (rt rs : FloatW .float) (o2 : OracleState),
           evalFloatBinaryExec .modern (.fadd { «nnan» := true }) (.float .float)
             (.float .float va) (.float .float vb) o = .ok (.float .float rs, o2) ∧
-          RegisterValue.Refines .id (.float .float rt) (.float .float rs) ∧
+          RegisterValue.IsRefinedBy .id (.float .float rs) (.float .float rt) ∧
           c' = .running {
             frames := [{
               defn := faddDef
@@ -935,7 +935,7 @@ theorem fadd_refines_fadd_nnan : faddDef ⊑ faddNnanDef := by
               (StarStep.refl _))
         exact ⟨[], .float .float rs, initMem, .id,
           MemoryInjection.id_idOn _, hTermX,
-          trivial, href, MemoryState.Refines.refl _ _⟩
+          trivial, href, MemoryState.IsRefinedBy.refl _ _⟩
     · intro hdiv
       obtain ⟨ev, c1, hs, hdiv1⟩ := Diverges.step_inv hdiv
       obtain ⟨rfl, _, rt, _, _, _, _, rfl⟩ := hstep1 ev c1 hs
@@ -961,7 +961,7 @@ def selectTrueDef : AST.Definition := [llvm-definition|
   }
 ]
 
-theorem ret_a_refines_select_true : retADef ⊑ selectTrueDef := by
+theorem ret_a_refines_select_true : selectTrueDef ⊒ retADef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨a, _ | ⟨b, _ | _⟩⟩
@@ -996,8 +996,8 @@ theorem ret_a_refines_select_true : retADef ⊑ selectTrueDef := by
               (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
               (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, selectTrueDef]))))
           (StarStep.refl _)))
-      (RegisterValue.Refines.refl _)
-      (MemoryState.Refines.refl _ _)
+      (RegisterValue.IsRefinedBy.refl _)
+      (MemoryState.IsRefinedBy.refl _ _)
   · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, selectTrueDef] at hargs
 
 /-! ### 8. Arbitrary Caller-Memory Store-to-Load Forwarding & Dead `alloca` Elimination -/
@@ -1170,7 +1170,7 @@ allocates a fresh stack slot, stores `%x`, loads `%x` back, frees the slot on re
 and leaves every pre-existing caller object in `initMem.allocIds` untouched.
 -/
 theorem ret_x_refines_alloca_store_load_i8 :
-    retXDef 8 ⊑ allocaStoreLoadI8Def := by
+    allocaStoreLoadI8Def ⊒ retXDef 8 := by
   refine ⟨rfl, ?_⟩
   intro initMem args hwfMem hargs
   rcases args with _ | ⟨arg, _ | _⟩
@@ -1205,7 +1205,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
         exact bytesToValue_satisfies_rel hrt
       let mem2 := mem1.writeObjectBytes obj.allocId 0 (valueToBytes .default64LE .modern (.bv 8 v) (.int 8))
       let memFinal := mem2.freeObject obj.allocId
-      have hmemRef : MemoryState.Refines .id initMem.allocIds initMem memFinal := by
+      have hmemRef : MemoryState.IsRefinedBy .id initMem.allocIds memFinal initMem := by
         intro id hid
         have hlt := MemoryState.allocId_lt_nextAllocId_of_mem_allocIds hwfMem hid
         have hne : obj.allocId ≠ id := by rw [hidEq]; exact Nat.ne_of_gt hlt
@@ -1217,7 +1217,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
         rw [heq]
         cases initMem.objects.get? id with
         | none => trivial
-        | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.Refines.refl _⟩
+        | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.IsRefinedBy.refl _⟩
       refine refines_of_det_halted
         (det_step_to_halted fun ev c' => by
           rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 v)
@@ -1247,7 +1247,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
                     (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
                     (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, allocaStoreLoadI8Def]))))
                 (StarStep.refl _)))))
-        (RegisterValue.Refines.refl _)
+        (RegisterValue.IsRefinedBy.refl _)
         hmemRef
   · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, allocaStoreLoadI8Def] at hargs
 
@@ -1263,7 +1263,7 @@ def deadAllocaStoreI8Def : AST.Definition := [llvm-definition|
 
 /-- Dead `alloca` + dead `store` elimination verified for ALL well-formed caller memories `initMem`. -/
 theorem dead_alloca_store_elim_i8 :
-    retXDef 8 ⊑ deadAllocaStoreI8Def := by
+    deadAllocaStoreI8Def ⊒ retXDef 8 := by
   refine ⟨rfl, ?_⟩
   intro initMem args hwfMem hargs
   rcases args with _ | ⟨arg, _ | _⟩
@@ -1291,7 +1291,7 @@ theorem dead_alloca_store_elim_i8 :
       let mem2 := mem1.writeObjectBytes obj.allocId 0
         (valueToBytes .default64LE .modern (.bv 8 (.value (BitVec.ofInt 8 42))) (.int 8))
       let memFinal := mem2.freeObject obj.allocId
-      have hmemRef : MemoryState.Refines .id initMem.allocIds initMem memFinal := by
+      have hmemRef : MemoryState.IsRefinedBy .id initMem.allocIds memFinal initMem := by
         intro id hid
         have hlt := MemoryState.allocId_lt_nextAllocId_of_mem_allocIds hwfMem hid
         have hne : obj.allocId ≠ id := by rw [hidEq]; exact Nat.ne_of_gt hlt
@@ -1303,7 +1303,7 @@ theorem dead_alloca_store_elim_i8 :
         rw [heq]
         cases initMem.objects.get? id with
         | none => trivial
-        | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.Refines.refl _⟩
+        | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.IsRefinedBy.refl _⟩
       refine refines_of_det_halted
         (det_step_to_halted fun ev c' => by
           rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 v)
@@ -1326,7 +1326,7 @@ theorem dead_alloca_store_elim_i8 :
                   (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hpx]; rfl))
                   (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, deadAllocaStoreI8Def]))))
               (StarStep.refl _))))
-        (RegisterValue.Refines.refl _)
+        (RegisterValue.IsRefinedBy.refl _)
         hmemRef
   · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, deadAllocaStoreI8Def] at hargs
 
@@ -1357,7 +1357,7 @@ eliminating the overwritten `store i8 1, ptr %p` preserves caller-visible memory
 and whenever `%p` is invalid/poison/readonly/OOB, source immediately triggers UB (`CanAbort`).
 -/
 theorem dead_store_elim_caller_mem_i8 :
-    singleStoreCallerDef ⊑ doubleStoreCallerDef := by
+    doubleStoreCallerDef ⊒ singleStoreCallerDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args hwfMem hargs
   rcases args with _ | ⟨pArg, _ | ⟨vArg, _ | _⟩⟩
@@ -1431,8 +1431,8 @@ theorem dead_store_elim_caller_mem_i8 :
               (StarStep.step (ev := none)
                 (Step.term rfl rfl rfl (StepTerm.retVoid_ok rfl (StepRet.top_ok rfl rfl)))
                 (StarStep.refl _))))
-          (RegisterValue.Refines.refl _)
-          (by dsimp only [MachineState.withFramesAndMemory, CallFrame.advance, freeAllocaList]; rw [hmemEq]; exact MemoryState.Refines.refl _ _)
+          (RegisterValue.IsRefinedBy.refl _)
+          (by dsimp only [MachineState.withFramesAndMemory, CallFrame.advance, freeAllocaList]; rw [hmemEq]; exact MemoryState.IsRefinedBy.refl _ _)
   · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, doubleStoreCallerDef] at hargs
 
 private def callerObj1 : MemoryObject :=
@@ -1475,10 +1475,10 @@ def nopCallerDef : AST.Definition := [llvm-definition|
 /--
 Negative test for caller-visible memory refinement:
 a target that performs a spurious `store i8 42, ptr %p` does NOT refine a no-op `ret void`,
-because `MemoryState.Refines` rejects the corrupted caller byte (`42 ≠ 0`).
+because `MemoryState.IsRefinedBy` rejects the corrupted caller byte (`42 ≠ 0`).
 -/
 theorem bogus_store_to_caller_mem_not_refines_nop :
-    ¬ (bogusStoreCallerDef ⊑ nopCallerDef) := by
+    ¬ (nopCallerDef ⊒ bogusStoreCallerDef) := by
   rintro ⟨_, hbeh⟩
   let ptr1 : Pointer := { prov := .concrete 1, addrWidth := 64, addr := 8#64 }
   have hinst := hbeh callerMem1 [.ptr 0 (.value ptr1)] callerMem1_wf
@@ -1537,16 +1537,16 @@ theorem bogus_store_to_caller_mem_not_refines_nop :
 
 /-! ### 10. Transitivity Chaining via Lean Core `Trans` (`calc`) -/
 
-/-- Chaining `zeroDef ⊑ freezePoisonDef ⊑ poisonDef` using a native Lean `calc` block. -/
-theorem zero_refines_poison_via_calc : zeroDef ⊑ poisonDef :=
+/-- Chaining `poisonDef ⊒ freezePoisonDef ⊒ zeroDef` using a native Lean `calc` block. -/
+theorem zero_refines_poison_via_calc : poisonDef ⊒ zeroDef :=
   calc
-    zeroDef ⊑ freezePoisonDef := zero_refines_freeze_poison
-    _       ⊑ poisonDef       := freeze_poison_refines_poison
+    poisonDef ⊒ freezePoisonDef := freeze_poison_refines_poison
+    _         ⊒ zeroDef         := zero_refines_freeze_poison
 
 /-- Config-explicit transitivity chaining under `SemanticsConfig.withUndef`. -/
 theorem undef_mul2_refines_poison_via_trans :
-    undefMul2Def8 ⊑[SemanticsConfig.withUndef] poisonDef := by
-  have hAddRefPoison : undefAddDef8 ⊑[SemanticsConfig.withUndef] poisonDef := by
+    poisonDef ⊒[SemanticsConfig.withUndef] undefMul2Def8 := by
+  have hAddRefPoison : poisonDef ⊒[SemanticsConfig.withUndef] undefAddDef8 := by
     refine ⟨rfl, ?_⟩
     intro initMem args _ hargs
     cases args with
@@ -1633,11 +1633,11 @@ theorem undef_mul2_refines_poison_via_trans :
             StarStep.step (ev := none) ((poisonDef_det .withUndef initMem _ _).mpr ⟨rfl, rfl⟩) (StarStep.refl _)
           exact ⟨[], .bv 8 .poison, initMem, .id,
             MemoryInjection.id_idOn _, hP,
-            trivial, rfl, MemoryState.Refines.refl _ _⟩
+            trivial, rfl, MemoryState.IsRefinedBy.refl _ _⟩
       · intro hdiv
         obtain ⟨ev, c1, hs, hdiv1⟩ := Diverges.step_inv hdiv
         obtain ⟨rfl, b1, b2, rfl⟩ := hstep1 ev c1 hs
         exact False.elim ((det_step_to_halted (hstep2 b1 b2)).2.1 hdiv1)
-  exact Definition.RefinesWith.trans undef_add_is_refined_by_undef_mul2_i8 hAddRefPoison
+  exact Definition.IsRefinedByWith.trans hAddRefPoison undef_add_is_refined_by_undef_mul2_i8
 
 end LeanNanoLlvm.Refinement

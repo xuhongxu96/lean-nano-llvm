@@ -198,81 +198,90 @@ def asBool? : RegisterValue → Option (PoisonOr Bool)
 
 mutual
 @[simp]
-def Refines (inj : MemoryInjection) : RegisterValue → RegisterValue → Prop
-  | .bv wy _, .bv wx .poison => wx = wy
-  | .bv wy (.value vy), .bv wx (.value vx) => ∃ h : wx = wy, h ▸ vx = vy
-  | .float fty _, .float ftx .poison => ftx = fty
-  | .float fty (.value fy), .float ftx (.value fx) => ∃ h : ftx = fty, h ▸ fx = fy
-  | .ptr asy _, .ptr asx .poison => asx = asy
-  | .ptr asy (.value py), .ptr asx (.value px) => asx = asy ∧ Pointer.Refines inj py px
-  | .vector ty esy, .vector tx esx => tx = ty ∧ RefinesList inj esy esx
-  | .array ty esy, .array tx esx => tx = ty ∧ RefinesList inj esy esx
-  | .struct py tsy fsy, .struct px tsx fsx =>
-      px = py ∧ tsx = tsy ∧ RefinesList inj fsy fsx
+def IsRefinedBy (inj : MemoryInjection) : RegisterValue → RegisterValue → Prop
+  | .bv wx vx, .bv wy vy =>
+    match vx, vy with
+    | .poison, _ => wx = wy
+    | .value vx, .value vy => ∃ h : wx = wy, h ▸ vx = vy
+    | .value _, .poison => False
+  | .float ftx fx, .float fty fy =>
+    match fx, fy with
+    | .poison, _ => ftx = fty
+    | .value fx, .value fy => ∃ h : ftx = fty, h ▸ fx = fy
+    | .value _, .poison => False
+  | .ptr asx px, .ptr asy py =>
+    match px, py with
+    | .poison, _ => asx = asy
+    | .value px, .value py => asx = asy ∧ Pointer.IsRefinedBy inj px py
+    | .value _, .poison => False
+  | .vector tx esx, .vector ty esy => tx = ty ∧ IsRefinedByList inj esx esy
+  | .array tx esx, .array ty esy => tx = ty ∧ IsRefinedByList inj esx esy
+  | .struct px tsx fsx, .struct py tsy fsy =>
+      px = py ∧ tsx = tsy ∧ IsRefinedByList inj fsx fsy
   | .void, .void => True
   | _, _ => False
 
 @[simp]
-def RefinesList (inj : MemoryInjection) : List RegisterValue → List RegisterValue → Prop
+def IsRefinedByList (inj : MemoryInjection) : List RegisterValue → List RegisterValue → Prop
   | [], [] => True
-  | y :: ys, x :: xs => Refines inj y x ∧ RefinesList inj ys xs
+  | x :: xs, y :: ys => IsRefinedBy inj x y ∧ IsRefinedByList inj xs ys
   | _, _ => False
 end
 
 mutual
-theorem Refines.refl : ∀ (v : RegisterValue), Refines .id v v
+theorem IsRefinedBy.refl : ∀ (v : RegisterValue), IsRefinedBy .id v v
   | .bv _ .poison => rfl
   | .bv _ (.value _) => ⟨rfl, rfl⟩
   | .float _ .poison => rfl
   | .float _ (.value _) => ⟨rfl, rfl⟩
   | .ptr _ .poison => rfl
-  | .ptr _ (.value p) => ⟨rfl, Pointer.Refines.refl p⟩
-  | .vector _ elems => ⟨rfl, RefinesList.refl elems⟩
-  | .array _ elems => ⟨rfl, RefinesList.refl elems⟩
-  | .struct _ _ fields => ⟨rfl, rfl, RefinesList.refl fields⟩
+  | .ptr _ (.value p) => ⟨rfl, Pointer.IsRefinedBy.refl p⟩
+  | .vector _ elems => ⟨rfl, IsRefinedByList.refl elems⟩
+  | .array _ elems => ⟨rfl, IsRefinedByList.refl elems⟩
+  | .struct _ _ fields => ⟨rfl, rfl, IsRefinedByList.refl fields⟩
   | .void => trivial
 
-theorem RefinesList.refl : ∀ (vs : List RegisterValue), RefinesList .id vs vs
+theorem IsRefinedByList.refl : ∀ (vs : List RegisterValue), IsRefinedByList .id vs vs
   | [] => trivial
-  | v :: vs => ⟨Refines.refl v, RefinesList.refl vs⟩
+  | v :: vs => ⟨IsRefinedBy.refl v, IsRefinedByList.refl vs⟩
 end
 
 mutual
-theorem Refines.trans {f g : MemoryInjection} :
+theorem IsRefinedBy.trans {f g : MemoryInjection} :
     ∀ {v1 v2 v3 : RegisterValue},
-      Refines f v1 v2 → Refines g v2 v3 → Refines (f.comp g) v1 v3
-  | .bv _ _, .bv _ .poison, .bv _ .poison, h12, h23 => Eq.trans h23 h12
-  | .bv _ (.value _), .bv _ (.value _), .bv _ .poison, h12, h23 => Eq.trans h23 h12.1
-  | .bv _ .poison, .bv _ (.value _), .bv _ .poison, h12, _ => False.elim h12
+      IsRefinedBy f v1 v2 → IsRefinedBy g v2 v3 → IsRefinedBy (f.comp g) v1 v3
+  | .bv _ .poison, .bv _ .poison, .bv _ _, h12, h23 => Eq.trans h12 h23
+  | .bv _ .poison, .bv _ (.value _), .bv _ (.value _), h12, h23 => Eq.trans h12 h23.1
+  | .bv _ .poison, .bv _ (.value _), .bv _ .poison, _, h23 => False.elim h23
   | .bv _ (.value _), .bv _ (.value _), .bv _ (.value _), h12, h23 => by
       obtain ⟨hw12, hv12⟩ := h12; obtain ⟨hw23, hv23⟩ := h23
-      subst hw23; subst hw12; exact ⟨rfl, Eq.trans hv23 hv12⟩
-  | .bv _ _, .bv _ .poison, .bv _ (.value _), _, h23 => False.elim h23
-  | .bv _ .poison, .bv _ (.value _), .bv _ (.value _), h12, _ => False.elim h12
-  | .float _ _, .float _ .poison, .float _ .poison, h12, h23 => Eq.trans h23 h12
-  | .float _ (.value _), .float _ (.value _), .float _ .poison, h12, h23 => Eq.trans h23 h12.1
-  | .float _ .poison, .float _ (.value _), .float _ .poison, h12, _ => False.elim h12
+      subst hw12; subst hw23; exact ⟨rfl, Eq.trans hv12 hv23⟩
+  | .bv _ (.value _), .bv _ .poison, .bv _ _, h12, _ => False.elim h12
+  | .bv _ (.value _), .bv _ (.value _), .bv _ .poison, _, h23 => False.elim h23
+  | .float _ .poison, .float _ .poison, .float _ _, h12, h23 => Eq.trans h12 h23
+  | .float _ .poison, .float _ (.value _), .float _ (.value _), h12, h23 => Eq.trans h12 h23.1
+  | .float _ .poison, .float _ (.value _), .float _ .poison, _, h23 => False.elim h23
   | .float _ (.value _), .float _ (.value _), .float _ (.value _), h12, h23 => by
       obtain ⟨hf12, hv12⟩ := h12; obtain ⟨hf23, hv23⟩ := h23
-      subst hf23; subst hf12; exact ⟨rfl, Eq.trans hv23 hv12⟩
-  | .float _ _, .float _ .poison, .float _ (.value _), _, h23 => False.elim h23
-  | .float _ .poison, .float _ (.value _), .float _ (.value _), h12, _ => False.elim h12
-  | .ptr _ _, .ptr _ .poison, .ptr _ .poison, h12, h23 => Eq.trans h23 h12
-  | .ptr _ (.value _), .ptr _ (.value _), .ptr _ .poison, h12, h23 => Eq.trans h23 h12.1
-  | .ptr _ .poison, .ptr _ (.value _), .ptr _ .poison, h12, _ => False.elim h12
+      subst hf12; subst hf23; exact ⟨rfl, Eq.trans hv12 hv23⟩
+  | .float _ (.value _), .float _ .poison, .float _ _, h12, _ => False.elim h12
+  | .float _ (.value _), .float _ (.value _), .float _ .poison, _, h23 => False.elim h23
+  | .ptr _ .poison, .ptr _ .poison, .ptr _ _, h12, h23 => Eq.trans h12 h23
+  | .ptr _ .poison, .ptr _ (.value _), .ptr _ (.value _), h12, h23 => Eq.trans h12 h23.1
+  | .ptr _ .poison, .ptr _ (.value _), .ptr _ .poison, _, h23 => False.elim h23
   | .ptr _ (.value _), .ptr _ (.value _), .ptr _ (.value _), h12, h23 =>
-      ⟨Eq.trans h23.1 h12.1, Pointer.Refines.trans h12.2 h23.2⟩
-  | .ptr _ _, .ptr _ .poison, .ptr _ (.value _), _, h23 => False.elim h23
-  | .ptr _ .poison, .ptr _ (.value _), .ptr _ (.value _), h12, _ => False.elim h12
+      ⟨Eq.trans h12.1 h23.1, Pointer.IsRefinedBy.trans h12.2 h23.2⟩
+  | .ptr _ (.value _), .ptr _ .poison, .ptr _ _, h12, _ => False.elim h12
+  | .ptr _ (.value _), .ptr _ (.value _), .ptr _ .poison, _, h23 => False.elim h23
   | .vector t1 es1, .vector t2 es2, .vector t3 es3, h12, h23 => by
-    simp only [Refines] at h12 h23 ⊢
-    exact ⟨h23.1.trans h12.1, RefinesList.trans h12.2 h23.2⟩
+    simp only [IsRefinedBy] at h12 h23 ⊢
+    exact ⟨h12.1.trans h23.1, IsRefinedByList.trans h12.2 h23.2⟩
   | .array t1 es1, .array t2 es2, .array t3 es3, h12, h23 => by
-    simp only [Refines] at h12 h23 ⊢
-    exact ⟨h23.1.trans h12.1, RefinesList.trans h12.2 h23.2⟩
+    simp only [IsRefinedBy] at h12 h23 ⊢
+    exact ⟨h12.1.trans h23.1, IsRefinedByList.trans h12.2 h23.2⟩
   | .struct p1 ts1 fs1, .struct p2 ts2 fs2, .struct p3 ts3 fs3, h12, h23 => by
-    simp only [Refines] at h12 h23 ⊢
-    exact ⟨h23.1.trans h12.1, h23.2.1.trans h12.2.1, RefinesList.trans h12.2.2 h23.2.2⟩
+    simp only [IsRefinedBy] at h12 h23 ⊢
+    exact ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1, IsRefinedByList.trans h12.2.2 h23.2.2⟩
   | .void, .void, .void, _, _ => trivial
   | .bv _ _, .float _ _, _, h12, _ | .bv _ _, .ptr _ _, _, h12, _ | .bv _ _, .vector _ _, _, h12, _
   | .bv _ _, .array _ _, _, h12, _ | .bv _ _, .struct _ _ _, _, h12, _ | .bv _ _, .void, _, h12, _
@@ -305,11 +314,11 @@ theorem Refines.trans {f g : MemoryInjection} :
   | .void, .void, .vector _ _, _, h23 | .void, .void, .array _ _, _, h23 | .void, .void, .struct _ _ _, _, h23 =>
     False.elim (by cases h23)
 
-theorem RefinesList.trans {f g : MemoryInjection} :
+theorem IsRefinedByList.trans {f g : MemoryInjection} :
     ∀ {xs ys zs : List RegisterValue},
-      RefinesList f xs ys → RefinesList g ys zs → RefinesList (f.comp g) xs zs
+      IsRefinedByList f xs ys → IsRefinedByList g ys zs → IsRefinedByList (f.comp g) xs zs
   | [], [], [], _, _ => trivial
-  | _ :: _, _ :: _, _ :: _, h12, h23 => ⟨Refines.trans h12.1 h23.1, RefinesList.trans h12.2 h23.2⟩
+  | _ :: _, _ :: _, _ :: _, h12, h23 => ⟨IsRefinedBy.trans h12.1 h23.1, IsRefinedByList.trans h12.2 h23.2⟩
   | [], _ :: _, _, h12, _ | _ :: _, [], _, h12, _ => False.elim h12
   | [], [], _ :: _, _, h23 | _ :: _, _ :: _, [], _, h23 => False.elim h23
 end

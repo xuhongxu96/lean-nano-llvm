@@ -9,12 +9,12 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   [llvm-definition|
     define i$(w) @f(i$(w) %x) {
     entry:
+      %x = add i$(w) %x, 0
       ret i$(w) %x
     }
-  ] ⊑ [llvm-definition|
+  ] ⊒ [llvm-definition|
     define i$(w) @f(i$(w) %x) {
     entry:
-      %x = add i$(w) %x, 0
       ret i$(w) %x
     }
   ] := by
@@ -30,8 +30,8 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   - Primary semantics is a 3-tier indexed small-step relation `Step : Config → Option TraceEvent → Config → Prop` (`LeanNanoLlvm/Semantics/Step.lean`) with relational nondeterminism (`MemoryState.AllocSpec`, `FreezeRel`, `UndefValRel`, `BytesToValueRel`), observable volatile/external `TraceEvent`s, and no fuel or oracle artifacts in the specification.
   - A separate kernel-reducible executable driver (`LeanNanoLlvm/Semantics/Exec.lean`: `execStep`, `runSteps`, `runDefinition`, `runModuleFunction`, `runCode`) evaluates concrete LLVM IR inside Lean's kernel (`decide +kernel`) and is formally proven sound against `Step` / `StarStep` (`execStep_sound`, `runSteps_sound`).
 - **Full Behavioral Refinement with Reflexivity & Transitivity**:
-  - `Definition.RefinesWith` (`y ⊑[cfg] x`, defaulting to `y ⊑ x` under `SemanticsConfig.modern`) quantifies over arbitrary well-formed caller memories `initMem` and relates return values (`RegisterValue.Refines`), caller-visible final memory (`MemoryState.Refines`), observable traces (`Trace.Refines`), divergence (`Diverges`), and abort/UB/OOM (`CanAbort`) via partial allocation bijections (`MemoryInjection`).
-  - Unconditional reflexivity (`Definition.RefinesWith.refl`) and transitivity (`Definition.RefinesWith.trans`, integrated with Lean's core `Trans` typeclass for native `calc` chaining).
+  - `Definition.IsRefinedByWith` (`x ⊒[cfg] y`, defaulting to `x ⊒ y` under `SemanticsConfig.modern`, meaning source `x` is refined by target `y`) quantifies over arbitrary well-formed caller memories `initMem` and relates return values (`RegisterValue.IsRefinedBy`), caller-visible final memory (`MemoryState.IsRefinedBy`), observable traces (`Trace.IsRefinedBy`), divergence (`Diverges`), and abort/UB/OOM (`CanAbort`) via partial allocation bijections (`MemoryInjection`).
+  - Unconditional reflexivity (`Definition.IsRefinedByWith.refl`) and transitivity (`Definition.IsRefinedByWith.trans`, integrated with Lean's core `Trans` typeclass for native `calc` chaining).
 - **Optional, Switchable `undef` (`SemanticsConfig.undefMode`)**:
   - Defaults to `SemanticsConfig.modern` (`undefMode := .disabled`), matching LLVM's ongoing deprecation of `undef` (`Exp.undef` is rejected in well-formedness and execution, and uninitialized memory/padding is `poison`).
   - Explicitly opt into legacy `undef` with `SemanticsConfig.withUndef` (`undefMode := .nondet`), deterministic zero-fill with `SemanticsConfig.deterministic`, or `SemanticsConfig.legacyCompat`.
@@ -54,11 +54,11 @@ The project is organized into a clean four-layer acyclic architecture under `Lea
 1. `LeanNanoLlvm/Util`: `AssocMap.lean` (kernel-reducible association map), `Config.lean` (`SemanticsConfig`, `UndefMode`, `ExecError`), `IEEEFloat.lean`, `Poison.lean`, `Undef.lean` (`NondetOracle`, `OracleState`).
 2. `LeanNanoLlvm/AST`: `AST.lean` (plain `Nat` widths), `DataLayout.lean`, `Print.lean`, `Syntax.lean` (`[llvm-*| ...]` quasiquoters with `i$(w)` antiquotation), `Unexpander.lean`.
 3. `LeanNanoLlvm/Semantics`:
-   - `IntOps.lean` (bitvector ops & `icmp`) → `FloatOps.lean` → `Memory.lean` (`MemoryState`, `AllocSpec`, `MemoryInjection`, `MemoryState.Refines`) → `Value.lean` (`RegisterValue`, serialization, `FreezeRel`, `UndefValRel`, pure/oracle evaluators)
+   - `IntOps.lean` (bitvector ops & `icmp`) → `FloatOps.lean` → `Memory.lean` (`MemoryState`, `AllocSpec`, `MemoryInjection`, `MemoryState.IsRefinedBy`) → `Value.lean` (`RegisterValue`, serialization, `FreezeRel`, `UndefValRel`, pure/oracle evaluators)
    - `Intrinsics.lean` (LLVM intrinsics & `AllocLibcallSpec`) & `Machine.lean` (`TraceEvent`, `CallFrame`, `MachineState`, `Config`)
    - `Step.lean` (primary indexed small-step relation `Step`, `StarStep`, `Terminates`, `Diverges`, `CanAbort`, inversion lemmas)
    - `Exec.lean` (kernel-reducible `execStep` / `runSteps` + `execStep_sound` / `runSteps_sound` + module runners) & `Wellformed.lean`.
-4. `LeanNanoLlvm/Refinement`: `Refinement.lean` (`Definition.RefinesWith`, `y ⊑[cfg] x`, `y ⊑ x`, `refl`, `trans`, and `Trans` instances).
+4. `LeanNanoLlvm/Refinement`: `Refinement.lean` (`Definition.IsRefinedByWith`, `x ⊒[cfg] y`, `x ⊒ y`, `refl`, `trans`, and `Trans` instances).
 
 ## Build & Test
 

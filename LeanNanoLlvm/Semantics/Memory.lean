@@ -1023,7 +1023,7 @@ end MemoryState
 /-! ### Memory Injections & Bit/Byte/Memory Refinement (CompCert / Alive2 style) -/
 
 /--
-Partial bijection mapping target `AllocId`s (in `y`) to source `AllocId`s (in `x`),
+Partial bijection mapping source `AllocId`s to target `AllocId`s,
 used to relate pointers, memory bytes, and traces across optimizations that add, remove,
 or reorder internal allocations (`alloca` / `malloc`).
 -/
@@ -1042,7 +1042,7 @@ def id : MemoryInjection where
     cases h2
     rfl
 
-/-- Composition of injections (`f` maps `z → y`, `g` maps `y → x`, yielding `z → x`). -/
+/-- Composition of injections (`f` maps `x → y`, `g` maps `y → z`, yielding `x → z`). -/
 def comp (f g : MemoryInjection) : MemoryInjection where
   map := fun a => (f.map a).bind g.map
   injective := by
@@ -1073,29 +1073,29 @@ theorem comp_idOn {f g : MemoryInjection} {ids : List AllocId}
 
 end MemoryInjection
 
-/-- Provenance refinement under a `MemoryInjection` (`py` refines `px`). -/
-def Provenance.Refines (inj : MemoryInjection) : Provenance → Provenance → Prop
+/-- Provenance refinement under a `MemoryInjection` (source `ps` is refined by target `pt`). -/
+def Provenance.IsRefinedBy (inj : MemoryInjection) : Provenance → Provenance → Prop
   | .nullary, .nullary => True
-  | .concrete ay, .concrete ax => inj.map ay = some ax
-  | .wildcard _ ky, .wildcard _ kx =>
-    match ky, kx with
-    | some ay, some ax => inj.map ay = some ax
-    | some _, none => True
+  | .concrete aS, .concrete aT => inj.map aS = some aT
+  | .wildcard _ ks, .wildcard _ kt =>
+    match ks, kt with
+    | some aS, some aT => inj.map aS = some aT
+    | none, some _ => True
     | none, none => True
-    | none, some _ => False
+    | some _, none => False
   | _, _ => False
 
-theorem Provenance.Refines.refl (p : Provenance) : Provenance.Refines .id p p := by
+theorem Provenance.IsRefinedBy.refl (p : Provenance) : Provenance.IsRefinedBy .id p p := by
   cases p with
   | nullary => trivial
   | concrete _ => rfl
   | wildcard _ k => cases k <;> trivial
 
-theorem Provenance.Refines.trans {f g : MemoryInjection} {p1 p2 p3 : Provenance}
-    (h12 : Provenance.Refines f p1 p2) (h23 : Provenance.Refines g p2 p3) :
-    Provenance.Refines (f.comp g) p1 p3 := by
+theorem Provenance.IsRefinedBy.trans {f g : MemoryInjection} {p1 p2 p3 : Provenance}
+    (h12 : Provenance.IsRefinedBy f p1 p2) (h23 : Provenance.IsRefinedBy g p2 p3) :
+    Provenance.IsRefinedBy (f.comp g) p1 p3 := by
   cases p1 <;> cases p2 <;> cases p3
-  all_goals simp only [Provenance.Refines] at h12 h23 ⊢
+  all_goals simp only [Provenance.IsRefinedBy] at h12 h23 ⊢
   all_goals try exact trivial
   all_goals try exact False.elim h12
   all_goals try exact False.elim h23
@@ -1104,37 +1104,38 @@ theorem Provenance.Refines.trans {f g : MemoryInjection} {p1 p2 p3 : Provenance}
     cases k1 <;> cases k2 <;> cases k3 <;> simp_all [MemoryInjection.comp]
 
 /-- Pointer refinement under a `MemoryInjection` (matching address bitvector and refined provenance). -/
-def Pointer.Refines (inj : MemoryInjection) (py px : Pointer) : Prop :=
-  (∃ h : px.addrWidth = py.addrWidth, h ▸ px.addr = py.addr) ∧
-  Provenance.Refines inj py.prov px.prov
+def Pointer.IsRefinedBy (inj : MemoryInjection) (ps pt : Pointer) : Prop :=
+  (∃ h : ps.addrWidth = pt.addrWidth, h ▸ ps.addr = pt.addr) ∧
+  Provenance.IsRefinedBy inj ps.prov pt.prov
 
-theorem Pointer.Refines.refl (p : Pointer) : Pointer.Refines .id p p :=
-  ⟨⟨rfl, rfl⟩, Provenance.Refines.refl p.prov⟩
+theorem Pointer.IsRefinedBy.refl (p : Pointer) : Pointer.IsRefinedBy .id p p :=
+  ⟨⟨rfl, rfl⟩, Provenance.IsRefinedBy.refl p.prov⟩
 
-theorem Pointer.Refines.trans {f g : MemoryInjection} {p1 p2 p3 : Pointer}
-    (h12 : Pointer.Refines f p1 p2) (h23 : Pointer.Refines g p2 p3) :
-    Pointer.Refines (f.comp g) p1 p3 := by
+theorem Pointer.IsRefinedBy.trans {f g : MemoryInjection} {p1 p2 p3 : Pointer}
+    (h12 : Pointer.IsRefinedBy f p1 p2) (h23 : Pointer.IsRefinedBy g p2 p3) :
+    Pointer.IsRefinedBy (f.comp g) p1 p3 := by
   obtain ⟨⟨hw12, ha12⟩, hp12⟩ := h12
   obtain ⟨⟨hw23, ha23⟩, hp23⟩ := h23
-  refine ⟨⟨hw23.trans hw12, ?_⟩, Provenance.Refines.trans hp12 hp23⟩
+  refine ⟨⟨hw12.trans hw23, ?_⟩, Provenance.IsRefinedBy.trans hp12 hp23⟩
   cases p1; cases p2; cases p3
   dsimp only at hw12 hw23 ha12 ha23 ⊢
-  subst hw23; subst hw12
-  exact ha23.trans ha12
+  subst hw12; subst hw23
+  exact ha12.trans ha23
 
-/-- Single memory-bit refinement (`poison`/`undef` in source refine to anything; concrete bits must match under `inj`). -/
-def MemBit.Refines (inj : MemoryInjection) : MemBit → MemBit → Prop
-  | _, .poison => True
-  | _, .undef => True
-  | .concrete by_ py, .concrete bx px =>
-    by_ = bx ∧
-    match py, px with
+/-- Single memory-bit refinement (`poison`/`undef` in source are refined by anything;
+concrete bits must match under `inj`). -/
+def MemBit.IsRefinedBy (inj : MemoryInjection) : MemBit → MemBit → Prop
+  | .poison, _ => True
+  | .undef, _ => True
+  | .concrete bs ps, .concrete bt pt =>
+    bs = bt ∧
+    match ps, pt with
     | none, none => True
-    | some (p1, i1), some (p2, i2) => i1 = i2 ∧ Provenance.Refines inj p1 p2
+    | some (p1, i1), some (p2, i2) => i1 = i2 ∧ Provenance.IsRefinedBy inj p1 p2
     | _, _ => False
   | _, _ => False
 
-theorem MemBit.Refines.refl (b : MemBit) : MemBit.Refines .id b b := by
+theorem MemBit.IsRefinedBy.refl (b : MemBit) : MemBit.IsRefinedBy .id b b := by
   cases b with
   | poison => trivial
   | undef => trivial
@@ -1142,76 +1143,77 @@ theorem MemBit.Refines.refl (b : MemBit) : MemBit.Refines .id b b := by
     refine ⟨rfl, ?_⟩
     cases pb with
     | none => trivial
-    | some p => exact ⟨rfl, Provenance.Refines.refl p.1⟩
+    | some p => exact ⟨rfl, Provenance.IsRefinedBy.refl p.1⟩
 
-theorem MemBit.Refines.trans {f g : MemoryInjection} {b1 b2 b3 : MemBit}
-    (h12 : MemBit.Refines f b1 b2) (h23 : MemBit.Refines g b2 b3) :
-    MemBit.Refines (f.comp g) b1 b3 := by
-  cases b3 with
+theorem MemBit.IsRefinedBy.trans {f g : MemoryInjection} {b1 b2 b3 : MemBit}
+    (h12 : MemBit.IsRefinedBy f b1 b2) (h23 : MemBit.IsRefinedBy g b2 b3) :
+    MemBit.IsRefinedBy (f.comp g) b1 b3 := by
+  cases b1 with
   | poison => trivial
   | undef => trivial
-  | concrete bx px =>
+  | concrete bs ps =>
     cases b2 with
-    | poison => cases h23
-    | undef => cases h23
+    | poison => cases h12
+    | undef => cases h12
     | concrete bm pm =>
-      cases b1 with
-      | poison => cases h12
-      | undef => cases h12
-      | concrete by_ py =>
+      cases b3 with
+      | poison => cases h23
+      | undef => cases h23
+      | concrete bt pt =>
         obtain ⟨hb12, hp12⟩ := h12
         obtain ⟨hb23, hp23⟩ := h23
         refine ⟨hb12.trans hb23, ?_⟩
-        cases py <;> cases pm <;> cases px
+        cases ps <;> cases pm <;> cases pt
         all_goals dsimp only at hp12 hp23 ⊢
         all_goals try exact trivial
         all_goals try exact False.elim hp12
         all_goals try exact False.elim hp23
-        exact ⟨hp12.1.trans hp23.1, Provenance.Refines.trans hp12.2 hp23.2⟩
+        exact ⟨hp12.1.trans hp23.1, Provenance.IsRefinedBy.trans hp12.2 hp23.2⟩
 
-/-- Byte-level memory refinement (all 8 bits refine under `inj`). -/
-def MemByte.Refines (inj : MemoryInjection) (by_ bx : MemByte) : Prop :=
-  ∀ i < 8, MemBit.Refines inj (by_.getBit i) (bx.getBit i)
+/-- Byte-level memory refinement (all 8 bits of source `bs` are refined by those of target `bt`). -/
+def MemByte.IsRefinedBy (inj : MemoryInjection) (bs bt : MemByte) : Prop :=
+  ∀ i < 8, MemBit.IsRefinedBy inj (bs.getBit i) (bt.getBit i)
 
-theorem MemByte.Refines.refl (b : MemByte) : MemByte.Refines .id b b :=
-  fun i _ => MemBit.Refines.refl (b.getBit i)
+theorem MemByte.IsRefinedBy.refl (b : MemByte) : MemByte.IsRefinedBy .id b b :=
+  fun i _ => MemBit.IsRefinedBy.refl (b.getBit i)
 
-theorem MemByte.Refines.trans {f g : MemoryInjection} {b1 b2 b3 : MemByte}
-    (h12 : MemByte.Refines f b1 b2) (h23 : MemByte.Refines g b2 b3) :
-    MemByte.Refines (f.comp g) b1 b3 :=
-  fun i hi => MemBit.Refines.trans (h12 i hi) (h23 i hi)
+theorem MemByte.IsRefinedBy.trans {f g : MemoryInjection} {b1 b2 b3 : MemByte}
+    (h12 : MemByte.IsRefinedBy f b1 b2) (h23 : MemByte.IsRefinedBy g b2 b3) :
+    MemByte.IsRefinedBy (f.comp g) b1 b3 :=
+  fun i hi => MemBit.IsRefinedBy.trans (h12 i hi) (h23 i hi)
 
 /--
-Caller-visible memory refinement (`memY` refines `memX` on all `callerIds` under `inj`).
+Caller-visible memory refinement (source `memS` is refined by target `memT` on all `callerIds`
+under `inj`).
 Every caller/global allocation in `callerIds` must exist with identical size and lifecycle state,
-and its byte contents in `memY` must refine those in `memX` under `inj`.
+and its byte contents in `memS` must be refined by those in `memT` under `inj`.
 Internal allocations (`alloca` / non-leaked `malloc`) outside `callerIds` may differ freely.
 -/
-def MemoryState.Refines (inj : MemoryInjection) (callerIds : List AllocId)
-    (memY memX : MemoryState) : Prop :=
+def MemoryState.IsRefinedBy (inj : MemoryInjection) (callerIds : List AllocId)
+    (memS memT : MemoryState) : Prop :=
   ∀ id ∈ callerIds,
-    match memY.objects.get? id, memX.objects.get? id with
-    | some moY, some moX =>
-      moY.size = moX.size ∧
-      moY.state = moX.state ∧
-      (moX.state ≠ .freed →
-        ∀ i < moX.size,
-          MemByte.Refines inj (moY.bytes.getD i MemByte.poison) (moX.bytes.getD i MemByte.poison))
+    match memS.objects.get? id, memT.objects.get? id with
+    | some moS, some moT =>
+      moS.size = moT.size ∧
+      moS.state = moT.state ∧
+      (moS.state ≠ .freed →
+        ∀ i < moS.size,
+          MemByte.IsRefinedBy inj (moS.bytes.getD i MemByte.poison) (moT.bytes.getD i MemByte.poison))
     | none, none => True
     | _, _ => False
 
-theorem MemoryState.Refines.refl (callerIds : List AllocId) (mem : MemoryState) :
-    MemoryState.Refines .id callerIds mem mem := by
+theorem MemoryState.IsRefinedBy.refl (callerIds : List AllocId) (mem : MemoryState) :
+    MemoryState.IsRefinedBy .id callerIds mem mem := by
   intro id _
   cases mem.objects.get? id with
   | none => trivial
-  | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.Refines.refl _⟩
+  | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.IsRefinedBy.refl _⟩
 
-theorem MemoryState.Refines.trans {f g : MemoryInjection} {callerIds : List AllocId}
+theorem MemoryState.IsRefinedBy.trans {f g : MemoryInjection} {callerIds : List AllocId}
     {m1 m2 m3 : MemoryState}
-    (h12 : MemoryState.Refines f callerIds m1 m2)
-    (h23 : MemoryState.Refines g callerIds m2 m3) :
-    MemoryState.Refines (f.comp g) callerIds m1 m3 := by
+    (h12 : MemoryState.IsRefinedBy f callerIds m1 m2)
+    (h23 : MemoryState.IsRefinedBy g callerIds m2 m3) :
+    MemoryState.IsRefinedBy (f.comp g) callerIds m1 m3 := by
   intro id hid
   have r12 := h12 id hid
   have r23 := h23 id hid
@@ -1235,8 +1237,8 @@ theorem MemoryState.Refines.trans {f g : MemoryInjection} {callerIds : List Allo
         obtain ⟨hs23, hst23, hb23⟩ := r23
         refine ⟨hs12.trans hs23, hst12.trans hst23, ?_⟩
         intro hnf i hi
-        have hnf2 : mo2.state ≠ MemoryObjectState.freed := by rw [hst23]; exact hnf
-        have hi2 : i < mo2.size := by rw [hs23]; exact hi
-        exact MemByte.Refines.trans (hb12 hnf2 i hi2) (hb23 hnf i hi)
+        have hnf2 : mo2.state ≠ MemoryObjectState.freed := by rw [← hst12]; exact hnf
+        have hi2 : i < mo2.size := by rw [← hs12]; exact hi
+        exact MemByte.IsRefinedBy.trans (hb12 hnf i hi) (hb23 hnf2 i hi2)
 
 end LeanNanoLlvm.Semantics

@@ -19,44 +19,44 @@ inductive TraceEvent : Type where
   | externalCall  (name : String) (args : List RegisterValue)
 deriving DecidableEq
 
-/-- Byte-array refinement under a `MemoryInjection` (equal length, pointwise `MemByte.Refines`). -/
-def ByteArrayRefines (inj : MemoryInjection) (bsY bsX : Array MemByte) : Prop :=
-  bsY.size = bsX.size ∧
-  ∀ i < bsX.size, MemByte.Refines inj (bsY.getD i MemByte.poison) (bsX.getD i MemByte.poison)
+/-- Byte-array refinement under a `MemoryInjection` (equal length, pointwise `MemByte.IsRefinedBy`). -/
+def ByteArrayIsRefinedBy (inj : MemoryInjection) (bsX bsY : Array MemByte) : Prop :=
+  bsX.size = bsY.size ∧
+  ∀ i < bsX.size, MemByte.IsRefinedBy inj (bsX.getD i MemByte.poison) (bsY.getD i MemByte.poison)
 
-theorem ByteArrayRefines.refl (bs : Array MemByte) : ByteArrayRefines .id bs bs :=
-  ⟨rfl, fun _ _ => MemByte.Refines.refl _⟩
+theorem ByteArrayIsRefinedBy.refl (bs : Array MemByte) : ByteArrayIsRefinedBy .id bs bs :=
+  ⟨rfl, fun _ _ => MemByte.IsRefinedBy.refl _⟩
 
-theorem ByteArrayRefines.trans {f g : MemoryInjection} {b1 b2 b3 : Array MemByte}
-    (h12 : ByteArrayRefines f b1 b2) (h23 : ByteArrayRefines g b2 b3) :
-    ByteArrayRefines (f.comp g) b1 b3 :=
-  ⟨h12.1.trans h23.1, fun i hi => MemByte.Refines.trans (h12.2 i (by rw [h23.1]; exact hi)) (h23.2 i hi)⟩
+theorem ByteArrayIsRefinedBy.trans {f g : MemoryInjection} {b1 b2 b3 : Array MemByte}
+    (h12 : ByteArrayIsRefinedBy f b1 b2) (h23 : ByteArrayIsRefinedBy g b2 b3) :
+    ByteArrayIsRefinedBy (f.comp g) b1 b3 :=
+  ⟨h12.1.trans h23.1, fun i hi => MemByte.IsRefinedBy.trans (h12.2 i hi) (h23.2 i (by rw [← h12.1]; exact hi))⟩
 
 /-- Observable event refinement under a `MemoryInjection`. -/
-def TraceEvent.Refines (inj : MemoryInjection) : TraceEvent → TraceEvent → Prop
-  | .volatileLoad asY addrY bsY, .volatileLoad asX addrX bsX =>
-      asY = asX ∧ addrY = addrX ∧ ByteArrayRefines inj bsY bsX
-  | .volatileStore asY addrY bsY, .volatileStore asX addrX bsX =>
-      asY = asX ∧ addrY = addrX ∧ ByteArrayRefines inj bsY bsX
-  | .externalCall nY argsY, .externalCall nX argsX =>
-      nY = nX ∧ RegisterValue.RefinesList inj argsY argsX
+def TraceEvent.IsRefinedBy (inj : MemoryInjection) : TraceEvent → TraceEvent → Prop
+  | .volatileLoad asX addrX bsX, .volatileLoad asY addrY bsY =>
+      asX = asY ∧ addrX = addrY ∧ ByteArrayIsRefinedBy inj bsX bsY
+  | .volatileStore asX addrX bsX, .volatileStore asY addrY bsY =>
+      asX = asY ∧ addrX = addrY ∧ ByteArrayIsRefinedBy inj bsX bsY
+  | .externalCall nX argsX, .externalCall nY argsY =>
+      nX = nY ∧ RegisterValue.IsRefinedByList inj argsX argsY
   | _, _ => False
 
-theorem TraceEvent.Refines.refl : ∀ (e : TraceEvent), TraceEvent.Refines .id e e
-  | .volatileLoad _ _ bs => ⟨rfl, rfl, ByteArrayRefines.refl bs⟩
-  | .volatileStore _ _ bs => ⟨rfl, rfl, ByteArrayRefines.refl bs⟩
-  | .externalCall _ args => ⟨rfl, RegisterValue.RefinesList.refl args⟩
+theorem TraceEvent.IsRefinedBy.refl : ∀ (e : TraceEvent), TraceEvent.IsRefinedBy .id e e
+  | .volatileLoad _ _ bs => ⟨rfl, rfl, ByteArrayIsRefinedBy.refl bs⟩
+  | .volatileStore _ _ bs => ⟨rfl, rfl, ByteArrayIsRefinedBy.refl bs⟩
+  | .externalCall _ args => ⟨rfl, RegisterValue.IsRefinedByList.refl args⟩
 
-theorem TraceEvent.Refines.trans {f g : MemoryInjection} :
+theorem TraceEvent.IsRefinedBy.trans {f g : MemoryInjection} :
     ∀ {e1 e2 e3 : TraceEvent},
-      TraceEvent.Refines f e1 e2 → TraceEvent.Refines g e2 e3 →
-      TraceEvent.Refines (f.comp g) e1 e3
+      TraceEvent.IsRefinedBy f e1 e2 → TraceEvent.IsRefinedBy g e2 e3 →
+      TraceEvent.IsRefinedBy (f.comp g) e1 e3
   | .volatileLoad _ _ _, .volatileLoad _ _ _, .volatileLoad _ _ _, h12, h23 =>
-      ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1, ByteArrayRefines.trans h12.2.2 h23.2.2⟩
+      ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1, ByteArrayIsRefinedBy.trans h12.2.2 h23.2.2⟩
   | .volatileStore _ _ _, .volatileStore _ _ _, .volatileStore _ _ _, h12, h23 =>
-      ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1, ByteArrayRefines.trans h12.2.2 h23.2.2⟩
+      ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1, ByteArrayIsRefinedBy.trans h12.2.2 h23.2.2⟩
   | .externalCall _ _, .externalCall _ _, .externalCall _ _, h12, h23 =>
-      ⟨h12.1.trans h23.1, RegisterValue.RefinesList.trans h12.2 h23.2⟩
+      ⟨h12.1.trans h23.1, RegisterValue.IsRefinedByList.trans h12.2 h23.2⟩
   | .volatileLoad .., .volatileStore .., _, h12, _
   | .volatileLoad .., .externalCall .., _, h12, _
   | .volatileStore .., .volatileLoad .., _, h12, _
@@ -71,21 +71,21 @@ theorem TraceEvent.Refines.trans {f g : MemoryInjection} :
   | .externalCall .., .externalCall .., .volatileStore .., _, h23 => False.elim h23
 
 /-- Trace (event-list) refinement under a `MemoryInjection`. -/
-def Trace.Refines (inj : MemoryInjection) : List TraceEvent → List TraceEvent → Prop
+def Trace.IsRefinedBy (inj : MemoryInjection) : List TraceEvent → List TraceEvent → Prop
   | [], [] => True
-  | eY :: restY, eX :: restX => TraceEvent.Refines inj eY eX ∧ Trace.Refines inj restY restX
+  | eX :: restX, eY :: restY => TraceEvent.IsRefinedBy inj eX eY ∧ Trace.IsRefinedBy inj restX restY
   | _, _ => False
 
-theorem Trace.Refines.refl : ∀ (tr : List TraceEvent), Trace.Refines .id tr tr
+theorem Trace.IsRefinedBy.refl : ∀ (tr : List TraceEvent), Trace.IsRefinedBy .id tr tr
   | [] => trivial
-  | e :: rest => ⟨TraceEvent.Refines.refl e, Trace.Refines.refl rest⟩
+  | e :: rest => ⟨TraceEvent.IsRefinedBy.refl e, Trace.IsRefinedBy.refl rest⟩
 
-theorem Trace.Refines.trans {f g : MemoryInjection} :
+theorem Trace.IsRefinedBy.trans {f g : MemoryInjection} :
     ∀ {t1 t2 t3 : List TraceEvent},
-      Trace.Refines f t1 t2 → Trace.Refines g t2 t3 → Trace.Refines (f.comp g) t1 t3
+      Trace.IsRefinedBy f t1 t2 → Trace.IsRefinedBy g t2 t3 → Trace.IsRefinedBy (f.comp g) t1 t3
   | [], [], [], _, _ => trivial
   | _ :: _, _ :: _, _ :: _, h12, h23 =>
-      ⟨TraceEvent.Refines.trans h12.1 h23.1, Trace.Refines.trans h12.2 h23.2⟩
+      ⟨TraceEvent.IsRefinedBy.trans h12.1 h23.1, Trace.IsRefinedBy.trans h12.2 h23.2⟩
   | [], _ :: _, _, h12, _ | _ :: _, [], _, h12, _ => False.elim h12
   | [], [], _ :: _, _, h23 | _ :: _, _ :: _, [], _, h23 => False.elim h23
 
