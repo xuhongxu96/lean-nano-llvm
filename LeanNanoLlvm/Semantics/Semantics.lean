@@ -418,12 +418,11 @@ def bvCtlz {w : Nat} (x : BitVec w) : BitVec w :=
   BitVec.ofNat w (go w 0)
 
 def bvCttz {w : Nat} (x : BitVec w) : BitVec w :=
-  let rec go (i : Nat) : Nat :=
-    if i ≥ w then w
-    else if x.getLsbD i then i
-    else go (i + 1)
-  termination_by w - i
-  BitVec.ofNat w (go 0)
+  let rec go (i : Nat) : Nat → Nat
+    | 0 => w
+    | rem + 1 =>
+      if x.getLsbD i then i else go (i + 1) rem
+  BitVec.ofNat w (go 0 w)
 
 def bvCtpop {w : Nat} (x : BitVec w) : BitVec w :=
   let rec go (i : Nat) (acc : Nat) : Nat :=

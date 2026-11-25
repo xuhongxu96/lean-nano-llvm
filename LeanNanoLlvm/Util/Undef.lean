@@ -84,19 +84,17 @@ def ofList (xs : List Nat) (fallback : Nat := 0) : OracleState :=
 
 /-- Draw the next natural number from the oracle. -/
 @[simp]
-def nextNat (st : OracleState) : Nat × OracleState :=
-  (st.oracle st.index, { st with index := st.index + 1 })
+def nextNat : OracleState → Nat × OracleState
+  | ⟨oracle, index⟩ => (oracle index, ⟨oracle, index + 1⟩)
 
 /-- Draw the next boolean from the oracle. -/
 @[simp]
-def nextBool (st : OracleState) : Bool × OracleState :=
-  let (n, st') := st.nextNat
-  (n % 2 == 1, st')
+def nextBool : OracleState → Bool × OracleState
+  | ⟨oracle, index⟩ => (oracle index % 2 == 1, ⟨oracle, index + 1⟩)
 
 /-- Draw a bitvector of width `w` from the oracle. -/
 @[simp]
-def nextBitVec (w : Nat) (st : OracleState) : BitVec w × OracleState :=
-  let (n, st') := st.nextNat
-  (BitVec.ofNat w n, st')
+def nextBitVec (w : Nat) : OracleState → BitVec w × OracleState
+  | ⟨oracle, index⟩ => (BitVec.ofNat w (oracle index), ⟨oracle, index + 1⟩)
 
 end OracleState

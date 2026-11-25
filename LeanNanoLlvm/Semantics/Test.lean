@@ -229,17 +229,17 @@ theorem undef_allowed_when_enabled_wf : undefUseDef.WellFormedWith .withUndef :=
 
 theorem undef_rejected_at_runtime_modern :
     isStaticError (runDefinitionRet undefUseDef [] { config := .modern }) = true := by
-  native_decide
+  decide +kernel
 
 theorem undef_nondet_draws_from_oracle :
     runDefinitionRet undefUseDef [] { config := .withUndef } ⟨[41], 0⟩ =
       .ok (.bv 8 (.value (42 : BitVec 8))) := by
-  native_decide
+  decide +kernel
 
 theorem undef_deterministic_returns_zero :
     runDefinitionRet undefUseDef [] { config := .deterministic } =
       .ok (.bv 8 (.value (1 : BitVec 8))) := by
-  native_decide
+  decide +kernel
 
 def uninitAllocaLoadDef : @AST.Definition 0 :=
   [llvm-definition|
@@ -254,13 +254,13 @@ def uninitAllocaLoadDef : @AST.Definition 0 :=
 theorem uninit_alloca_is_poison_when_undef_disabled :
     runDefinitionRet uninitAllocaLoadDef [] { config := .modern } =
       .ok (.bv 8 .poison) := by
-  native_decide
+  decide +kernel
 
 /-- Bit-granular `undef` memory draws 1 bit per uninitialized bit (LSB-first `[0,1,0,1,1,0,1,0]` = `0x5A`). -/
 theorem uninit_alloca_is_oracle_value_when_undef_enabled :
     runDefinitionRet uninitAllocaLoadDef [] { config := .withUndef } ⟨[0, 1, 0, 1, 1, 0, 1, 0], 0⟩ =
       .ok (.bv 8 (.value (0x5A : BitVec 8))) := by
-  native_decide
+  decide +kernel
 
 /-! ### 3. Immediate UB vs Poison -/
 
@@ -272,7 +272,7 @@ theorem udiv_by_zero_is_immediate_ub :
         ret i8 %r
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem sdiv_int_min_by_neg1_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -282,7 +282,7 @@ theorem sdiv_int_min_by_neg1_is_immediate_ub :
         ret i8 %r
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem srem_poison_rhs_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -292,7 +292,7 @@ theorem srem_poison_rhs_is_immediate_ub :
         ret i8 %r
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem udiv_exact_inexact_is_poison :
     runDefinitionRet [llvm-definition|
@@ -302,7 +302,7 @@ theorem udiv_exact_inexact_is_poison :
         ret i8 %r
       }
     ] [] = .ok (.bv 8 .poison) := by
-  native_decide
+  decide +kernel
 
 theorem or_disjoint_overlap_is_poison :
     runDefinitionRet [llvm-definition|
@@ -312,7 +312,7 @@ theorem or_disjoint_overlap_is_poison :
         ret i8 %r
       }
     ] [] = .ok (.bv 8 .poison) := by
-  native_decide
+  decide +kernel
 
 theorem br_poison_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -325,7 +325,7 @@ theorem br_poison_is_immediate_ub :
         ret i32 2
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem unreachable_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -334,7 +334,7 @@ theorem unreachable_is_immediate_ub :
         unreachable
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem assume_false_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -344,7 +344,7 @@ theorem assume_false_is_immediate_ub :
         ret i32 0
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 /-! ### 4. Memory, Endianness, Struct Layout, Provenance & Heap (`llubi`-aligned) -/
 
@@ -363,13 +363,13 @@ def endianByte0Def : @AST.Definition 0 :=
 theorem memory_load_little_endian :
     runDefinitionRet endianByte0Def [] { dataLayout := .default64LE } =
       .ok (.bv 8 (.value (0x04 : BitVec 8))) := by
-  native_decide
+  decide +kernel
 
 /-- `0x01020304 = 16909060`: byte 0 is `0x01` under big-endian. -/
 theorem memory_load_big_endian :
     runDefinitionRet endianByte0Def [] { dataLayout := .default64BE } =
       .ok (.bv 8 (.value (0x01 : BitVec 8))) := by
-  native_decide
+  decide +kernel
 
 /-- Mirrors `llubi/test/loadstore_le.ll`: loading `i25` with non-zero padding bits produces `poison`. -/
 theorem load_non_byte_sized_nonzero_padding_is_poison :
@@ -382,7 +382,7 @@ theorem load_non_byte_sized_nonzero_padding_is_poison :
         ret i25 %v
       }
     ] [] = .ok (.bv 25 .poison) := by
-  native_decide
+  decide +kernel
 
 /-- Unpacked `{ i8, i32 }` pads field 1 to offset 4; packed `<{ i8, i32 }>` places field 1 at offset 1. -/
 theorem gep_unpacked_vs_packed_struct_offsets :
@@ -403,7 +403,7 @@ theorem gep_unpacked_vs_packed_struct_offsets :
         ret i64 %res
       }
     ] [] = .ok (.bv 64 (.value (5 : BitVec 64))) := by
-  native_decide
+  decide +kernel
 
 /-- `getelementptr inbounds` past object bounds yields `poison`. -/
 theorem gep_inbounds_oob_is_poison :
@@ -416,7 +416,7 @@ theorem gep_inbounds_oob_is_poison :
         ret i1 %c
       }
     ] [] = .ok (.bv 1 .poison) := by
-  native_decide
+  decide +kernel
 
 /-- Pointer provenance survives round-trip through memory (`store ptr` / `load ptr`). -/
 theorem pointer_provenance_preserved_through_memory :
@@ -432,7 +432,7 @@ theorem pointer_provenance_preserved_through_memory :
         ret i32 %v
       }
     ] [] = .ok (.bv 32 (.value (77 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- Overwriting a byte of a stored pointer destroys its provenance; dereferencing causes Immediate UB. -/
 theorem pointer_byte_overwrite_destroys_provenance_ub :
@@ -450,7 +450,7 @@ theorem pointer_byte_overwrite_destroys_provenance_ub :
         ret i32 %v
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 /-- Mirrors `llubi/test/inttoptr_generation.ll`: `ptrtoaddr` does NOT expose provenance. -/
 theorem ptrtoaddr_does_not_expose_provenance_ub :
@@ -465,7 +465,7 @@ theorem ptrtoaddr_does_not_expose_provenance_ub :
         ret i32 %v
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 /-- Mirrors `llubi/test/inttoptr_generation.ll`: `ptrtoint` exposes provenance so `inttoptr` succeeds. -/
 theorem ptrtoint_exposes_provenance_ok :
@@ -480,7 +480,7 @@ theorem ptrtoint_exposes_provenance_ok :
         ret i32 %v
       }
     ] [] = .ok (.bv 32 (.value (99 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- Mirrors `llubi/test/load_noundef_ub_poison.ll`: `load ..., !noundef` on poison causes Immediate UB. -/
 theorem load_noundef_poison_is_immediate_ub :
@@ -492,7 +492,7 @@ theorem load_noundef_poison_is_immediate_ub :
         ret i32 %v
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 /-- Lifetime intrinsics: reading after `llvm.lifetime.end` yields `poison`; writing triggers Immediate UB. -/
 theorem lifetime_end_load_is_poison :
@@ -506,7 +506,7 @@ theorem lifetime_end_load_is_poison :
         ret i32 %v
       }
     ] [] = .ok (.bv 32 .poison) := by
-  native_decide
+  decide +kernel
 
 theorem lifetime_end_store_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -518,7 +518,7 @@ theorem lifetime_end_store_is_immediate_ub :
         ret i32 0
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 /-- Heap `calloc` zero-initializes memory and `free` releases it cleanly. -/
 theorem heap_calloc_zero_and_free_ok :
@@ -534,7 +534,7 @@ theorem heap_calloc_zero_and_free_ok :
         ret i32 %r
       }
     ] [] = .ok (.bv 32 (.value (55 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 theorem heap_use_after_free_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -547,7 +547,7 @@ theorem heap_use_after_free_is_immediate_ub :
         ret i32 %v
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem heap_double_free_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -559,7 +559,7 @@ theorem heap_double_free_is_immediate_ub :
         ret i32 0
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem heap_free_stack_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -570,7 +570,7 @@ theorem heap_free_stack_is_immediate_ub :
         ret i32 0
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 /-- `llvm.memset`, `llvm.memmove` (overlapping OK), and `llvm.memcpy` (overlapping UB). -/
 theorem memset_and_memmove_overlap_ok :
@@ -587,7 +587,7 @@ theorem memset_and_memmove_overlap_ok :
         ret i32 %ext
       }
     ] [] = .ok (.bv 32 (.value (7 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 theorem memcpy_overlap_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -600,7 +600,7 @@ theorem memcpy_overlap_is_immediate_ub :
         ret i32 0
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem null_deref_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -610,7 +610,7 @@ theorem null_deref_is_immediate_ub :
         ret i32 %v
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 theorem misaligned_load_is_immediate_ub :
     isImmediateUB (runDefinitionRet [llvm-definition|
@@ -622,7 +622,7 @@ theorem misaligned_load_is_immediate_ub :
         ret i32 %v
       }
     ] []) = true := by
-  native_decide
+  decide +kernel
 
 /-- Global variables: mutable global reads/writes succeed; writing to a `constant` global is Immediate UB. -/
 def globalsModule : @AST.TopLevel 0 := [llvm|
@@ -649,11 +649,11 @@ def globalsModule : @AST.TopLevel 0 := [llvm|
 theorem globals_read_write_ok :
     runModuleFunction globalsModule (.name "ok_fn") =
       .ok (.bv 32 (.value (42 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 theorem globals_write_constant_is_immediate_ub :
     isImmediateUB (runModuleFunction globalsModule (.name "write_const_ub")) = true := by
-  native_decide
+  decide +kernel
 
 /-- Returning a pointer to a callee's `alloca` and dereferencing it in caller causes Immediate UB. -/
 def danglingStackModule : @AST.TopLevel 0 := [llvm|
@@ -674,7 +674,7 @@ def danglingStackModule : @AST.TopLevel 0 := [llvm|
 
 theorem dangling_stack_deref_is_immediate_ub :
     isImmediateUB (runModuleFunction danglingStackModule (.name "main")) = true := by
-  native_decide
+  decide +kernel
 
 /-! ### 5. IEEE-754 Floating-Point Operations, Formats, FMF, FCmp, Casts & Intrinsics -/
 
@@ -688,7 +688,7 @@ theorem fp_fadd_single_exact :
         ret i32 %b
       }
     ] [] = .ok (.bv 32 (.value (0x40700000 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- `frem float 5.5, 2.0 = 1.5` (`0x3FC00000`). -/
 theorem fp_frem_single_exact :
@@ -700,7 +700,7 @@ theorem fp_frem_single_exact :
         ret i32 %b
       }
     ] [] = .ok (.bv 32 (.value (0x3FC00000 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- `fneg float 0.0 = -0.0` (`0x80000000`). -/
 theorem fp_fneg_zero_sign :
@@ -712,7 +712,7 @@ theorem fp_fneg_zero_sign :
         ret i32 %b
       }
     ] [] = .ok (.bv 32 (.value (0x80000000 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- `half` (`1.5 + 2.5 = 4.0` = `0x4400`) and `bfloat` (`1.0 + 2.0 = 3.0` = `0x4040`) and `fp128`. -/
 theorem fp_half_and_bfloat_exact :
@@ -730,7 +730,7 @@ theorem fp_half_and_bfloat_exact :
         ret i32 %res
       }
     ] [] = .ok (.bv 32 (.value (0x44004040 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 theorem fp_fp128_and_double_exact :
     runDefinitionRet [llvm-definition|
@@ -742,7 +742,7 @@ theorem fp_fp128_and_double_exact :
         ret i32 %i
       }
     ] [] = .ok (.bv 32 (.value (4 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- Fast-math flags: `fadd nnan` with NaN (`0.0 / 0.0`) produces `poison`; `fadd ninf` with `+Inf` produces `poison`. -/
 theorem fp_fmf_nnan_produces_poison :
@@ -754,7 +754,7 @@ theorem fp_fmf_nnan_produces_poison :
         ret float %r
       }
     ] [] = .ok (.float .float .poison) := by
-  native_decide
+  decide +kernel
 
 theorem fp_fmf_ninf_produces_poison :
     runDefinitionRet [llvm-definition|
@@ -765,7 +765,7 @@ theorem fp_fmf_ninf_produces_poison :
         ret float %r
       }
     ] [] = .ok (.float .float .poison) := by
-  native_decide
+  decide +kernel
 
 /-- `fcmp`: `-0.0 == +0.0` (`oeq` true), NaN is `uno` (true) and not `oeq` (false). -/
 theorem fp_fcmp_signed_zero_and_nan :
@@ -784,7 +784,7 @@ theorem fp_fcmp_signed_zero_and_nan :
         ret i32 %s2
       }
     ] [] = .ok (.bv 32 (.value (2 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- FP conversions: `sitofp`, `fptosi` truncation toward zero, OOB → `poison`, `uitofp nneg` on negative → `poison`. -/
 theorem fp_conversions_and_trunc_toward_zero :
@@ -797,7 +797,7 @@ theorem fp_conversions_and_trunc_toward_zero :
         ret i32 %i
       }
     ] [] = .ok (.bv 32 (.value ((-3 : Int) : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 theorem fp_fptosi_oob_is_poison :
     runDefinitionRet [llvm-definition|
@@ -807,7 +807,7 @@ theorem fp_fptosi_oob_is_poison :
         ret i8 %i
       }
     ] [] = .ok (.bv 8 .poison) := by
-  native_decide
+  decide +kernel
 
 theorem fp_uitofp_nneg_negative_is_poison :
     runDefinitionRet [llvm-definition|
@@ -817,7 +817,7 @@ theorem fp_uitofp_nneg_negative_is_poison :
         ret float %r
       }
     ] [] = .ok (.float .float .poison) := by
-  native_decide
+  decide +kernel
 
 /-- FP intrinsics: `llvm.fma`, `llvm.copysign`, `llvm.fabs`, `llvm.minimum`, `llvm.fptosi.sat`, `llvm.is.fpclass`. -/
 theorem fp_intrinsics_suite :
@@ -837,7 +837,7 @@ theorem fp_intrinsics_suite :
         ret i32 %s2
       }
     ] [] = .ok (.bv 32 (.value (138 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- Rounding mode test: `1.0f / 3.0f` rounds down (`0x3EAAAAAB` in RNE vs `0x3EAAAAAA` in RTZ). -/
 def oneThirdDef : @AST.Definition 0 :=
@@ -855,7 +855,7 @@ theorem fp_rounding_rne_vs_rtz :
       .ok (.bv 32 (.value (0x3EAAAAAB : BitVec 32))) ∧
     runDefinitionRet oneThirdDef [] { config := { roundingMode := .RTZ } } =
       .ok (.bv 32 (.value (0x3EAAAAAA : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-! ### 6. Control Flow, Parallel `phi`, `switch`, Recursion, Indirect Calls, Aggregates & Vectors -/
 
@@ -883,7 +883,7 @@ def fibDef : @AST.Definition 0 :=
 theorem cfg_loop_parallel_phi_fib10 :
     runDefinitionRet fibDef [.bv 32 (.value (10 : BitVec 32))] =
       .ok (.bv 32 (.value (55 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- `switch` terminator test. -/
 def switchDef : @AST.Definition 0 :=
@@ -906,7 +906,7 @@ def switchDef : @AST.Definition 0 :=
 theorem cfg_switch_cases_and_default :
     runDefinitionRet switchDef [.bv 32 (.value (2 : BitVec 32))] = .ok (.bv 32 (.value (200 : BitVec 32))) ∧
     runDefinitionRet switchDef [.bv 32 (.value (7 : BitVec 32))] = .ok (.bv 32 (.value (999 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- Recursive function call (`fact(5) = 120`) and indirect call through a function pointer. -/
 def callsModule : @AST.TopLevel 0 := [llvm|
@@ -942,12 +942,12 @@ def callsModule : @AST.TopLevel 0 := [llvm|
 theorem module_recursive_factorial_5 :
     runModuleFunction callsModule (.name "fact") [.bv 32 (.value (5 : BitVec 32))] =
       .ok (.bv 32 (.value (120 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 theorem module_indirect_function_pointer_call :
     runModuleFunction callsModule (.name "call_indirect") [.bv 32 (.value (41 : BitVec 32))] =
       .ok (.bv 32 (.value (42 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- Aggregates (`insertvalue`/`extractvalue`) and vectors (`insertelement`/`extractelement`/`shufflevector`/lane-wise `add` & `select`). -/
 theorem aggregates_and_vectors_eval :
@@ -970,7 +970,7 @@ theorem aggregates_and_vectors_eval :
         ret i32 %res
       }
     ] [] = .ok (.bv 32 (.value (42 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 /-- Integer bit-manipulation, saturating, and overflow intrinsics. -/
 theorem integer_intrinsics_suite :
@@ -993,6 +993,6 @@ theorem integer_intrinsics_suite :
         ret i32 %s4
       }
     ] [] = .ok (.bv 32 (.value (296 : BitVec 32))) := by
-  native_decide
+  decide +kernel
 
 end

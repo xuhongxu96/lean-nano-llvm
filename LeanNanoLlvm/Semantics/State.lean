@@ -1,15 +1,14 @@
 import LeanNanoLlvm.Util.Config
 import LeanNanoLlvm.Util.Undef
+import LeanNanoLlvm.Util.AssocMap
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.AST.DataLayout
 import LeanNanoLlvm.Semantics.Semantics
 import LeanNanoLlvm.Semantics.FloatOps
 import LeanNanoLlvm.Semantics.Memory
-import Std.Data.ExtHashMap
 
 namespace LeanNanoLlvm.Semantics
 
-open Std
 open AST
 
 /--
@@ -219,19 +218,27 @@ def setLogicalByte (dl : DataLayout) (bytes : Array MemByte) (idx : Nat) (b : Me
 def getLogicalBit (dl : DataLayout) (bytes : Array MemByte) (bitIdx : Nat) : MemBit :=
   (getLogicalByte dl bytes (bitIdx / 8)).getBit (bitIdx % 8)
 
-/-- Write bit `bitIdx` (0 = LSB in logical order) into `bytes`. -/
+/-- Write bit `bitIdx` (0 = LSB in logical order) into `bytes` in a single pass (zero `bytes` duplication). -/
 def setLogicalBit (dl : DataLayout) (bytes : Array MemByte) (bitIdx : Nat) (v : MemBit) :
     Array MemByte :=
   let byteIdx := bitIdx / 8
-  let cur := getLogicalByte dl bytes byteIdx
-  setLogicalByte dl bytes byteIdx (cur.setBit (bitIdx % 8) v)
+  let bitOff := bitIdx % 8
+  match bytes with
+  | ⟨data⟩ =>
+    let physIdx := if dl.isLittleEndian then byteIdx else data.length - 1 - byteIdx
+    let rec updateList : Nat → List MemByte → List MemByte
+      | _, [] => []
+      | 0, b :: rest => b.setBit bitOff v :: rest
+      | k + 1, b :: rest => b :: updateList k rest
+    ⟨updateList physIdx data⟩
 
-/-- Structurally recursive bit writer (avoids `ForIn`/`Std.Range` so kernel proofs reduce by `rfl`). -/
+/-- Structurally recursive bit writer (avoids `ForIn`/`Std.Range` and forces intermediate arrays for `O(N)` kernel reduction). -/
 def writeBitLoop (dl : DataLayout) (offsetInBits : Nat) (bitFn : Nat → MemBit) :
     Nat → Nat → Array MemByte → Array MemByte
   | _, 0, bs => bs
   | i, rem + 1, bs =>
-    writeBitLoop dl offsetInBits bitFn (i + 1) rem (setLogicalBit dl bs (offsetInBits + i) (bitFn i))
+    match setLogicalBit dl bs (offsetInBits + i) (bitFn i) with
+    | ⟨data⟩ => writeBitLoop dl offsetInBits bitFn (i + 1) rem ⟨data⟩
 
 /-- Write a scalar value into `bytes` starting at logical `offsetInBits`. -/
 def writeScalarBits (dl : DataLayout) (val : RegisterValue) (ty : LlvmType 0)
@@ -281,14 +288,18 @@ def readScalarBits (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemB
         | .zero =>
           loop (i + 1) rem valBits true isPoison false none padNonZero o
         | .nondet =>
-          let (b, o') := o.nextBool
-          let valBits' := if inValue && b then valBits ||| (1 <<< i) else valBits
-          let padNonZero' := padNonZero || (!inValue && b)
-          loop (i + 1) rem valBits' true isPoison false none padNonZero' o'
+          match o.nextBool with
+          | (b, o') =>
+            match b with
+            | false =>
+              loop (i + 1) rem valBits true isPoison false none padNonZero o'
+            | true =>
+              if inValue then
+                loop (i + 1) rem (valBits + (1 <<< i)) true isPoison false none padNonZero o'
+              else
+                loop (i + 1) rem valBits true isPoison false none true o'
       | .concrete b provBit =>
-        let valBits' := if inValue && b then valBits ||| (1 <<< i) else valBits
-        let padNonZero' := padNonZero || (!inValue && b)
-        let (provOk', provAcc') :=
+        let nextProv : Bool × Option Provenance :=
           if !inValue then (provOk, provAcc)
           else if !provOk then (false, none)
           else match provBit with
@@ -298,20 +309,29 @@ def readScalarBits (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemB
               else match provAcc with
                 | none => (true, some p)
                 | some p0 => if p0 == p then (true, some p0) else (false, none)
-        loop (i + 1) rem valBits' hasUndef isPoison provOk' provAcc' padNonZero' o
-  let (valBits, hasUndef, isPoison, provOk, provAcc, padNonZero, o') :=
-    loop 0 totalRead 0 false false true none false oracle
-  if isPoison || (checkPadding && padNonZero) then
-    (RegisterValue.poisonOf ty, true, o')
-  else
-    let res := match ty with
-      | .int (.concrete w) => RegisterValue.bv w (.value (BitVec.ofNat w valBits))
-      | .float ft => RegisterValue.float ft (.value (IEEEFloat.ofNatBits valBits))
-      | .ptr as =>
-        let prov := if provOk then provAcc.getD .nullary else .nullary
-        RegisterValue.ptr as (.value { prov := prov, addrWidth := numBits, addr := BitVec.ofNat numBits valBits })
-      | _ => RegisterValue.poisonOf ty
-    (res, hasUndef, o')
+        match nextProv with
+        | (provOk', provAcc') =>
+          match b with
+          | false =>
+            loop (i + 1) rem valBits hasUndef isPoison provOk' provAcc' padNonZero o
+          | true =>
+            if inValue then
+              loop (i + 1) rem (valBits + (1 <<< i)) hasUndef isPoison provOk' provAcc' padNonZero o
+            else
+              loop (i + 1) rem valBits hasUndef isPoison provOk' provAcc' true o
+  match loop 0 totalRead 0 false false true none false oracle with
+  | (valBits, hasUndef, isPoison, provOk, provAcc, padNonZero, o') =>
+    if isPoison || (checkPadding && padNonZero) then
+      (RegisterValue.poisonOf ty, true, o')
+    else
+      let res := match ty with
+        | .int (.concrete w) => RegisterValue.bv w (.value (BitVec.ofNat w valBits))
+        | .float ft => RegisterValue.float ft (.value (IEEEFloat.ofNatBits valBits))
+        | .ptr as =>
+          let prov := if provOk then provAcc.getD .nullary else .nullary
+          RegisterValue.ptr as (.value { prov := prov, addrWidth := numBits, addr := BitVec.ofNat numBits valBits })
+        | _ => RegisterValue.poisonOf ty
+      (res, hasUndef, o')
 
 /-- Slice `[start, start + len)` out of an `Array MemByte`. -/
 private def sliceBytes (bytes : Array MemByte) (start len : Nat) : Array MemByte :=
@@ -319,19 +339,18 @@ private def sliceBytes (bytes : Array MemByte) (start len : Nat) : Array MemByte
 
 /-- Overwrite `dst` starting at `offset` with `src`. -/
 private def blitBytes (dst : Array MemByte) (offset : Nat) (src : Array MemByte) : Array MemByte :=
-  Id.run do
-    let mut out := dst
-    for i in [:src.size] do
+  let rec go (i : Nat) : Nat → Array MemByte → Array MemByte
+    | 0, out => out
+    | rem + 1, out =>
       let idx := offset + i
-      if h : idx < out.size then
-        out := out.set idx (src.getD i MemByte.poison) h
-    pure out
+      let out' := if h : idx < out.size then out.set idx (src.getD i MemByte.poison) h else out
+      go (i + 1) rem out'
+  go 0 src.size dst
 
 /- Serialize a `RegisterValue` of concrete type `ty` into `dl.typeStoreSize ty` `MemByte`s. -/
 mutual
 def valueToBytes (dl : DataLayout) (cfg : SemanticsConfig)
-    (val : RegisterValue) (ty : LlvmType 0) : Array MemByte :=
-  match ty with
+    (val : RegisterValue) : LlvmType 0 → Array MemByte
   | .int w =>
     writeScalarBits dl val (.int w) 0 true (Array.replicate (dl.typeStoreSize (.int w)) MemByte.zero)
   | .float ft =>
@@ -346,13 +365,13 @@ def valueToBytes (dl : DataLayout) (cfg : SemanticsConfig)
     let elems := match val with
       | .vector _ es => es
       | _ => List.replicate n (RegisterValue.poisonOf elemTy)
-    let bs := Id.run do
-      let mut arr := initBytes
-      for i in [:n] do
-        let eVal := elems.getD i (RegisterValue.poisonOf elemTy)
-        let bitOff := if dl.isLittleEndian then i * elemBits else vecBits - elemBits - i * elemBits
-        arr := writeScalarBits dl eVal elemTy bitOff false arr
-      pure arr
+    let rec writeElems (idx : Nat) : Nat → Array MemByte → Array MemByte
+      | 0, arr => arr
+      | rem + 1, arr =>
+        let eVal := elems.getD idx (RegisterValue.poisonOf elemTy)
+        let bitOff := if dl.isLittleEndian then idx * elemBits else vecBits - elemBits - idx * elemBits
+        writeElems (idx + 1) rem (writeScalarBits dl eVal elemTy bitOff false arr)
+    let bs := writeElems 0 n initBytes
     -- Canonicalize padding bits in the MSB logical byte (matches `llubi::Context::toBytes`)
     let remBits := vecBits % 8
     if remBits == 0 || storeSize == 0 then bs
@@ -370,108 +389,89 @@ def valueToBytes (dl : DataLayout) (cfg : SemanticsConfig)
     let elems := match val with
       | .array _ es => es
       | _ => List.replicate n (RegisterValue.poisonOf elemTy)
-    let arr := Array.replicate storeSize (MemByte.uninitFor cfg)
-    valueToBytesArray dl cfg elemTy stride elemStore elems 0 n arr
+    let initArr := Array.replicate storeSize (MemByte.uninitFor cfg)
+    (List.range n).foldl (init := initArr) fun arr idx =>
+      let eVal := elems.getD idx (RegisterValue.poisonOf elemTy)
+      let eBytes := valueToBytes dl cfg eVal elemTy
+      blitBytes arr (idx * stride) (sliceBytes eBytes 0 elemStore)
   | .struct packed fieldTys =>
     let storeSize := dl.typeStoreSize (.struct packed fieldTys)
-    let (offsets, _) := dl.structLayout packed fieldTys
-    let fields := match val with
-      | .struct _ _ fs => fs
-      | _ => fieldTys.map RegisterValue.poisonOf
-    let arr := Array.replicate storeSize (MemByte.uninitFor cfg)
-    valueToBytesStruct dl cfg fieldTys offsets fields arr
+    match dl.structLayout packed fieldTys with
+    | (offsets, _) =>
+      let fields := match val with
+        | .struct _ _ fs => fs
+        | _ => fieldTys.map RegisterValue.poisonOf
+      let arr := Array.replicate storeSize (MemByte.uninitFor cfg)
+      valueToBytesStruct dl cfg fieldTys offsets fields arr
   | .function .. => #[]
-termination_by (sizeOf ty, 0)
 
-def valueToBytesArray (dl : DataLayout) (cfg : SemanticsConfig) (elemTy : LlvmType 0)
-    (stride elemStore : Nat) (elems : List RegisterValue) (idx : Nat)
-    (rem : Nat) (arr : Array MemByte) : Array MemByte :=
-  match rem with
-  | 0 => arr
-  | rem' + 1 =>
-    let eVal := elems.getD idx (RegisterValue.poisonOf elemTy)
-    let eBytes := valueToBytes dl cfg eVal elemTy
-    let arr' := blitBytes arr (idx * stride) (sliceBytes eBytes 0 elemStore)
-    valueToBytesArray dl cfg elemTy stride elemStore elems (idx + 1) rem' arr'
-termination_by (sizeOf elemTy, rem + 1)
-
-def valueToBytesStruct (dl : DataLayout) (cfg : SemanticsConfig)
-    (fTys : List (LlvmType 0)) (offs : List Nat) (fVals : List RegisterValue)
-    (arr : Array MemByte) : Array MemByte :=
-  match fTys, offs with
-  | fTy :: restT, fOff :: restO =>
-    let (fVal, restV) := match fVals with
-      | v :: vs => (v, vs)
-      | [] => (RegisterValue.poisonOf fTy, [])
-    let fBytes := valueToBytes dl cfg fVal fTy
-    let arr' := blitBytes arr fOff fBytes
-    valueToBytesStruct dl cfg restT restO restV arr'
-  | _, _ => arr
-termination_by (sizeOf fTys, 0)
+def valueToBytesStruct (dl : DataLayout) (cfg : SemanticsConfig) :
+    List (LlvmType 0) → List Nat → List RegisterValue → Array MemByte → Array MemByte
+  | fTy :: restT, fOff :: restO, fVals, arr =>
+    match fVals with
+    | v :: vs =>
+      let fBytes := valueToBytes dl cfg v fTy
+      let arr' := blitBytes arr fOff fBytes
+      valueToBytesStruct dl cfg restT restO vs arr'
+    | [] =>
+      let fBytes := valueToBytes dl cfg (RegisterValue.poisonOf fTy) fTy
+      let arr' := blitBytes arr fOff fBytes
+      valueToBytesStruct dl cfg restT restO [] arr'
+  | _, _, _, arr => arr
 end
 
 /- Deserialize `dl.typeStoreSize ty` `MemByte`s into `(value, containsUndefOrPoison, nextOracle)`. -/
 mutual
 def bytesToValue (dl : DataLayout) (cfg : SemanticsConfig)
-    (bytes : Array MemByte) (ty : LlvmType 0) (oracle : OracleState) :
-    RegisterValue × Bool × OracleState :=
-  match ty with
-  | .int w => readScalarBits dl cfg bytes (.int w) 0 true oracle
-  | .float ft => readScalarBits dl cfg bytes (.float ft) 0 true oracle
-  | .ptr as => readScalarBits dl cfg bytes (.ptr as) 0 true oracle
-  | .vector n elemTy =>
+    (bytes : Array MemByte) : LlvmType 0 → OracleState →
+    RegisterValue × Bool × OracleState
+  | .int w, oracle => readScalarBits dl cfg bytes (.int w) 0 true oracle
+  | .float ft, oracle => readScalarBits dl cfg bytes (.float ft) 0 true oracle
+  | .ptr as, oracle => readScalarBits dl cfg bytes (.ptr as) 0 true oracle
+  | .vector n elemTy, oracle =>
     let elemBits := dl.typeSizeInBits elemTy
     let vecBits := n * elemBits
     let remBits := vecBits % 8
-    let (bytes', padUndef) :=
+    let prepBytes : Array MemByte × Bool :=
       if remBits == 0 || bytes.size == 0 then (bytes, false)
       else
         let msbByte := getLogicalByte dl bytes (bytes.size - 1)
         if msbByte.isCanonicalPaddingByte remBits then (bytes, false)
         else (setLogicalByte dl bytes (bytes.size - 1) MemByte.poison, true)
-    let rec readElems (idx : Nat) : Nat → List RegisterValue → Bool → OracleState →
-        List RegisterValue × Bool × OracleState
-      | 0, acc, hasU, o => (acc.reverse, hasU, o)
-      | rem + 1, acc, hasU, o =>
-        let bitOff := if dl.isLittleEndian then idx * elemBits else vecBits - elemBits - idx * elemBits
-        let (v, u, o') := readScalarBits dl cfg bytes' elemTy bitOff false o
-        readElems (idx + 1) rem (v :: acc) (hasU || u) o'
-    let (elems, hasU, o') := readElems 0 n [] padUndef oracle
-    (.vector elemTy elems, hasU, o')
-  | .array n elemTy =>
+    match prepBytes with
+    | (bytes', padUndef) =>
+      let rec readElems (idx : Nat) : Nat → List RegisterValue → Bool → OracleState →
+          List RegisterValue × Bool × OracleState
+        | 0, acc, hasU, o => (acc.reverse, hasU, o)
+        | rem + 1, acc, hasU, o =>
+          let bitOff := if dl.isLittleEndian then idx * elemBits else vecBits - elemBits - idx * elemBits
+          match readScalarBits dl cfg bytes' elemTy bitOff false o with
+          | (v, u, o') => readElems (idx + 1) rem (v :: acc) (hasU || u) o'
+      match readElems 0 n [] padUndef oracle with
+      | (elems, hasU, o') => (.vector elemTy elems, hasU, o')
+  | .array n elemTy, oracle =>
     let stride := dl.typeAllocSize elemTy
     let elemStore := dl.typeStoreSize elemTy
-    let (elems, hasU, o') := bytesToValueArray dl cfg bytes elemTy stride elemStore 0 n [] false oracle
-    (.array elemTy elems, hasU, o')
-  | .struct packed fieldTys =>
-    let (offsets, _) := dl.structLayout packed fieldTys
-    let (fields, hasU, o') := bytesToValueStruct dl cfg bytes fieldTys offsets [] false oracle
-    (.struct packed fieldTys fields, hasU, o')
-  | .function .. => (.void, false, oracle)
-termination_by (sizeOf ty, 0)
+    match (List.range n).foldl (init := ([], false, oracle)) fun (acc, hasU, o) idx =>
+        let subBytes := sliceBytes bytes (idx * stride) elemStore
+        match bytesToValue dl cfg subBytes elemTy o with
+        | (v, u, o') => (v :: acc, hasU || u, o') with
+    | (revElems, hasU, o') => (.array elemTy revElems.reverse, hasU, o')
+  | .struct packed fieldTys, oracle =>
+    match dl.structLayout packed fieldTys with
+    | (offsets, _) =>
+      match bytesToValueStruct dl cfg bytes fieldTys offsets [] false oracle with
+      | (fields, hasU, o') => (.struct packed fieldTys fields, hasU, o')
+  | .function .., oracle => (.void, false, oracle)
 
-def bytesToValueArray (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemByte)
-    (elemTy : LlvmType 0) (stride elemStore idx rem : Nat)
-    (acc : List RegisterValue) (hasU : Bool) (o : OracleState) :
-    List RegisterValue × Bool × OracleState :=
-  match rem with
-  | 0 => (acc.reverse, hasU, o)
-  | rem' + 1 =>
-    let subBytes := sliceBytes bytes (idx * stride) elemStore
-    let (v, u, o') := bytesToValue dl cfg subBytes elemTy o
-    bytesToValueArray dl cfg bytes elemTy stride elemStore (idx + 1) rem' (v :: acc) (hasU || u) o'
-termination_by (sizeOf elemTy, rem + 1)
-
-def bytesToValueStruct (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemByte)
-    (fTys : List (LlvmType 0)) (offs : List Nat) (acc : List RegisterValue)
-    (hasU : Bool) (o : OracleState) : List RegisterValue × Bool × OracleState :=
-  match fTys, offs with
-  | fTy :: restT, fOff :: restO =>
+def bytesToValueStruct (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemByte) :
+    List (LlvmType 0) → List Nat → List RegisterValue → Bool → OracleState →
+    List RegisterValue × Bool × OracleState
+  | fTy :: restT, fOff :: restO, acc, hasU, o =>
     let subBytes := sliceBytes bytes fOff (dl.typeStoreSize fTy)
-    let (v, u, o') := bytesToValue dl cfg subBytes fTy o
-    bytesToValueStruct dl cfg bytes restT restO (v :: acc) (hasU || u) o'
-  | _, _ => (acc.reverse, hasU, o)
-termination_by (sizeOf fTys, 0)
+    match bytesToValue dl cfg subBytes fTy o with
+    | (v, u, o') => bytesToValueStruct dl cfg bytes restT restO (v :: acc) (hasU || u) o'
+  | _, _, acc, hasU, o => (acc.reverse, hasU, o)
 end
 
 /-! ### Freezing Any Value (faithful to LLVM + `llubi::Context::freeze`) -/
@@ -485,36 +485,37 @@ mutual
 def freezeValue (dl : DataLayout) (cfg : SemanticsConfig) :
     RegisterValue → OracleState → RegisterValue × OracleState
   | .bv w .poison, oracle =>
-    let (bits, o') := drawFreezeBits cfg w oracle
-    (.bv w (.value bits), o')
+    match drawFreezeBits cfg w oracle with
+    | (bits, o') => (.bv w (.value bits), o')
   | .bv w (.value v), oracle => (.bv w (.value v), oracle)
   | .float ft .poison, oracle =>
-    let (bits, o') := drawFreezeBits cfg ft.bitWidth oracle
-    (.float ft (.value (IEEEFloat.ofBits bits)), o')
+    match drawFreezeBits cfg ft.bitWidth oracle with
+    | (bits, o') => (.float ft (.value (IEEEFloat.ofBits bits)), o')
   | .float ft (.value f), oracle => (.float ft (.value f), oracle)
   | .ptr as .poison, oracle =>
     let pw := dl.getPointerSizeInBits as
-    let (bits, o') := drawFreezeBits cfg pw oracle
-    (.ptr as (.value { prov := .nullary, addrWidth := pw, addr := bits }), o')
+    match drawFreezeBits cfg pw oracle with
+    | (bits, o') => (.ptr as (.value { prov := .nullary, addrWidth := pw, addr := bits }), o')
   | .ptr as (.value p), oracle => (.ptr as (.value p), oracle)
   | .vector elemTy elems, oracle =>
-    let (elems', o') := freezeValueList dl cfg elems oracle
-    (.vector elemTy elems', o')
+    match freezeValueList dl cfg elems oracle with
+    | (elems', o') => (.vector elemTy elems', o')
   | .array elemTy elems, oracle =>
-    let (elems', o') := freezeValueList dl cfg elems oracle
-    (.array elemTy elems', o')
+    match freezeValueList dl cfg elems oracle with
+    | (elems', o') => (.array elemTy elems', o')
   | .struct packed fTys fields, oracle =>
-    let (fields', o') := freezeValueList dl cfg fields oracle
-    (.struct packed fTys fields', o')
+    match freezeValueList dl cfg fields oracle with
+    | (fields', o') => (.struct packed fTys fields', o')
   | .void, oracle => (.void, oracle)
 
 def freezeValueList (dl : DataLayout) (cfg : SemanticsConfig) :
     List RegisterValue → OracleState → List RegisterValue × OracleState
   | [], oracle => ([], oracle)
   | v :: vs, oracle =>
-    let (v', o1) := freezeValue dl cfg v oracle
-    let (vs', o2) := freezeValueList dl cfg vs o1
-    (v' :: vs', o2)
+    match freezeValue dl cfg v oracle with
+    | (v', o1) =>
+      match freezeValueList dl cfg vs o1 with
+      | (vs', o2) => (v' :: vs', o2)
 end
 
 /-! ### GEP Pointer Arithmetic (mirrors `llubi::Context::computeGEP`) -/
@@ -558,7 +559,7 @@ def computePtrAddStep (mem : MemoryState) (flags : GEPFlags)
         let newAddrNat := highBits ||| newIdx.toNat
         let newAddr := BitVec.ofNat ptr.addrWidth newAddrNat
         -- Check `inbounds` on underlying object (both old and new address must be in [base, base+size])
-        let (inboundsOk, narrowedProv) :=
+        let inboundsCheck : Bool × Provenance :=
           if !flags.inbounds then (true, ptr.prov)
           else match mem.resolveObject? ptr with
             | none => (false, ptr.prov)
@@ -569,9 +570,9 @@ def computePtrAddStep (mem : MemoryState) (flags : GEPFlags)
                   | p => p
                 (true, prov')
               else (false, ptr.prov)
-        if !inboundsOk then
-          (.poison, .poison)
-        else
+        match inboundsCheck with
+        | (false, _) => (.poison, .poison)
+        | (true, narrowedProv) =>
           let newAcc : PoisonOr (BitVec idxW) := match accOff with
             | .poison => .poison
             | .value a =>
@@ -582,7 +583,7 @@ def computePtrAddStep (mem : MemoryState) (flags : GEPFlags)
           match newAcc with
           | .poison => (.poison, .poison)
           | .value _ =>
-            (.value { ptr with prov := narrowedProv, addr := newAddr }, newAcc)
+            (.value ⟨narrowedProv, ptr.addrWidth, newAddr⟩, newAcc)
 
 /-- Compute scaled pointer add `ptr + idx * scale`. -/
 def computeScaledPtrAdd (mem : MemoryState) (flags : GEPFlags)
@@ -605,17 +606,52 @@ def computeScaledPtrAdd (mem : MemoryState) (flags : GEPFlags)
 
 /-- Complete machine state for executing LLVM IR (registers, memory, module table, config, fuel). -/
 structure NanoLlvmState : Type where
-  registers      : ExtHashMap AST.Identifier RegisterValue := ∅
+  registers      : AssocMap AST.Identifier RegisterValue := ∅
   memory         : MemoryState := {}
   config         : SemanticsConfig := .modern
   dataLayout     : DataLayout := .default64LE
   frameAllocas   : List AllocId := []
-  functions      : ExtHashMap AST.FunctionId (@AST.Definition 0) := ∅
-  declarations   : ExtHashMap AST.FunctionId (@AST.Declaration 0) := ∅
+  functions      : AssocMap AST.FunctionId (@AST.Definition 0) := ∅
+  declarations   : AssocMap AST.FunctionId (@AST.Declaration 0) := ∅
   stepsRemaining : Nat := 10000
   callDepth      : Nat := 0
 
 instance : Inhabited NanoLlvmState := ⟨{}⟩
+
+namespace NanoLlvmState
+
+/-- Pattern-matching state updaters (evaluate `st` once via `casesOn` instead of `9×` projection duplication in Lean's kernel). -/
+@[simp, simp_llvm]
+def insertRegister : NanoLlvmState → AST.Identifier → RegisterValue → NanoLlvmState
+  | ⟨regs, mem, cfg, dl, allocas, fns, decls, steps, depth⟩, k, v =>
+    ⟨regs.insert k v, mem, cfg, dl, allocas, fns, decls, steps, depth⟩
+
+@[simp, simp_llvm]
+def withMemory : NanoLlvmState → MemoryState → NanoLlvmState
+  | ⟨regs, _, cfg, dl, allocas, fns, decls, steps, depth⟩, mem =>
+    ⟨regs, mem, cfg, dl, allocas, fns, decls, steps, depth⟩
+
+@[simp, simp_llvm]
+def withMemoryAndAllocas : NanoLlvmState → MemoryState → List AllocId → NanoLlvmState
+  | ⟨regs, _, cfg, dl, _, fns, decls, steps, depth⟩, mem, allocas =>
+    ⟨regs, mem, cfg, dl, allocas, fns, decls, steps, depth⟩
+
+@[simp, simp_llvm]
+def withFrame : NanoLlvmState → AssocMap AST.Identifier RegisterValue → List AllocId → Nat → NanoLlvmState
+  | ⟨_, mem, cfg, dl, _, fns, decls, steps, _⟩, regs, allocas, depth =>
+    ⟨regs, mem, cfg, dl, allocas, fns, decls, steps, depth⟩
+
+@[simp, simp_llvm]
+def addDeclaration : NanoLlvmState → MemoryState → AST.FunctionId → (@AST.Declaration 0) → NanoLlvmState
+  | ⟨regs, _, cfg, dl, allocas, fns, decls, steps, depth⟩, mem, fid, decl =>
+    ⟨regs, mem, cfg, dl, allocas, fns, decls.insert fid decl, steps, depth⟩
+
+@[simp, simp_llvm]
+def addFunction : NanoLlvmState → MemoryState → AST.FunctionId → (@AST.Definition 0) → NanoLlvmState
+  | ⟨regs, _, cfg, dl, allocas, fns, decls, steps, depth⟩, mem, fid, defn =>
+    ⟨regs, mem, cfg, dl, allocas, fns.insert fid defn, decls, steps, depth⟩
+
+end NanoLlvmState
 
 /-- Legacy-compatible alias for finite supply chain. -/
 abbrev UndefChain : Type := SupplyChain Nat

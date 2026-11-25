@@ -17,25 +17,28 @@ open AST
 def drawNat : NanoLlvmM Nat :=
   StateT.lift (do
     let o ← get
-    let (v, o') := o.nextNat
-    set o'
-    pure v)
+    match o.nextNat with
+    | (v, o') =>
+      set o'
+      pure v)
 
 @[simp_llvm]
 def drawBool : NanoLlvmM Bool :=
   StateT.lift (do
     let o ← get
-    let (v, o') := o.nextBool
-    set o'
-    pure v)
+    match o.nextBool with
+    | (v, o') =>
+      set o'
+      pure v)
 
 @[simp_llvm]
 def drawBitVec (w : Nat) : NanoLlvmM (BitVec w) :=
   StateT.lift (do
     let o ← get
-    let (v, o') := o.nextBitVec w
-    set o'
-    pure v)
+    match o.nextBitVec w with
+    | (v, o') =>
+      set o'
+      pure v)
 
 @[simp_llvm]
 def throwUB {α : Type} (msg : String) : NanoLlvmM α :=
@@ -70,8 +73,42 @@ def concretizeTypeList {φ : Nat} : List (LlvmType φ) → NanoLlvmM (List (Llvm
   | t :: ts => return (← concretizeType t) :: (← concretizeTypeList ts)
 end
 
+private def repeatM {α : Type} (m : NanoLlvmM α) : Nat → NanoLlvmM (List α)
+  | 0 => pure []
+  | n + 1 => do
+    let v ← m
+    let vs ← repeatM m n
+    pure (v :: vs)
+
 /- Generate an `undef` value of concrete type `ty`, respecting `st.config.undefMode`. -/
 mutual
+def genUndefValueNondet : LlvmType 0 → NanoLlvmM RegisterValue
+  | .int (.concrete w) => return .bv w (.value (← drawBitVec w))
+  | .float ft => return .float ft (.value (IEEEFloat.ofBits (← drawBitVec ft.bitWidth)))
+  | .ptr as => do
+    let st ← get
+    let pw := st.dataLayout.getPointerSizeInBits as
+    let addr ← drawBitVec pw
+    pure (.ptr as (.value { prov := .nullary, addrWidth := pw, addr := addr }))
+  | .vector n elem => do
+    let elems ← repeatM (genUndefValueNondet elem) n
+    pure (.vector elem elems)
+  | .array n elem => do
+    let elems ← repeatM (genUndefValueNondet elem) n
+    pure (.array elem elems)
+  | .struct packed fields => do
+    let vals ← genUndefList fields
+    pure (.struct packed fields vals)
+  | .function .. => throwStatic "Cannot generate `undef` of function type"
+
+def genUndefList : List (LlvmType 0) → NanoLlvmM (List RegisterValue)
+  | [] => pure []
+  | t :: ts => do
+    let v ← genUndefValueNondet t
+    let vs ← genUndefList ts
+    pure (v :: vs)
+end
+
 def genUndefValue (ty : LlvmType 0) : NanoLlvmM RegisterValue := do
   let st ← get
   match st.config.undefMode with
@@ -80,43 +117,7 @@ def genUndefValue (ty : LlvmType 0) : NanoLlvmM RegisterValue := do
   | .zero =>
     pure (RegisterValue.nullOf st.dataLayout ty)
   | .nondet =>
-    match ty with
-    | .int (.concrete w) => return .bv w (.value (← drawBitVec w))
-    | .float ft => return .float ft (.value (IEEEFloat.ofBits (← drawBitVec ft.bitWidth)))
-    | .ptr as =>
-      let pw := st.dataLayout.getPointerSizeInBits as
-      let addr ← drawBitVec pw
-      pure (.ptr as (.value { prov := .nullary, addrWidth := pw, addr := addr }))
-    | .vector n elem =>
-      let elems ← genUndefRepeat elem n
-      pure (.vector elem elems)
-    | .array n elem =>
-      let elems ← genUndefRepeat elem n
-      pure (.array elem elems)
-    | .struct packed fields =>
-      let vals ← genUndefList fields
-      pure (.struct packed fields vals)
-    | .function .. => throwStatic "Cannot generate `undef` of function type"
-termination_by (sizeOf ty, 0)
-
-def genUndefRepeat (elem : LlvmType 0) (n : Nat) : NanoLlvmM (List RegisterValue) :=
-  match n with
-  | 0 => pure []
-  | n' + 1 => do
-    let v ← genUndefValue elem
-    let vs ← genUndefRepeat elem n'
-    pure (v :: vs)
-termination_by (sizeOf elem, n + 1)
-
-def genUndefList (tys : List (LlvmType 0)) : NanoLlvmM (List RegisterValue) :=
-  match tys with
-  | [] => pure []
-  | t :: ts => do
-    let v ← genUndefValue t
-    let vs ← genUndefList ts
-    pure (v :: vs)
-termination_by (sizeOf tys, 0)
-end
+    genUndefValueNondet ty
 
 @[simp_llvm]
 def genUndef {w : Nat} : NanoLlvmM (BitVec w) := do
@@ -331,9 +332,10 @@ def evalConversionM (op : ConversionOp) (fromTy : LlvmType 0) (val : RegisterVal
     let bs := valueToBytes dl st.config val fromTy
     let res ← StateT.lift (do
       let o ← get
-      let (v, _, o') := bytesToValue dl st.config bs toTy o
-      set o'
-      pure v)
+      match bytesToValue dl st.config bs toTy o with
+      | (v, _, o') =>
+        set o'
+        pure v)
     pure res
   | .trunc nuw nsw =>
     match toTy.scalarType with
@@ -407,7 +409,7 @@ def evalConversionM (op : ConversionOp) (fromTy : LlvmType 0) (val : RegisterVal
         | .ptr _ .poison => pure (.bv dstW .poison)
         | .ptr _ (.value p) => do
           let curSt ← get
-          set { curSt with memory := curSt.memory.exposeProvenance p.prov }
+          set (curSt.withMemory (curSt.memory.exposeProvenance p.prov))
           let resized :=
             if dstW ≥ p.addrWidth then p.addr.zeroExtend dstW else p.addr.truncate dstW
           pure (.bv dstW (.value resized))
@@ -476,28 +478,30 @@ def evalGEPValues (flags : GEPFlags) (baseTy : LlvmType 0) (ptrTy : LlvmType 0)
         throwStatic "Mismatched vector lengths in getelementptr"
       let mut newPtrs : List RegisterValue := []
       let mut newAcc : List (PoisonOr (BitVec idxW)) := []
-      for i in [:ptrs.length] do
+      for i in List.range ptrs.length do
         let pOpt := match ptrs.getD i (.ptr addrSpace .poison) with
           | .ptr _ po => po
           | _ => .poison
         let iOpt := canonicalizeGEPIndex idxW flags (idxs.getD i (.bv idxW .poison))
         let aOpt := acc.getD i .poison
-        let (p', a') := computeScaledPtrAdd st.memory flags pOpt iOpt scale aOpt
-        newPtrs := newPtrs ++ [.ptr addrSpace p']
-        newAcc := newAcc ++ [a']
+        match computeScaledPtrAdd st.memory flags pOpt iOpt scale aOpt with
+        | (p', a') =>
+          newPtrs := newPtrs ++ [.ptr addrSpace p']
+          newAcc := newAcc ++ [a']
       pure (.vector (.ptr addrSpace) newPtrs, newAcc)
     | .vector _ ptrs, scalarIdx =>
       let iOpt := canonicalizeGEPIndex idxW flags scalarIdx
       let mut newPtrs : List RegisterValue := []
       let mut newAcc : List (PoisonOr (BitVec idxW)) := []
-      for i in [:ptrs.length] do
+      for i in List.range ptrs.length do
         let pOpt := match ptrs.getD i (.ptr addrSpace .poison) with
           | .ptr _ po => po
           | _ => .poison
         let aOpt := acc.getD i .poison
-        let (p', a') := computeScaledPtrAdd st.memory flags pOpt iOpt scale aOpt
-        newPtrs := newPtrs ++ [.ptr addrSpace p']
-        newAcc := newAcc ++ [a']
+        match computeScaledPtrAdd st.memory flags pOpt iOpt scale aOpt with
+        | (p', a') =>
+          newPtrs := newPtrs ++ [.ptr addrSpace p']
+          newAcc := newAcc ++ [a']
       pure (.vector (.ptr addrSpace) newPtrs, newAcc)
     | scalarPtr, .vector _ idxs =>
       -- Splat scalar pointer to vector of index length
@@ -509,9 +513,10 @@ def evalGEPValues (flags : GEPFlags) (baseTy : LlvmType 0) (ptrTy : LlvmType 0)
       let mut newAcc : List (PoisonOr (BitVec idxW)) := []
       for idx in idxs do
         let iOpt := canonicalizeGEPIndex idxW flags idx
-        let (p', a') := computeScaledPtrAdd st.memory flags pOpt iOpt scale a0
-        newPtrs := newPtrs ++ [.ptr addrSpace p']
-        newAcc := newAcc ++ [a']
+        match computeScaledPtrAdd st.memory flags pOpt iOpt scale a0 with
+        | (p', a') =>
+          newPtrs := newPtrs ++ [.ptr addrSpace p']
+          newAcc := newAcc ++ [a']
       pure (.vector (.ptr addrSpace) newPtrs, newAcc)
     | scalarPtr, scalarIdx =>
       let pOpt := match scalarPtr with
@@ -519,53 +524,47 @@ def evalGEPValues (flags : GEPFlags) (baseTy : LlvmType 0) (ptrTy : LlvmType 0)
         | _ => .poison
       let iOpt := canonicalizeGEPIndex idxW flags scalarIdx
       let a0 := acc.headD .poison
-      let (p', a') := computeScaledPtrAdd st.memory flags pOpt iOpt scale a0
-      pure (.ptr addrSpace p', [a'])
+      match computeScaledPtrAdd st.memory flags pOpt iOpt scale a0 with
+      | (p', a') => pure (.ptr addrSpace p', [a'])
 
-  for idxVal in idxVals do
-    if isFirst then
-      let stride := dl.typeAllocSize baseTy
-      let (r', a') ← applyScaled idxVal stride curRes accOff
-      curRes := r'
-      accOff := a'
-      curTy := some baseTy
-      isFirst := false
-    else
-      match curTy with
-      | some (.struct packed fieldTys) =>
-        -- Struct GEP index must be a constant integer (or splat vector of constant int)
-        let fieldIdx? : Option Nat := match idxVal with
-          | .bv _ (.value bv) => some bv.toNat
-          | .vector _ ((.bv _ (.value bv)) :: _) => some bv.toNat
-          | _ => none
-        match fieldIdx? with
-        | none => throwStatic "Invalid struct index in getelementptr"
-        | some fi =>
-          match dl.structFieldOffset? packed fieldTys fi, fieldTys[fi]? with
-          | some byteOff, some fTy =>
-            let offVal := RegisterValue.bv idxW (.value (BitVec.ofNat idxW byteOff))
-            let (r', a') ← applyScaled offVal 1 curRes accOff
-            curRes := r'
-            accOff := a'
-            curTy := some fTy
-          | _, _ => throwStatic s!"Struct index {fi} out of bounds in getelementptr"
-      | some (.array _ elemTy) =>
-        let stride := dl.typeAllocSize elemTy
+  let rec stepIdxs (isFirst : Bool) (curRes : RegisterValue)
+      (accOff : List (PoisonOr (BitVec idxW))) (curTy : Option (LlvmType 0)) :
+      List RegisterValue → NanoLlvmM RegisterValue
+    | [] => pure curRes
+    | idxVal :: rest => do
+      if isFirst then
+        let stride := dl.typeAllocSize baseTy
         let (r', a') ← applyScaled idxVal stride curRes accOff
-        curRes := r'
-        accOff := a'
-        curTy := some elemTy
-      | some (.vector _ elemTy) =>
-        let stride := dl.typeAllocSize elemTy
-        let (r', a') ← applyScaled idxVal stride curRes accOff
-        curRes := r'
-        accOff := a'
-        curTy := some elemTy
-      | some other =>
-        throwStatic s!"Cannot index into non-aggregate type {other.print} in getelementptr"
-      | none =>
-        throwStatic "Internal error in getelementptr type traversal"
-  pure curRes
+        stepIdxs false r' a' (some baseTy) rest
+      else
+        match curTy with
+        | some (.struct packed fieldTys) =>
+          let fieldIdx? : Option Nat := match idxVal with
+            | .bv _ (.value bv) => some bv.toNat
+            | .vector _ ((.bv _ (.value bv)) :: _) => some bv.toNat
+            | _ => none
+          match fieldIdx? with
+          | none => throwStatic "Invalid struct index in getelementptr"
+          | some fi =>
+            match dl.structFieldOffset? packed fieldTys fi, fieldTys[fi]? with
+            | some byteOff, some fTy =>
+              let offVal := RegisterValue.bv idxW (.value (BitVec.ofNat idxW byteOff))
+              let (r', a') ← applyScaled offVal 1 curRes accOff
+              stepIdxs false r' a' (some fTy) rest
+            | _, _ => throwStatic s!"Struct index {fi} out of bounds in getelementptr"
+        | some (.array _ elemTy) =>
+          let stride := dl.typeAllocSize elemTy
+          let (r', a') ← applyScaled idxVal stride curRes accOff
+          stepIdxs false r' a' (some elemTy) rest
+        | some (.vector _ elemTy) =>
+          let stride := dl.typeAllocSize elemTy
+          let (r', a') ← applyScaled idxVal stride curRes accOff
+          stepIdxs false r' a' (some elemTy) rest
+        | some other =>
+          throwStatic s!"Cannot index into non-aggregate type {other.print} in getelementptr"
+        | none =>
+          throwStatic "Internal error in getelementptr type traversal"
+  stepIdxs isFirst curRes accOff curTy idxVals
 
 /-! ### Expression Evaluation -/
 
@@ -668,17 +667,14 @@ def evalTypedExp {φ : Nat} (ty : LlvmType 0) (exp : Exp φ) : NanoLlvmM Registe
         if h : w1 = w2 then return .bv w2 (← evalIntBinaryOpM op (h ▸ x1) x2)
         else throwStatic "Mismatched integer widths in constant binary expression"
       | _, _ => throwStatic "Expected integers in constant binary expression"
-termination_by sizeOf exp
 
-def evalTypedExpList {φ : Nat} (exps : List (LlvmType φ × Exp φ)) : NanoLlvmM (List RegisterValue) :=
-  match exps with
+def evalTypedExpList {φ : Nat} : List (LlvmType φ × Exp φ) → NanoLlvmM (List RegisterValue)
   | [] => pure []
   | (t, e) :: rest => do
     let ct ← concretizeType t
     let v ← evalTypedExp ct e
     let vs ← evalTypedExpList rest
     pure (v :: vs)
-termination_by sizeOf exps
 end
 
 /-- Backwards-compatible integer expression evaluator (used in proofs with `simp_llvm`). -/
@@ -773,7 +769,7 @@ def execMemTransfer (destVal srcVal lenVal : RegisterValue) (isMemMove isLibCall
     if srcOff < dstEnd && dstOff < srcEnd && (isLibCall || srcOff != dstOff) then
       throwUB "memcpy with overlapping source and destination"
   let copied := MemoryState.readObjectBytes srcMO srcOff len
-  set { st with memory := st.memory.writeObjectBytes dstMO.allocId dstOff copied }
+  set (st.withMemory (st.memory.writeObjectBytes dstMO.allocId dstOff copied))
 
 /-- Perform a verified `memset`. -/
 def execMemSet (destVal fillVal lenVal : RegisterValue) : NanoLlvmM Unit := do
@@ -795,37 +791,45 @@ def execMemSet (destVal fillVal lenVal : RegisterValue) : NanoLlvmM Unit := do
     | .bv _ (.value bv) => MemByte.concrete (UInt8.ofNat (bv.toNat &&& 0xFF))
     | _ => MemByte.poison
   let filled := Array.replicate len fillByte
-  set { st with memory := st.memory.writeObjectBytes dstMO.allocId dstOff filled }
+  set (st.withMemory (st.memory.writeObjectBytes dstMO.allocId dstOff filled))
 
 /-! ### Built-in LLVM Intrinsics & C Memory Libcalls (mirrors `llubi`) -/
+
+/-- Kernel-reducible string prefix check (unlike `String.startsWith` which uses `ByteArray` externs). -/
+private def strHasPrefix (s p : String) : Bool :=
+  let rec go : List Char → List Char → Bool
+    | _, [] => true
+    | [], _ :: _ => false
+    | c1 :: cs1, c2 :: cs2 => if c1 == c2 then go cs1 cs2 else false
+  go s.toList p.toList
 
 def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastMathFlags)
     (argVals : List RegisterValue) : NanoLlvmM (Option RegisterValue) := do
   let st ← get
   let dl := st.dataLayout
   -- Memory lifetime intrinsics
-  if name.startsWith "llvm.lifetime.start" then
+  if strHasPrefix name "llvm.lifetime.start" then
     match argVals.getLast? with
     | some (.ptr _ (.value p)) =>
-      set { st with memory := st.memory.lifetimeStart st.config p }
+      set (st.withMemory (st.memory.lifetimeStart st.config p))
     | _ => pure () -- poison ptr is a no-op per `loadstore_le.ll` line 39
     return some .void
-  if name.startsWith "llvm.lifetime.end" then
+  if strHasPrefix name "llvm.lifetime.end" then
     match argVals.getLast? with
     | some (.ptr _ (.value p)) =>
-      set { st with memory := st.memory.lifetimeEnd p }
+      set (st.withMemory (st.memory.lifetimeEnd p))
     | _ => pure ()
     return some .void
   -- Memory transfer intrinsics
-  if name.startsWith "llvm.memcpy" then
+  if strHasPrefix name "llvm.memcpy" then
     match argVals with
     | dst :: src :: len :: _ => execMemTransfer dst src len false false; return some .void
     | _ => throwStatic "llvm.memcpy requires at least 3 arguments"
-  if name.startsWith "llvm.memmove" then
+  if strHasPrefix name "llvm.memmove" then
     match argVals with
     | dst :: src :: len :: _ => execMemTransfer dst src len true false; return some .void
     | _ => throwStatic "llvm.memmove requires at least 3 arguments"
-  if name.startsWith "llvm.memset" then
+  if strHasPrefix name "llvm.memset" then
     match argVals with
     | dst :: val :: len :: _ => execMemSet dst val len; return some .void
     | _ => throwStatic "llvm.memset requires at least 3 arguments"
@@ -838,7 +842,7 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
       let maxAlign := if dl.getPointerABIAlign as ≥ 8 then 16 else 8
       match st.memory.allocate dl st.config sz.toNat maxAlign "malloc" as .uninitialized .heap with
       | .ok (obj, mem') =>
-        set { st with memory := mem' }
+        set (st.withMemory mem')
         return some (.ptr as (.value (MemoryState.derivePointer dl obj)))
       | .error .outOfMemory =>
         return some (.ptr as (.value (Pointer.null dl as)))
@@ -855,7 +859,7 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         return some (.ptr as (.value (Pointer.null dl as)))
       match st.memory.allocate dl st.config total maxAlign "calloc" as .zeroed .heap with
       | .ok (obj, mem') =>
-        set { st with memory := mem' }
+        set (st.withMemory mem')
         return some (.ptr as (.value (MemoryState.derivePointer dl obj)))
       | .error .outOfMemory =>
         return some (.ptr as (.value (Pointer.null dl as)))
@@ -875,7 +879,7 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
           throwUB s!"double-free of allocation '{mo.name}'"
         if !mo.isHeap then
           throwUB s!"freeing non-heap allocation '{mo.name}'"
-        set { st with memory := st.memory.freeObject mo.allocId }
+        set (st.withMemory (st.memory.freeObject mo.allocId))
         return some .void
     | _ => throwStatic "free expects 1 pointer argument"
   if name == "memcpy" then
@@ -899,12 +903,12 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
     | _ => throwStatic "llvm.assume expects i1 argument"
   if name == "llvm.donothing" then
     return some .void
-  if name.startsWith "llvm.ssa.copy" || name.startsWith "llvm.expect" then
+  if strHasPrefix name "llvm.ssa.copy" || strHasPrefix name "llvm.expect" then
     match argVals with
     | v :: _ => return some v
     | [] => throwStatic s!"{name} requires at least 1 argument"
   -- Integer arithmetic & bit-manipulation intrinsics
-  if name.startsWith "llvm.abs" then
+  if strHasPrefix name "llvm.abs" then
     match argVals with
     | [v, .bv 1 (.value isIntMinPoison)] =>
       let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
@@ -916,8 +920,8 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | other => throwStatic s!"Expected int in llvm.abs, got {other}"
       return some r
     | _ => throwStatic "llvm.abs expects (int, i1)"
-  if name.startsWith "llvm.smax" || name.startsWith "llvm.smin" ||
-     name.startsWith "llvm.umax" || name.startsWith "llvm.umin" then
+  if strHasPrefix name "llvm.smax" || strHasPrefix name "llvm.smin" ||
+     strHasPrefix name "llvm.umax" || strHasPrefix name "llvm.umin" then
     match argVals with
     | [v1, v2] =>
       let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
@@ -927,9 +931,9 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
           if h : w1 = w2 then
             let x' : BitVec w2 := h ▸ x
             let pickX :=
-              if name.startsWith "llvm.smax" then BitVec.sle y x'
-              else if name.startsWith "llvm.smin" then BitVec.sle x' y
-              else if name.startsWith "llvm.umax" then y ≤ x'
+              if strHasPrefix name "llvm.smax" then BitVec.sle y x'
+              else if strHasPrefix name "llvm.smin" then BitVec.sle x' y
+              else if strHasPrefix name "llvm.umax" then y ≤ x'
               else x' ≤ y
             pure (.bv w2 (.value (if pickX then x' else y)))
           else throwStatic "width mismatch in min/max intrinsic"
@@ -937,11 +941,11 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | _, _ => throwStatic "Expected int in min/max intrinsic"
       return some r
     | _ => throwStatic s!"{name} expects 2 arguments"
-  if name.startsWith "llvm.ctlz" || name.startsWith "llvm.cttz" then
+  if strHasPrefix name "llvm.ctlz" || strHasPrefix name "llvm.cttz" then
     match argVals with
     | [v, .bv 1 (.value isZeroPoison)] =>
       let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
-      let isLeading := name.startsWith "llvm.ctlz"
+      let isLeading := strHasPrefix name "llvm.ctlz"
       let r ← liftUnary resElemTy v fun
         | .bv w .poison => pure (.bv w .poison)
         | .bv w (.value x) =>
@@ -950,7 +954,7 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | other => throwStatic s!"Expected int in ctlz/cttz, got {other}"
       return some r
     | _ => throwStatic s!"{name} expects (int, i1)"
-  if name.startsWith "llvm.ctpop" || name.startsWith "llvm.bitreverse" || name.startsWith "llvm.bswap" then
+  if strHasPrefix name "llvm.ctpop" || strHasPrefix name "llvm.bitreverse" || strHasPrefix name "llvm.bswap" then
     match argVals with
     | [v] =>
       let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
@@ -958,19 +962,19 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | .bv w .poison => pure (.bv w .poison)
         | .bv w (.value x) =>
           let res :=
-            if name.startsWith "llvm.ctpop" then bvCtpop x
-            else if name.startsWith "llvm.bitreverse" then bvBitReverse x
+            if strHasPrefix name "llvm.ctpop" then bvCtpop x
+            else if strHasPrefix name "llvm.bitreverse" then bvBitReverse x
             else bvBSwap x
           pure (.bv w (.value res))
         | other => throwStatic s!"Expected int in {name}, got {other}"
       return some r
     | _ => throwStatic s!"{name} expects 1 argument"
-  if name.startsWith "llvm.fshl" || name.startsWith "llvm.fshr" then
+  if strHasPrefix name "llvm.fshl" || strHasPrefix name "llvm.fshr" then
     match argVals with
     | [.bv w1 (.value a), .bv w2 (.value b), .bv w3 (.value amt)] =>
       if h1 : w1 = w3 then
         if h2 : w2 = w3 then
-          let r := if name.startsWith "llvm.fshl"
+          let r := if strHasPrefix name "llvm.fshl"
             then bvFshl (h1 ▸ a) (h2 ▸ b) amt
             else bvFshr (h1 ▸ a) (h2 ▸ b) amt
           return some (.bv w3 (.value r))
@@ -978,8 +982,8 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
       else throwStatic "width mismatch in fshl/fshr"
     | [.bv w _, _, _] => return some (.bv w .poison)
     | _ => throwStatic s!"{name} expects 3 integer arguments"
-  if name.startsWith "llvm.sadd.sat" || name.startsWith "llvm.uadd.sat" ||
-     name.startsWith "llvm.ssub.sat" || name.startsWith "llvm.usub.sat" then
+  if strHasPrefix name "llvm.sadd.sat" || strHasPrefix name "llvm.uadd.sat" ||
+     strHasPrefix name "llvm.ssub.sat" || strHasPrefix name "llvm.usub.sat" then
     match argVals with
     | [v1, v2] =>
       let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
@@ -989,9 +993,9 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
           if h : w1 = w2 then
             let x' : BitVec w2 := h ▸ x
             let res :=
-              if name.startsWith "llvm.sadd.sat" then bvSAddSat x' y
-              else if name.startsWith "llvm.uadd.sat" then bvUAddSat x' y
-              else if name.startsWith "llvm.ssub.sat" then bvSSubSat x' y
+              if strHasPrefix name "llvm.sadd.sat" then bvSAddSat x' y
+              else if strHasPrefix name "llvm.uadd.sat" then bvUAddSat x' y
+              else if strHasPrefix name "llvm.ssub.sat" then bvSSubSat x' y
               else bvUSubSat x' y
             pure (.bv w2 (.value res))
           else throwStatic "width mismatch in saturating intrinsic"
@@ -999,19 +1003,19 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | _, _ => throwStatic "Expected int in saturating intrinsic"
       return some r
     | _ => throwStatic s!"{name} expects 2 arguments"
-  if name.startsWith "llvm.sadd.with.overflow" || name.startsWith "llvm.uadd.with.overflow" ||
-     name.startsWith "llvm.ssub.with.overflow" || name.startsWith "llvm.usub.with.overflow" ||
-     name.startsWith "llvm.smul.with.overflow" || name.startsWith "llvm.umul.with.overflow" then
+  if strHasPrefix name "llvm.sadd.with.overflow" || strHasPrefix name "llvm.uadd.with.overflow" ||
+     strHasPrefix name "llvm.ssub.with.overflow" || strHasPrefix name "llvm.usub.with.overflow" ||
+     strHasPrefix name "llvm.smul.with.overflow" || strHasPrefix name "llvm.umul.with.overflow" then
     match argVals with
     | [.bv w1 (.value x), .bv w2 (.value y)] =>
       if h : w1 = w2 then
         let x' : BitVec w2 := h ▸ x
         let (res, ov) :=
-          if name.startsWith "llvm.sadd" then (x' + y, BitVec.saddOverflow x' y)
-          else if name.startsWith "llvm.uadd" then (x' + y, BitVec.uaddOverflow x' y)
-          else if name.startsWith "llvm.ssub" then (x' - y, BitVec.ssubOverflow x' y)
-          else if name.startsWith "llvm.usub" then (x' - y, BitVec.usubOverflow x' y)
-          else if name.startsWith "llvm.smul" then (x' * y, BitVec.smulOverflow x' y)
+          if strHasPrefix name "llvm.sadd" then (x' + y, BitVec.saddOverflow x' y)
+          else if strHasPrefix name "llvm.uadd" then (x' + y, BitVec.uaddOverflow x' y)
+          else if strHasPrefix name "llvm.ssub" then (x' - y, BitVec.ssubOverflow x' y)
+          else if strHasPrefix name "llvm.usub" then (x' - y, BitVec.usubOverflow x' y)
+          else if strHasPrefix name "llvm.smul" then (x' * y, BitVec.smulOverflow x' y)
           else (x' * y, BitVec.umulOverflow x' y)
         return some (.struct false [.int (.concrete w2), .int (.concrete 1)]
           [.bv w2 (.value res), .bv 1 (.value (BitVec.ofBool ov))])
@@ -1020,7 +1024,7 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
       return some (.struct false [.int (.concrete w), .int (.concrete 1)] [.bv w .poison, .bv 1 .poison])
     | _ => throwStatic s!"{name} expects 2 integer arguments"
   -- Floating-point intrinsics
-  if name.startsWith "llvm.fabs" then
+  if strHasPrefix name "llvm.fabs" then
     match argVals with
     | [v] =>
       let resElemTy := match retTy with | .ret t => t.scalarType | .void => .f32
@@ -1035,7 +1039,7 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | other => throwStatic s!"Expected float in llvm.fabs, got {other}"
       return some r
     | _ => throwStatic "llvm.fabs expects 1 argument"
-  if name.startsWith "llvm.copysign" then
+  if strHasPrefix name "llvm.copysign" then
     match argVals with
     | [v1, v2] =>
       let resElemTy := match retTy with | .ret t => t.scalarType | .void => .f32
@@ -1049,7 +1053,7 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | _, _ => throwStatic "Expected floats in llvm.copysign"
       return some r
     | _ => throwStatic "llvm.copysign expects 2 arguments"
-  if name.startsWith "llvm.fma" || name.startsWith "llvm.fmuladd" then
+  if strHasPrefix name "llvm.fma" || strHasPrefix name "llvm.fmuladd" then
     match argVals with
     | [.float ft1 (.value a), .float ft2 (.value b), .float ft3 (.value c)] =>
       if h1 : ft1 = ft3 then
@@ -1063,8 +1067,8 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
       else throwStatic "Mismatched float types in llvm.fma"
     | [.float ft _, _, _] => return some (.float ft .poison)
     | _ => throwStatic s!"{name} expects 3 float arguments"
-  if name.startsWith "llvm.minimum" || name.startsWith "llvm.maximum" ||
-     name.startsWith "llvm.minnum" || name.startsWith "llvm.maxnum" then
+  if strHasPrefix name "llvm.minimum" || strHasPrefix name "llvm.maximum" ||
+     strHasPrefix name "llvm.minnum" || strHasPrefix name "llvm.maxnum" then
     match argVals with
     | [v1, v2] =>
       let resElemTy := match retTy with | .ret t => t.scalarType | .void => .f32
@@ -1074,9 +1078,9 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
           if h : ft1 = ft2 then do
             let x' : IEEEFloat ft2.format := h ▸ x
             let res :=
-              if name.startsWith "llvm.minimumnum" || name.startsWith "llvm.minnum" then IEEEFloat.minimumnum x' y
-              else if name.startsWith "llvm.maximumnum" || name.startsWith "llvm.maxnum" then IEEEFloat.maximumnum x' y
-              else if name.startsWith "llvm.minimum" then IEEEFloat.minimum x' y
+              if strHasPrefix name "llvm.minimumnum" || strHasPrefix name "llvm.minnum" then IEEEFloat.minimumnum x' y
+              else if strHasPrefix name "llvm.maximumnum" || strHasPrefix name "llvm.maxnum" then IEEEFloat.maximumnum x' y
+              else if strHasPrefix name "llvm.minimum" then IEEEFloat.minimum x' y
               else IEEEFloat.maximum x' y
             let nanSign ← drawBool
             let nanPick ← drawNat
@@ -1087,7 +1091,7 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | _, _ => throwStatic "Expected floats in FP min/max"
       return some r
     | _ => throwStatic s!"{name} expects 2 arguments"
-  if name.startsWith "llvm.is.fpclass" then
+  if strHasPrefix name "llvm.is.fpclass" then
     match argVals with
     | [v, .bv _ (.value mask)] =>
       let r ← liftUnary .i1 v fun
@@ -1097,10 +1101,10 @@ def evalIntrinsicOrLibcall? (name : String) (retTy : LlvmRetType 0) (fmf : FastM
         | other => throwStatic s!"Expected float in llvm.is.fpclass, got {other}"
       return some r
     | _ => throwStatic "llvm.is.fpclass expects (float, i32)"
-  if name.startsWith "llvm.fptosi.sat" || name.startsWith "llvm.fptoui.sat" then
+  if strHasPrefix name "llvm.fptosi.sat" || strHasPrefix name "llvm.fptoui.sat" then
     match argVals with
     | [v] =>
-      let isSigned := name.startsWith "llvm.fptosi.sat"
+      let isSigned := strHasPrefix name "llvm.fptosi.sat"
       match retTy with
       | .ret rTy =>
         match rTy.scalarType with
@@ -1124,7 +1128,7 @@ def writeRegister (id : InstructionId) (val : RegisterValue) (opName : String) :
   match id with
   | .id rid =>
     let st ← get
-    set { st with registers := st.registers.insert (.local_id rid) val }
+    set (st.insertRegister (.local_id rid) val)
   | .void _ =>
     throwStatic s!"{opName} should be assigned to a local register id"
 
@@ -1217,7 +1221,7 @@ def evalInstructionWithCall {φ : Nat}
         match trueVal, falseVal with
         | .vector elemTy tElems, .vector _ fElems => do
           let mut out : List RegisterValue := []
-          for i in [:condElems.length] do
+          for i in List.range condElems.length do
             let cLane := condElems.getD i (.bv 1 .poison)
             let picked := match cLane with
               | .bv 1 (.value b) =>
@@ -1260,7 +1264,7 @@ def evalInstructionWithCall {φ : Nat}
     match st.memory.allocate dl st.config totalSize effAlign name addrSpace .uninitialized .stack with
     | .ok (obj, mem') =>
       let ptr := MemoryState.derivePointer dl obj
-      set { st with memory := mem', frameAllocas := obj.allocId :: st.frameAllocas }
+      set (st.withMemoryAndAllocas mem' (obj.allocId :: st.frameAllocas))
       writeRegister id (.ptr addrSpace (.value ptr)) "alloca"
     | .error e => throw e
   | .load ty ptrTy ptrExp align? _isVol noundef => do
@@ -1281,9 +1285,10 @@ def evalInstructionWithCall {φ : Nat}
     let rawBytes := MemoryState.readObjectBytes mo offset storeSize
     let (val, hasUndef) ← StateT.lift (do
       let o ← get
-      let (v, u, o') := bytesToValue dl st.config rawBytes cTy o
-      set o'
-      pure (v, u))
+      match bytesToValue dl st.config rawBytes cTy o with
+      | (v, u, o') =>
+        set o'
+        pure (v, u))
     if noundef && (hasUndef || val.containsPoison) then
       throwUB "Loaded value violates !noundef (contains poison or undef bits)"
     writeRegister id val "load"
@@ -1304,7 +1309,7 @@ def evalInstructionWithCall {φ : Nat}
       | .ok r => pure r
       | .error e => throw e
     let rawBytes := valueToBytes dl st.config val cValTy
-    set { st with memory := st.memory.writeObjectBytes mo.allocId offset rawBytes }
+    set (st.withMemory (st.memory.writeObjectBytes mo.allocId offset rawBytes))
   | .getelementptr flags baseTy ptrTy ptrExp idxs => do
     let cBase ← concretizeType baseTy
     let cPtrTy ← concretizeType ptrTy
@@ -1430,7 +1435,7 @@ def evalInstructionWithCall {φ : Nat}
     | .void, _ => pure ()
     | .ret _, .id rid =>
       let st ← get
-      set { st with registers := st.registers.insert (.local_id rid) retVal }
+      set (st.insertRegister (.local_id rid) retVal)
     | .ret _, .void _ => pure () -- LLVM allows discarding non-void call result
   | .freeze ⟨ty, exp⟩ => do
     let st ← get
@@ -1452,9 +1457,10 @@ def evalInstructionWithCall {φ : Nat}
       let val ← evalTypedExp cTy exp
       let frozen ← StateT.lift (do
         let o ← get
-        let (v, o') := freezeValue st.dataLayout st.config val o
-        set o'
-        pure v)
+        match freezeValue st.dataLayout st.config val o with
+        | (v, o') =>
+          set o'
+          pure v)
       writeRegister id frozen "freeze"
 
 /-- Execute one instruction without user-defined function calls (for straight-line code). -/
@@ -1462,21 +1468,43 @@ def evalInstructionWithCall {φ : Nat}
 def evalInstruction {φ : Nat} (id : InstructionId) (instr : @Instruction φ) : NanoLlvmM Unit :=
   evalInstructionWithCall (fun fid _ => throwStatic s!"Cannot call @{fid} outside a module/definition context") id instr
 
+/--
+Strict sequential bind for `NanoLlvmM`: forces the outer `NanoLlvmState` and `OracleState`
+constructors between consecutive instructions so Lean's call-by-name C++ kernel evaluates
+each instruction once (`O(N)`) rather than re-evaluating prior instructions through repeated
+state projections (`O(4^N)`).
+-/
+def seqStrict {α β : Type} (m : NanoLlvmM α) (k : α → NanoLlvmM β) : NanoLlvmM β :=
+  fun st o =>
+    match m st o with
+    | .error e => .error e
+    | .ok ((a, ⟨regs, mem, cfg, dl, allocas, fns, decls, steps, depth⟩), ⟨ora, idx⟩) =>
+      k a ⟨regs, mem, cfg, dl, allocas, fns, decls, steps, depth⟩ ⟨ora, idx⟩
+
+@[simp, simp_llvm]
+theorem seqStrict_eq_bind {α β : Type} (m : NanoLlvmM α) (k : α → NanoLlvmM β) :
+    seqStrict m k = (m >>= k) := by
+  funext st o
+  simp only [seqStrict, bind, StateT.bind, Except.bind]
+  cases m st o with
+  | error e => rfl
+  | ok v => rfl
+
 @[simp_llvm]
 def evalNanoLlvmCodeWithCall {φ : Nat}
     (callFn : FunctionId → List RegisterValue → NanoLlvmM RegisterValue) :
     (@Code φ) → NanoLlvmM Unit
   | .nil => pure ()
-  | ⟨instr_id, instr⟩ :: t => do
-    evalInstructionWithCall callFn instr_id instr
-    evalNanoLlvmCodeWithCall callFn t
+  | ⟨instr_id, instr⟩ :: t =>
+    seqStrict (evalInstructionWithCall callFn instr_id instr) fun _ =>
+      evalNanoLlvmCodeWithCall callFn t
 
 @[simp_llvm]
 def evalNanoLlvmCode {φ : Nat} : (@Code φ) → NanoLlvmM Unit
   | .nil => pure ()
-  | ⟨instr_id, instr⟩ :: t => do
-    evalInstruction instr_id instr
-    evalNanoLlvmCode t
+  | ⟨instr_id, instr⟩ :: t =>
+    seqStrict (evalInstruction instr_id instr) fun _ =>
+      evalNanoLlvmCode t
 
 /-! ### Argument Binding, Parallel Phi Evaluation, and Multi-Block CFG Execution -/
 
@@ -1494,37 +1522,37 @@ def bindDefinitionArgs {φ : Nat} :
         let wTy ← expectConcreteWidth wTy
         if wTy = wVal then
           let st ← get
-          set { st with registers := st.registers.insert (.local_id argId) argVal }
+          set (st.insertRegister (.local_id argId) argVal)
         else
           throwStatic s!"unmatched argument integer width: [{argTy.print} {argId} = {argVal}]"
       | .float ft1, .float ft2 _ =>
         if ft1 = ft2 then
           let st ← get
-          set { st with registers := st.registers.insert (.local_id argId) argVal }
+          set (st.insertRegister (.local_id argId) argVal)
         else
           throwStatic s!"unmatched argument float type: [{argTy.print} {argId} = {argVal}]"
       | .ptr as1, .ptr as2 _ =>
         if as1 = as2 then
           let st ← get
-          set { st with registers := st.registers.insert (.local_id argId) argVal }
+          set (st.insertRegister (.local_id argId) argVal)
         else
           throwStatic s!"unmatched argument pointer addrspace: [{argTy.print} {argId} = {argVal}]"
       | .vector n _, .vector _ elems =>
         if n = elems.length then
           let st ← get
-          set { st with registers := st.registers.insert (.local_id argId) argVal }
+          set (st.insertRegister (.local_id argId) argVal)
         else
           throwStatic s!"unmatched argument vector length: [{argTy.print} {argId} = {argVal}]"
       | .array n _, .array _ elems =>
         if n = elems.length then
           let st ← get
-          set { st with registers := st.registers.insert (.local_id argId) argVal }
+          set (st.insertRegister (.local_id argId) argVal)
         else
           throwStatic s!"unmatched argument array length: [{argTy.print} {argId} = {argVal}]"
       | .struct p1 fs1, .struct p2 _ fs2 =>
         if p1 = p2 && fs1.length = fs2.length then
           let st ← get
-          set { st with registers := st.registers.insert (.local_id argId) argVal }
+          set (st.insertRegister (.local_id argId) argVal)
         else
           throwStatic s!"unmatched argument struct type: [{argTy.print} {argId} = {argVal}]"
       | _, _ => throwStatic s!"unsupported/mismatched argument: [{argTy.print} {argId} = {argVal}]"
@@ -1535,8 +1563,8 @@ def bindDefinitionArgs {φ : Nat} :
 def splitPhis {φ : Nat} : @Code φ →
     List (InstructionId × LlvmType φ × FastMathFlags × List (Exp φ × BlockId)) × @Code φ
   | (id, .phi ty fmf incs) :: rest =>
-    let (phis, body) := splitPhis rest
-    ((id, ty, fmf, incs) :: phis, body)
+    match splitPhis rest with
+    | (phis, body) => ((id, ty, fmf, incs) :: phis, body)
   | code => ([], code)
 
 /-- Evaluate all leading `phi` nodes in parallel using the predecessor's register state (matches `llubi::jumpTo`). -/
@@ -1566,10 +1594,10 @@ private def evalBlockPhis {φ : Nat} (predId? : Option BlockId)
         | other => pure other
     else pure val
     updates := updates ++ [(rid, val)]
-  -- Stage 2: commit all phi registers simultaneously
+  -- Stage 2: commit all phi register updates simultaneously
   let mut st ← get
   for (rid, val) in updates do
-    st := { st with registers := st.registers.insert (.local_id rid) val }
+    st := st.insertRegister (.local_id rid) val
   set st
 
 /-- Evaluate a single return terminator cleanly. -/
@@ -1605,11 +1633,121 @@ def evalRetTerminator {φ : Nat} (retTy : LlvmRetType φ) : @Terminator φ → N
 def freeCurrentFrameAllocas : NanoLlvmM Unit := do
   let st ← get
   let mem' := st.frameAllocas.foldl (init := st.memory) fun m aid => m.freeObject aid
-  set { st with memory := mem', frameAllocas := [] }
+  set (st.withMemoryAndAllocas mem' [])
+
+/-- Apply callee parameter attributes (if any) after binding arguments. -/
+private def applyCalleeParamAttrs {φ : Nat} (argTys : List (LlvmType φ))
+    (defn : @Definition φ) : NanoLlvmM Unit := do
+  let cArgTys ← concretizeTypeList argTys
+  for i in List.range defn.args.length do
+    match defn.args[i]?, cArgTys[i]?, defn.prototype.argAttrs[i]? with
+    | some argId, some cTy, some attrs =>
+      if !attrs.isEmpty then
+        let st ← get
+        match st.registers.get? (.local_id argId) with
+        | some v =>
+          let cAttrs ← attrs.mapM fun
+            | .byval t => return .byval (← concretizeType t)
+            | .noundef => pure .noundef
+            | .nonnull => pure .nonnull
+            | .align a => pure (.align a)
+            | .dereferenceable b => pure (.dereferenceable b)
+            | .dereferenceableOrNull b => pure (.dereferenceableOrNull b)
+            | .range lo hi => pure (.range lo hi)
+            | .nofpclass m => pure (.nofpclass m)
+          let v' ← applyValueAttrs cTy v cAttrs
+          set (st.insertRegister (.local_id argId) v')
+        | none => pure ()
+    | _, _, _ => pure ()
+
+/--
+Execute a basic-block CFG loop for up to `fuel` block transitions using direct `Nat.rec`
+so kernel reduction (`rfl` / `decide`) runs lazily in `O(actual_steps)` instead of `O(fuel)`.
+-/
+private def execBlockLoop {φ : Nat} (fuel : Nat)
+    (callUserFn : FunctionId → List RegisterValue → NanoLlvmM RegisterValue)
+    (retTy : LlvmRetType φ) (defn : @Definition φ) :
+    @Block φ → Option BlockId → NanoLlvmM RegisterValue :=
+  Nat.rec
+    (fun _ _ => throw .outOfFuel)
+    (fun _ recBlk blk predId? =>
+      match splitPhis blk.code with
+      | (phis, bodyCode) =>
+        seqStrict (evalBlockPhis predId? phis) fun _ =>
+        seqStrict (evalNanoLlvmCodeWithCall callUserFn bodyCode) fun _ =>
+        match blk.terminator.snd with
+        | .retVoid | .ret _ =>
+          evalRetTerminator retTy blk.terminator.snd
+        | .br dest =>
+          match defn.findBlock? dest with
+          | some nextBlk => recBlk nextBlk (some blk.id)
+          | none => throwStatic s!"Unknown branch target label %{dest}"
+        | .condBr condExp tDest fDest =>
+          seqStrict (evalTypedExp .i1 condExp) fun condVal =>
+          match condVal with
+          | .bv 1 .poison => throwUB "Branch on poison condition"
+          | .bv 1 (.value b) =>
+            let dest := if b != 0 then tDest else fDest
+            match defn.findBlock? dest with
+            | some nextBlk => recBlk nextBlk (some blk.id)
+            | none => throwStatic s!"Unknown branch target label %{dest}"
+          | other => throwStatic s!"Expected i1 condition in br, got {other}"
+        | .switch ty condExp defDest cases =>
+          seqStrict (do let cTy ← concretizeType ty; evalTypedExp cTy condExp) fun condVal =>
+          match condVal with
+          | .bv _ .poison => throwUB "Switch on poison condition"
+          | .bv w (.value bv) =>
+            let matched := cases.find? fun (cv, _) => BitVec.ofInt w cv == bv
+            let dest := match matched with
+              | some (_, lbl) => lbl
+              | none => defDest
+            match defn.findBlock? dest with
+            | some nextBlk => recBlk nextBlk (some blk.id)
+            | none => throwStatic s!"Unknown switch target label %{dest}"
+          | other => throwStatic s!"Expected integer condition in switch, got {other}"
+        | .unreachable =>
+          throwUB "Executed unreachable instruction")
+    fuel
+
+/-- Concrete (`φ = 0`) recursive function evaluator using direct `Nat.rec`. -/
+private def evalDefinitionFuel0 (fuel : Nat) :
+    @Definition 0 → List RegisterValue → NanoLlvmM RegisterValue :=
+  Nat.rec
+    (fun _ _ => throw .outOfFuel)
+    (fun fuel' recDef defn argVals =>
+      match defn.prototype.type with
+      | .function retTy argTys _ =>
+        let callUserFn : FunctionId → List RegisterValue → NanoLlvmM RegisterValue := fun fid calleeArgs => do
+          let st ← get
+          if st.config.maxStackDepth != 0 && st.callDepth + 1 ≥ st.config.maxStackDepth then
+            throw .stackOverflow
+          match st.functions.get? fid with
+          | none => throwStatic s!"Call to undefined external function @{fid}"
+          | some calleeDef =>
+            -- Save caller frame
+            let savedRegs := st.registers
+            let savedAllocas := st.frameAllocas
+            let savedDepth := st.callDepth
+            set (st.withFrame ∅ [] (savedDepth + 1))
+            seqStrict (recDef calleeDef calleeArgs) fun ret => do
+              -- Restore caller frame (callee allocas already freed by callee exit)
+              let stAfter ← get
+              set (stAfter.withFrame savedRegs savedAllocas savedDepth)
+              pure ret
+        match defn.blocks with
+        | [] => throwStatic s!"Function @{defn.prototype.name} has no basic blocks"
+        | entryBlock :: _ =>
+          seqStrict (bindDefinitionArgs argTys defn.args argVals) fun _ =>
+          seqStrict (applyCalleeParamAttrs argTys defn) fun _ =>
+          seqStrict (execBlockLoop fuel' callUserFn retTy defn entryBlock none) fun ret =>
+          seqStrict freeCurrentFrameAllocas fun _ =>
+            pure ret
+      | ty => throwStatic s!"Expected function type for prototype, found [{ty.print}]")
+    fuel
 
 /--
 Fuel-bounded multi-block CFG and recursive-call interpreter (mirrors `llubi::InstExecutor::runMainLoop`).
-Structurally recursive on `fuel : Nat`.
+Uses direct `Nat.rec` internally for lazy `O(actual_steps)` kernel reduction.
 -/
 def evalDefinitionFuel {φ : Nat} (fuel : Nat) (defn : @Definition φ)
     (argVals : List RegisterValue) : NanoLlvmM RegisterValue :=
@@ -1617,119 +1755,33 @@ def evalDefinitionFuel {φ : Nat} (fuel : Nat) (defn : @Definition φ)
   | 0 => throw .outOfFuel
   | fuel' + 1 =>
     match defn.prototype.type with
-    | .function retTy argTys _ => do
-      -- Fast path for single-block definitions with ret/retVoid (keeps straight-line proofs reducible by `simp`!)
+    | .function retTy argTys _ =>
+      let callUserFn : FunctionId → List RegisterValue → NanoLlvmM RegisterValue := fun fid calleeArgs => do
+        let st ← get
+        if st.config.maxStackDepth != 0 && st.callDepth + 1 ≥ st.config.maxStackDepth then
+          throw .stackOverflow
+        match st.functions.get? fid with
+        | none => throwStatic s!"Call to undefined external function @{fid}"
+        | some calleeDef =>
+          -- Save caller frame
+          let savedRegs := st.registers
+          let savedAllocas := st.frameAllocas
+          let savedDepth := st.callDepth
+          set (st.withFrame ∅ [] (savedDepth + 1))
+          seqStrict (evalDefinitionFuel0 fuel' calleeDef calleeArgs) fun ret => do
+            -- Restore caller frame (callee allocas already freed by callee exit)
+            let stAfter ← get
+            set (stAfter.withFrame savedRegs savedAllocas savedDepth)
+            pure ret
       match defn.blocks with
       | [] => throwStatic s!"Function @{defn.prototype.name} has no basic blocks"
-      | [singleBlock] =>
-        let hasCalls := singleBlock.code.any fun (_, i) => match i with | .call .. => true | _ => false
-        let isSimpleRet := match singleBlock.terminator.snd with | .ret _ | .retVoid => true | _ => false
-        if !hasCalls && isSimpleRet && (splitPhis singleBlock.code).1.isEmpty then
-          bindDefinitionArgs argTys defn.args argVals
-          evalNanoLlvmCode singleBlock.code
-          let ret ← evalRetTerminator retTy singleBlock.terminator.snd
-          freeCurrentFrameAllocas
-          pure ret
-        else
-          runCFG fuel' retTy argTys defn argVals singleBlock
       | entryBlock :: _ =>
-        runCFG fuel' retTy argTys defn argVals entryBlock
+        seqStrict (bindDefinitionArgs argTys defn.args argVals) fun _ =>
+        seqStrict (applyCalleeParamAttrs argTys defn) fun _ =>
+        seqStrict (execBlockLoop fuel' callUserFn retTy defn entryBlock none) fun ret =>
+        seqStrict freeCurrentFrameAllocas fun _ =>
+          pure ret
     | ty => throwStatic s!"Expected function type for prototype, found [{ty.print}]"
-termination_by (fuel, 3)
-where
-  runCFG (f : Nat) (retTy : LlvmRetType φ) (argTys : List (LlvmType φ))
-      (defn : @Definition φ) (argVals : List RegisterValue) (entry : @Block φ) :
-      NanoLlvmM RegisterValue := do
-    bindDefinitionArgs argTys defn.args argVals
-    -- Apply callee parameter attributes if any
-    let cArgTys ← concretizeTypeList argTys
-    for i in [:defn.args.length] do
-      match defn.args[i]?, cArgTys[i]?, defn.prototype.argAttrs[i]? with
-      | some argId, some cTy, some attrs =>
-        if !attrs.isEmpty then
-          let st ← get
-          match st.registers.get? (.local_id argId) with
-          | some v =>
-            let cAttrs ← attrs.mapM fun
-              | .byval t => return .byval (← concretizeType t)
-              | .noundef => pure .noundef
-              | .nonnull => pure .nonnull
-              | .align a => pure (.align a)
-              | .dereferenceable b => pure (.dereferenceable b)
-              | .dereferenceableOrNull b => pure (.dereferenceableOrNull b)
-              | .range lo hi => pure (.range lo hi)
-              | .nofpclass m => pure (.nofpclass m)
-            let v' ← applyValueAttrs cTy v cAttrs
-            set { st with registers := st.registers.insert (.local_id argId) v' }
-          | none => pure ()
-      | _, _, _ => pure ()
-    let ret ← execBlockLoop f retTy defn entry none
-    freeCurrentFrameAllocas
-    pure ret
-  termination_by (f, 2)
-
-  callUserFunction (f : Nat) (fid : FunctionId) (calleeArgs : List RegisterValue) :
-      NanoLlvmM RegisterValue := do
-    let st ← get
-    if st.config.maxStackDepth != 0 && st.callDepth + 1 ≥ st.config.maxStackDepth then
-      throw .stackOverflow
-    match st.functions.get? fid with
-    | none => throwStatic s!"Call to undefined external function @{fid}"
-    | some calleeDef =>
-      -- Save caller frame
-      let savedRegs := st.registers
-      let savedAllocas := st.frameAllocas
-      let savedDepth := st.callDepth
-      set { st with registers := ∅, frameAllocas := [], callDepth := savedDepth + 1 }
-      let ret ← evalDefinitionFuel f calleeDef calleeArgs
-      -- Restore caller frame (callee allocas already freed by callee exit)
-      let stAfter ← get
-      set { stAfter with registers := savedRegs, frameAllocas := savedAllocas, callDepth := savedDepth }
-      pure ret
-  termination_by (f, 4)
-
-  execBlockLoop (f : Nat) (retTy : LlvmRetType φ) (defn : @Definition φ)
-      (blk : @Block φ) (predId? : Option BlockId) : NanoLlvmM RegisterValue :=
-    match f with
-    | 0 => throw .outOfFuel
-    | f' + 1 => do
-      let (phis, bodyCode) := splitPhis blk.code
-      evalBlockPhis predId? phis
-      evalNanoLlvmCodeWithCall (callUserFunction f') bodyCode
-      match blk.terminator.snd with
-      | .retVoid | .ret _ =>
-        evalRetTerminator retTy blk.terminator.snd
-      | .br dest =>
-        match defn.findBlock? dest with
-        | some nextBlk => execBlockLoop f' retTy defn nextBlk (some blk.id)
-        | none => throwStatic s!"Unknown branch target label %{dest}"
-      | .condBr condExp tDest fDest =>
-        let condVal ← evalTypedExp .i1 condExp
-        match condVal with
-        | .bv 1 .poison => throwUB "Branch on poison condition"
-        | .bv 1 (.value b) =>
-          let dest := if b != 0 then tDest else fDest
-          match defn.findBlock? dest with
-          | some nextBlk => execBlockLoop f' retTy defn nextBlk (some blk.id)
-          | none => throwStatic s!"Unknown branch target label %{dest}"
-        | other => throwStatic s!"Expected i1 condition in br, got {other}"
-      | .switch ty condExp defDest cases =>
-        let cTy ← concretizeType ty
-        let condVal ← evalTypedExp cTy condExp
-        match condVal with
-        | .bv _ .poison => throwUB "Switch on poison condition"
-        | .bv w (.value bv) =>
-          let matched := cases.find? fun (cv, _) => BitVec.ofInt w cv == bv
-          let dest := match matched with
-            | some (_, lbl) => lbl
-            | none => defDest
-          match defn.findBlock? dest with
-          | some nextBlk => execBlockLoop f' retTy defn nextBlk (some blk.id)
-          | none => throwStatic s!"Unknown switch target label %{dest}"
-        | other => throwStatic s!"Expected integer condition in switch, got {other}"
-      | .unreachable =>
-        throwUB "Executed unreachable instruction"
-  termination_by (f, 1)
 
 /-- Primary definition evaluator (preserves fast straight-line reduction for single-block definitions!). -/
 @[simp_llvm]
@@ -1756,72 +1808,75 @@ def evalNanoLlvmDefinition {φ : Nat} (defn : @Definition φ) (argVals : List Re
 
 /-! ### Module Initialization & Execution -/
 
-/-- Initialize all globals, declarations, and function addresses for a concrete module `TopLevel 0`. -/
-def initModule (mod : @TopLevel 0) : NanoLlvmM Unit := do
-  -- Pass 1: register function definitions, declarations, function pointers, and allocate global objects
-  for ent in mod.entities do
-    match ent with
-    | .declaration decl =>
-      let st ← get
-      let dl := st.dataLayout
-      match st.memory.allocate dl st.config 0 1 decl.name.ToString dl.programAddrSpace .zeroed .func true with
-      | .ok (obj, mem') =>
-        let ptr := MemoryState.derivePointer dl obj
-        let mem'' := { mem' with
-          funcAddrs  := mem'.funcAddrs.insert decl.name ptr
-          addrToFunc := mem'.addrToFunc.insert obj.baseAddr decl.name }
-        set { st with memory := mem'', declarations := st.declarations.insert decl.name decl }
-      | .error e => throw e
-    | .definition defn =>
-      let st ← get
-      let dl := st.dataLayout
-      match st.memory.allocate dl st.config 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
-      | .ok (obj, mem') =>
-        let ptr := MemoryState.derivePointer dl obj
-        let mem'' := { mem' with
-          funcAddrs  := mem'.funcAddrs.insert defn.prototype.name ptr
-          addrToFunc := mem'.addrToFunc.insert obj.baseAddr defn.prototype.name }
-        set { st with memory := mem'', functions := st.functions.insert defn.prototype.name defn }
-      | .error e => throw e
-    | .global gv =>
-      let st ← get
-      let dl := st.dataLayout
-      let size := dl.typeAllocSize gv.ty
-      let effAlign := gv.align.getD (dl.typeABIAlign gv.ty)
-      let initKind := if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized
-      match st.memory.allocate dl st.config size effAlign gv.name.ToString gv.addrSpace initKind .global gv.isConstant with
-      | .ok (obj, mem') =>
-        let ptr := MemoryState.derivePointer dl obj
-        let mem'' := { mem' with globalAddrs := mem'.globalAddrs.insert gv.name ptr }
-        set { st with memory := mem'' }
-      | .error e => throw e
-  -- Pass 2: evaluate and store global variable initializers (after all addresses are assigned!)
-  for ent in mod.entities do
-    match ent with
-    | .global gv =>
-      match gv.initializer with
-      | none => pure ()
-      | some initExp =>
-        let initVal ← evalTypedExp gv.ty initExp
+private def initModulePass1 : List (@TopLevelEntity 0) → NanoLlvmM Unit
+  | [] => pure ()
+  | ent :: rest =>
+    let step : NanoLlvmM Unit := match ent with
+      | .declaration decl => do
         let st ← get
-        match st.memory.globalAddrs.get? gv.name with
-        | some ptr =>
-          match ptr.prov with
-          | .concrete aid =>
-            let rawBytes := valueToBytes st.dataLayout st.config initVal gv.ty
-            set { st with memory := st.memory.writeObjectBytes aid 0 rawBytes }
-          | _ => pure ()
+        let dl := st.dataLayout
+        match st.memory.allocate dl st.config 0 1 decl.name.ToString dl.programAddrSpace .zeroed .func true with
+        | .ok (obj, mem') =>
+          let ptr := MemoryState.derivePointer dl obj
+          let mem'' := mem'.insertFuncAddr decl.name obj.baseAddr ptr
+          set (st.addDeclaration mem'' decl.name decl)
+        | .error e => throw e
+      | .definition defn => do
+        let st ← get
+        let dl := st.dataLayout
+        match st.memory.allocate dl st.config 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+        | .ok (obj, mem') =>
+          let ptr := MemoryState.derivePointer dl obj
+          let mem'' := mem'.insertFuncAddr defn.prototype.name obj.baseAddr ptr
+          set (st.addFunction mem'' defn.prototype.name defn)
+        | .error e => throw e
+      | .global gv => do
+        let st ← get
+        let dl := st.dataLayout
+        let size := dl.typeAllocSize gv.ty
+        let effAlign := gv.align.getD (dl.typeABIAlign gv.ty)
+        let initKind := if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized
+        match st.memory.allocate dl st.config size effAlign gv.name.ToString gv.addrSpace initKind .global gv.isConstant with
+        | .ok (obj, mem') =>
+          let ptr := MemoryState.derivePointer dl obj
+          let mem'' := mem'.insertGlobalAddr gv.name ptr
+          set (st.withMemory mem'')
+        | .error e => throw e
+    seqStrict step fun _ => initModulePass1 rest
+
+private def initModulePass2 : List (@TopLevelEntity 0) → NanoLlvmM Unit
+  | [] => pure ()
+  | ent :: rest =>
+    let step : NanoLlvmM Unit := match ent with
+      | .global gv =>
+        match gv.initializer with
         | none => pure ()
-    | _ => pure ()
+        | some initExp => do
+          let initVal ← evalTypedExp gv.ty initExp
+          let st ← get
+          match st.memory.globalAddrs.get? gv.name with
+          | some ptr =>
+            match ptr.prov with
+            | .concrete aid =>
+              let rawBytes := valueToBytes st.dataLayout st.config initVal gv.ty
+              set (st.withMemory (st.memory.writeObjectBytes aid 0 rawBytes))
+            | _ => pure ()
+          | none => pure ()
+      | _ => pure ()
+    seqStrict step fun _ => initModulePass2 rest
+
+/-- Initialize all globals, declarations, and function addresses for a concrete module `TopLevel 0`. -/
+def initModule (mod : @TopLevel 0) : NanoLlvmM Unit :=
+  seqStrict (initModulePass1 mod.entities) fun _ => initModulePass2 mod.entities
 
 /-- Execute a named function inside a concrete module `TopLevel 0`. -/
 def evalModuleFunction (mod : @TopLevel 0) (fnName : FunctionId)
-    (argVals : List RegisterValue) : NanoLlvmM RegisterValue := do
-  initModule mod
-  let st ← get
-  match st.functions.get? fnName with
-  | none => throwStatic s!"Function @{fnName} not found in module"
-  | some defn => evalNanoLlvmDefinition defn argVals
+    (argVals : List RegisterValue) : NanoLlvmM RegisterValue :=
+  seqStrict (initModule mod) fun _ => do
+    let st ← get
+    match st.functions.get? fnName with
+    | none => throwStatic s!"Function @{fnName} not found in module"
+    | some defn => evalNanoLlvmDefinition defn argVals
 
 /-! ### Top-Level Runners -/
 

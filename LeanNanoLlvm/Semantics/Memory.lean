@@ -1,8 +1,8 @@
 import LeanNanoLlvm.Util.Config
 import LeanNanoLlvm.Util.Undef
+import LeanNanoLlvm.Util.AssocMap
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.AST.DataLayout
-import Std.Data.ExtHashMap
 
 namespace LeanNanoLlvm.Semantics
 
@@ -136,16 +136,15 @@ def getBit (b : MemByte) : Nat → MemBit
   | 6 => b.b6
   | _ => b.b7
 
-def setBit (b : MemByte) (idx : Nat) (v : MemBit) : MemByte :=
-  match idx with
-  | 0 => { b with b0 := v }
-  | 1 => { b with b1 := v }
-  | 2 => { b with b2 := v }
-  | 3 => { b with b3 := v }
-  | 4 => { b with b4 := v }
-  | 5 => { b with b5 := v }
-  | 6 => { b with b6 := v }
-  | _ => { b with b7 := v }
+def setBit : MemByte → Nat → MemBit → MemByte
+  | ⟨_, b1, b2, b3, b4, b5, b6, b7⟩, 0, v => ⟨v, b1, b2, b3, b4, b5, b6, b7⟩
+  | ⟨b0, _, b2, b3, b4, b5, b6, b7⟩, 1, v => ⟨b0, v, b2, b3, b4, b5, b6, b7⟩
+  | ⟨b0, b1, _, b3, b4, b5, b6, b7⟩, 2, v => ⟨b0, b1, v, b3, b4, b5, b6, b7⟩
+  | ⟨b0, b1, b2, _, b4, b5, b6, b7⟩, 3, v => ⟨b0, b1, b2, v, b4, b5, b6, b7⟩
+  | ⟨b0, b1, b2, b3, _, b5, b6, b7⟩, 4, v => ⟨b0, b1, b2, b3, v, b5, b6, b7⟩
+  | ⟨b0, b1, b2, b3, b4, _, b6, b7⟩, 5, v => ⟨b0, b1, b2, b3, b4, v, b6, b7⟩
+  | ⟨b0, b1, b2, b3, b4, b5, _, b7⟩, 6, v => ⟨b0, b1, b2, b3, b4, b5, v, b7⟩
+  | ⟨b0, b1, b2, b3, b4, b5, b6, _⟩, _, v => ⟨b0, b1, b2, b3, b4, b5, b6, v⟩
 
 /-- Extract all 8 bits LSB-first as a list. -/
 def toBits (b : MemByte) : List MemBit :=
@@ -243,13 +242,13 @@ structure MemoryState : Type where
   nextAllocId        : AllocId := 1
   nextAddr           : Nat := 8
   usedMem            : Nat := 0
-  objects            : Std.ExtHashMap AllocId MemoryObject := ∅
+  objects            : AssocMap AllocId MemoryObject := ∅
   /-- Ordered list of `(allocId, exposedAtGeneration)` for `ptrtoint` / `inttoptr` provenance exposure. -/
   exposedGeneration  : Nat := 0
   exposedProvenances : List (AllocId × Nat) := []
-  globalAddrs        : Std.ExtHashMap AST.GlobalId Pointer := ∅
-  funcAddrs          : Std.ExtHashMap AST.FunctionId Pointer := ∅
-  addrToFunc         : Std.ExtHashMap Nat AST.FunctionId := ∅
+  globalAddrs        : AssocMap AST.GlobalId Pointer := ∅
+  funcAddrs          : AssocMap AST.FunctionId Pointer := ∅
+  addrToFunc         : AssocMap Nat AST.FunctionId := ∅
 
 instance : Inhabited MemoryState := ⟨{}⟩
 
@@ -261,18 +260,40 @@ def exceedsMaxObjectSize (dl : DataLayout) (size addrSpace : Nat) : Bool :=
   if idxBits ≤ 1 then size > 0
   else size ≥ (1 <<< (idxBits - 1))
 
+/-- Pattern-matching updaters (avoid struct-with projection duplication in Lean's kernel). -/
+def withObjects : MemoryState → AssocMap AllocId MemoryObject → MemoryState
+  | ⟨nextAllocId, nextAddr, usedMem, _, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, objs =>
+    ⟨nextAllocId, nextAddr, usedMem, objs, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+
+def insertGlobalAddr : MemoryState → AST.GlobalId → Pointer → MemoryState
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, name, ptr =>
+    ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs.insert name ptr, funcAddrs, addrToFunc⟩
+
+def insertFuncAddr : MemoryState → AST.FunctionId → Nat → Pointer → MemoryState
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, name, baseAddr, ptr =>
+    ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs.insert name ptr, addrToFunc.insert baseAddr name⟩
+
+private def moWithBytes : MemoryObject → Array MemByte → MemoryObject
+  | ⟨allocId, baseAddr, size, align, addrSpace, name, state, allocKind, isConstant, _⟩, bs =>
+    ⟨allocId, baseAddr, size, align, addrSpace, name, state, allocKind, isConstant, bs⟩
+
+private def moWithStateBytes : MemoryObject → MemoryObjectState → Array MemByte → MemoryObject
+  | ⟨allocId, baseAddr, size, align, addrSpace, name, _, allocKind, isConstant, _⟩, st, bs =>
+    ⟨allocId, baseAddr, size, align, addrSpace, name, st, allocKind, isConstant, bs⟩
+
 /-- Allocate a new memory object with monotonically increasing aligned address + guard byte. -/
-def allocate (mem : MemoryState) (dl : DataLayout) (cfg : SemanticsConfig)
-    (size align : Nat) (name : String) (addrSpace : Nat)
-    (initKind : MemInitKind) (allocKind : MemAllocKind) (isConstant : Bool := false) :
-    Except ExecError (MemoryObject × MemoryState) := do
+def allocate : MemoryState → DataLayout → SemanticsConfig →
+    Nat → Nat → String → Nat → MemInitKind → MemAllocKind → (isConstant : Bool := false) →
+    Except ExecError (MemoryObject × MemoryState)
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩,
+    dl, cfg, size, align, name, addrSpace, initKind, allocKind, isConstant => do
   if exceedsMaxObjectSize dl size addrSpace then
     .error (.immediateUB s!"Allocation size {size} exceeds maximum object size")
   let effAlign := max 1 align
   let allocSpace := max 1 size
-  if cfg.maxMem != 0 && mem.usedMem + allocSpace > cfg.maxMem then
+  if cfg.maxMem != 0 && usedMem + allocSpace > cfg.maxMem then
     .error .outOfMemory
-  let alignedAddr := DataLayout.alignTo mem.nextAddr effAlign
+  let alignedAddr := DataLayout.alignTo nextAddr effAlign
   let addrBits := dl.getAddressSizeInBits addrSpace
   if alignedAddr + allocSpace ≥ (1 <<< addrBits) then
     .error .outOfMemory
@@ -284,7 +305,7 @@ def allocate (mem : MemoryState) (dl : DataLayout) (cfg : SemanticsConfig)
     | .poisoned => MemoryObjectState.dead
     | _         => MemoryObjectState.alive
   let obj : MemoryObject := {
-    allocId    := mem.nextAllocId
+    allocId    := nextAllocId
     baseAddr   := alignedAddr
     size       := size
     align      := effAlign
@@ -295,13 +316,10 @@ def allocate (mem : MemoryState) (dl : DataLayout) (cfg : SemanticsConfig)
     isConstant := isConstant
     bytes      := Array.replicate size fillByte
   }
-  let mem' : MemoryState := {
-    mem with
-    nextAllocId := mem.nextAllocId + 1
-    nextAddr    := alignedAddr + allocSpace + 1 -- +1 guard byte so one-past-the-end never aliases next object
-    usedMem     := mem.usedMem + allocSpace
-    objects     := mem.objects.insert obj.allocId obj
-  }
+  let mem' : MemoryState :=
+    ⟨nextAllocId + 1, alignedAddr + allocSpace + 1, usedMem + allocSpace,
+     objects.insert obj.allocId obj, exposedGeneration, exposedProvenances,
+     globalAddrs, funcAddrs, addrToFunc⟩
   .ok (obj, mem')
 
 /-- Create a concrete pointer at offset 0 of `obj`. -/
@@ -310,33 +328,33 @@ def derivePointer (dl : DataLayout) (obj : MemoryObject) : Pointer :=
   { prov := .concrete obj.allocId, addrWidth := w, addr := BitVec.ofNat w obj.baseAddr }
 
 /-- Free an allocated memory object (marks `state := .freed`, clears bytes, removes exposed entries). -/
-def freeObject (mem : MemoryState) (allocId : AllocId) : MemoryState :=
-  match mem.objects.get? allocId with
-  | none => mem
-  | some obj =>
-    if obj.state == .freed then mem
-    else
-      let allocSpace := max 1 obj.size
-      let freedObj := { obj with state := .freed, bytes := #[] }
-      { mem with
-        usedMem            := mem.usedMem - allocSpace
-        objects            := mem.objects.insert allocId freedObj
-        exposedProvenances := mem.exposedProvenances.filter (fun (id, _) => id != allocId) }
+def freeObject : MemoryState → AllocId → MemoryState
+  | mem@⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, allocId =>
+    match objects.get? allocId with
+    | none => mem
+    | some obj =>
+      if obj.state == .freed then mem
+      else
+        let allocSpace := max 1 obj.size
+        let freedObj := moWithStateBytes obj .freed #[]
+        ⟨nextAllocId, nextAddr, usedMem - allocSpace, objects.insert allocId freedObj,
+         exposedGeneration, exposedProvenances.filter (fun (id, _) => id != allocId),
+         globalAddrs, funcAddrs, addrToFunc⟩
 
 /-- Expose provenance on `ptrtoint` (matches `llubi::Context::exposeProvenance`). -/
-def exposeProvenance (mem : MemoryState) (prov : Provenance) : MemoryState :=
-  match prov with
-  | .concrete allocId =>
-    match mem.objects.get? allocId with
-    | some obj =>
-      if obj.state == .alive then
-        let nextGen := mem.exposedGeneration + 1
-        { mem with
-          exposedGeneration  := nextGen
-          exposedProvenances := mem.exposedProvenances ++ [(allocId, nextGen)] }
-      else mem
-    | none => mem
-  | _ => mem
+def exposeProvenance : MemoryState → Provenance → MemoryState
+  | mem@⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, prov =>
+    match prov with
+    | .concrete allocId =>
+      match objects.get? allocId with
+      | some obj =>
+        if obj.state == .alive then
+          let nextGen := exposedGeneration + 1
+          ⟨nextAllocId, nextAddr, usedMem, objects, nextGen,
+           exposedProvenances ++ [(allocId, nextGen)], globalAddrs, funcAddrs, addrToFunc⟩
+        else mem
+      | none => mem
+    | _ => mem
 
 /-- Create a wildcard provenance snapshot on `inttoptr` (matches `llubi::Context::getWildcardProvenance`). -/
 def getWildcardProvenance (mem : MemoryState) : Provenance :=
@@ -410,19 +428,21 @@ def readObjectBytes (mo : MemoryObject) (offset len : Nat) : Array MemByte :=
     Array.ofFn (n := len) fun i => mo.bytes.getD (offset + i.val) MemByte.poison
 
 /-- Write `newBytes` into object `allocId` starting at `offset`. -/
-def writeObjectBytes (mem : MemoryState) (allocId : AllocId) (offset : Nat)
-    (newBytes : Array MemByte) : MemoryState :=
-  match mem.objects.get? allocId with
-  | none => mem
-  | some mo =>
-    let updated := Id.run do
-      let mut arr := mo.bytes
-      for i in [:newBytes.size] do
-        let idx := offset + i
-        if h : idx < arr.size then
-          arr := arr.set idx (newBytes.getD i MemByte.poison) h
-      pure arr
-    { mem with objects := mem.objects.insert allocId { mo with bytes := updated } }
+def writeObjectBytes : MemoryState → AllocId → Nat → Array MemByte → MemoryState
+  | mem@⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩,
+    allocId, offset, newBytes =>
+    match objects.get? allocId with
+    | none => mem
+    | some mo =>
+      let rec go (i : Nat) : Nat → Array MemByte → Array MemByte
+        | 0, arr => arr
+        | rem + 1, arr =>
+          let idx := offset + i
+          let arr' := if h : idx < arr.size then arr.set idx (newBytes.getD i MemByte.poison) h else arr
+          go (i + 1) rem arr'
+      let updated := go 0 newBytes.size mo.bytes
+      ⟨nextAllocId, nextAddr, usedMem, objects.insert allocId (moWithBytes mo updated),
+       exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
 
 /-- Execute `llvm.lifetime.start` (makes stack object alive with fresh uninit/poison bytes). -/
 def lifetimeStart (mem : MemoryState) (cfg : SemanticsConfig) (ptr : Pointer) : MemoryState :=
@@ -432,8 +452,8 @@ def lifetimeStart (mem : MemoryState) (cfg : SemanticsConfig) (ptr : Pointer) : 
     if mo.state == .freed then mem
     else
       let fillByte := MemByte.uninitFor cfg
-      let mo' := { mo with state := .alive, bytes := Array.replicate mo.size fillByte }
-      { mem with objects := mem.objects.insert mo.allocId mo' }
+      let mo' := moWithStateBytes mo .alive (Array.replicate mo.size fillByte)
+      mem.withObjects (mem.objects.insert mo.allocId mo')
 
 /-- Execute `llvm.lifetime.end` (marks stack object dead and poisons its bytes). -/
 def lifetimeEnd (mem : MemoryState) (ptr : Pointer) : MemoryState :=
@@ -442,8 +462,8 @@ def lifetimeEnd (mem : MemoryState) (ptr : Pointer) : MemoryState :=
   | some mo =>
     if mo.state == .freed then mem
     else
-      let mo' := { mo with state := .dead, bytes := Array.replicate mo.size MemByte.poison }
-      { mem with objects := mem.objects.insert mo.allocId mo' }
+      let mo' := moWithStateBytes mo .dead (Array.replicate mo.size MemByte.poison)
+      mem.withObjects (mem.objects.insert mo.allocId mo')
 
 end MemoryState
 

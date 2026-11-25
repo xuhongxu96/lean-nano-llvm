@@ -47,7 +47,7 @@ theorem ret_add_x_0_is_refined_by_ret_x :
 
 The project preserves a clean four-layer architecture under `LeanNanoLlvm/`:
 
-1. `LeanNanoLlvm/Util`: `Config.lean` (`SemanticsConfig`, `UndefMode`, `ExecError`), `IEEEFloat.lean`, `Poison.lean`, `ConcreteOrMVar.lean`, `Undef.lean` (`NondetOracle`, `SupplyState`).
+1. `LeanNanoLlvm/Util`: `AssocMap.lean` (kernel-reducible association map), `Config.lean` (`SemanticsConfig`, `UndefMode`, `ExecError`), `IEEEFloat.lean`, `Poison.lean`, `ConcreteOrMVar.lean`, `Undef.lean` (`NondetOracle`, `SupplyState`).
 2. `LeanNanoLlvm/AST`: `AST.lean`, `DataLayout.lean`, `Print.lean`, `Syntax.lean` (`[llvm-*| ...]` quasiquoters), `Unexpander.lean`.
 3. `LeanNanoLlvm/Semantics`: `Semantics.lean` (bitvector ops & `icmp`), `FloatOps.lean`, `Memory.lean`, `State.lean` (`RegisterValue`, serialization, `NanoLlvmState`), `Eval.lean` (total interpreter + intrinsics/libcalls), `Wellformed.lean`.
 4. `LeanNanoLlvm/Refinement`: `Refinement.lean` (`RegisterValue.Refines`, `Definition.RefinesWith`, `y ⊑[cfg] x`, `y ⊑ x`).
@@ -59,7 +59,7 @@ lake build
 lake exe lean-nano-llvm
 ```
 
-Test suites (verified in Lean's kernel):
+Test suites (verified directly in Lean's kernel using only standard axioms — no `native_decide`):
 
 - [LeanNanoLlvm/AST/Test.lean](LeanNanoLlvm/AST/Test.lean) — syntax quasiquoters, printing, and unexpansion
 - [LeanNanoLlvm/Semantics/Test.lean](LeanNanoLlvm/Semantics/Test.lean) — toggleable `undef`, Immediate UB vs `poison`, memory/provenance/endianness/heap/globals, IEEE-754 floats, CFG/parallel `phi`/recursion, aggregates, vectors, and intrinsics

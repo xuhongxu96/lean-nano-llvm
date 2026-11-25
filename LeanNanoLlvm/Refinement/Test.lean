@@ -504,18 +504,18 @@ theorem fadd_refines_fadd_nnan :
       · refine ⟨.poison, .poison, ?_, ?_, rfl⟩
         · simp [simp_llvm, evalTypedExp, concretizeType, concretizeRetType, liftBinary,
                 evalFloatBinaryScalar, evalFloatBinaryOp, drawBool, drawNat, writeRegister,
-                Std.ExtHashMap.getElem_insert, hba]
+                hba]
         · simp [simp_llvm, evalTypedExp, concretizeType, concretizeRetType, liftBinary,
                 evalFloatBinaryScalar, evalFloatBinaryOp, drawBool, drawNat, writeRegister,
-                Std.ExtHashMap.getElem_insert, hba]
+                hba]
       · rcases vb with ⟨none | fb⟩
         · refine ⟨.poison, .poison, ?_, ?_, rfl⟩
           · simp [simp_llvm, evalTypedExp, concretizeType, concretizeRetType, liftBinary,
                   evalFloatBinaryScalar, evalFloatBinaryOp, drawBool, drawNat, writeRegister,
-                  Std.ExtHashMap.getElem_insert, hba]
+                  hba]
           · simp [simp_llvm, evalTypedExp, concretizeType, concretizeRetType, liftBinary,
                   evalFloatBinaryScalar, evalFloatBinaryOp, drawBool, drawNat, writeRegister,
-                  Std.ExtHashMap.getElem_insert, hba]
+                  hba]
         · let flipL := (o 0) % 2 == 1
           let flipR := (o 1) % 2 == 1
           let denormL := (o 2) % 2 == 1
@@ -528,11 +528,11 @@ theorem fadd_refines_fadd_nnan :
           · simp [rt, flipL, flipR, denormL, denormR, nanSign, nanPick,
                   simp_llvm, evalTypedExp, concretizeType, concretizeRetType, liftBinary,
                   evalFloatBinaryScalar, drawBool, drawNat, writeRegister,
-                  Std.ExtHashMap.getElem_insert, hba]
+                  hba]
           · simp [rs, flipL, flipR, denormL, denormR, nanSign, nanPick,
                   simp_llvm, evalTypedExp, concretizeType, concretizeRetType, liftBinary,
                   evalFloatBinaryScalar, drawBool, drawNat, writeRegister,
-                  Std.ExtHashMap.getElem_insert, hba]
+                  hba]
           · simp only [rt, rs, evalFloatBinaryOp, handleFMF, hden, SemanticsConfig.modern,
                        PoisonOr.value_bind, Bool.true_and, Bool.false_and,
                        ite_false, Bool.false_eq_true]
@@ -589,15 +589,15 @@ theorem ret_a_refines_select_true :
     have hba : (AST.Identifier.local_id (.name "b") == AST.Identifier.local_id (.name "a")) = false := rfl
     constructor
     · intro _ o'
-      exact ⟨.bv 32 va, by simp [simp_llvm, Std.ExtHashMap.getElem_insert, hba]⟩
+      exact ⟨.bv 32 va, by simp [simp_llvm, hba]⟩
     · intro o retVal h
       have hret : retVal = .bv 32 va := by
-        simp [simp_llvm, Std.ExtHashMap.getElem_insert, hba] at h
+        simp [simp_llvm, hba] at h
         exact h.symm
       subst hret
       refine ⟨o, .bv 32 va, ?_, RegisterValue.Refines.refl _⟩
       simp [simp_llvm, evalTypedExp, concretizeType, writeRegister,
-            Std.ExtHashMap.getElem_insert, hba]
+            hba]
   · simp [Definition.ArgValuesWellFormed] at hargs
 
 /-! ### 8. Stack Memory Store-to-Load Forwarding Refinement -/
@@ -618,7 +618,10 @@ private theorem readScalarBits_loop_modern_eq
     cases getLogicalBit dl bytes (offsetInBits + i) with
     | poison => exact ih ..
     | undef => exact ih ..
-    | concrete b provBit => exact ih ..
+    | concrete b provBit =>
+      cases b with
+      | false => exact ih ..
+      | true => split_ifs <;> exact ih ..
 
 private theorem byte_roundtrip_i8 (v : IntW 8) (o : OracleState) :
     bytesToValue .default64LE .modern
@@ -626,7 +629,7 @@ private theorem byte_roundtrip_i8 (v : IntW 8) (o : OracleState) :
       (.int (.concrete 8)) o = (.bv 8 v, v == .poison, o) := by
   simp only [valueToBytes, bytesToValue, writeScalarBits, readScalarBits,
              AST.DataLayout.typeStoreSize, AST.DataLayout.typeSizeInBits,
-             AST.DataLayout.alignTo]
+             AST.DataLayout.typeLayout, AST.DataLayout.alignTo]
   rcases v with ⟨none | bv⟩
   · rfl
   · rw [readScalarBits_loop_modern_eq (o0 := ⟨fun _ => 0, 0⟩)]
@@ -637,7 +640,7 @@ private theorem byte_roundtrip_i8 (v : IntW 8) (o : OracleState) :
           0 8 (Array.replicate 1 MemByte.zero)
         let r := readScalarBits.loop AST.DataLayout.default64LE .modern bs 0 8 0 8 0 false false true none false ⟨fun _ => 0, 0⟩
         r.1 = n ∧ r.2.1 = false ∧ r.2.2.1 = false ∧ r.2.2.2.2.2.1 = false := by
-      decide
+      decide +kernel
     have hhi : bv.toNat / 16 < 16 := by have := bv.isLt; omega
     have hlo : bv.toNat % 16 < 16 := by omega
     have hk := hcheck ⟨bv.toNat / 16, hhi⟩ ⟨bv.toNat % 16, hlo⟩
@@ -666,16 +669,18 @@ private theorem valueToBytes_i8_singleton (v : IntW 8) :
     | zero => intro b; exact ⟨b, rfl⟩
     | succ r ih =>
       intro b
-      simp only [writeBitLoop, setLogicalBit, getLogicalByte, setLogicalByte,
-                 AST.DataLayout.default64LE, Nat.zero_add]
-      by_cases hi : i / 8 < 1
-      · have hdiv : i / 8 = 0 := by omega
-        simp [hdiv]
+      simp only [writeBitLoop, setLogicalBit, AST.DataLayout.default64LE,
+                 AST.DataLayout.isLittleEndian, beq_self_eq_true, ↓reduceIte, Nat.zero_add]
+      cases i / 8 with
+      | zero =>
+        simp only [setLogicalBit.updateList]
         exact ih (i + 1) (b.setBit (i % 8) (fn i))
-      · simp [hi]
+      | succ k =>
+        simp only [setLogicalBit.updateList]
         exact ih (i + 1) b
   simp only [valueToBytes, writeScalarBits, AST.DataLayout.typeStoreSize,
-             AST.DataLayout.typeSizeInBits, AST.DataLayout.default64LE]
+             AST.DataLayout.typeSizeInBits, AST.DataLayout.typeLayout,
+             AST.DataLayout.default64LE]
   rcases v with ⟨none | bv⟩
   · exact hloop _ 0 _ MemByte.zero
   · exact hloop _ 0 _ MemByte.zero
@@ -687,24 +692,19 @@ private def stackI8Obj : MemoryObject :=
 
 private def stackI8Mem : MemoryState :=
   { nextAllocId := 2, nextAddr := 10, usedMem := 1,
-    objects := (∅ : Std.ExtHashMap AllocId MemoryObject).insert 1 stackI8Obj }
+    objects := (∅ : AssocMap AllocId MemoryObject).insert 1 stackI8Obj }
 
 private theorem alloc_stack_i8 :
     MemoryState.allocate {} AST.DataLayout.default64LE SemanticsConfig.modern 1 1 "p" 0 .uninitialized .stack =
-      .ok (stackI8Obj, stackI8Mem) := by
-  simp [MemoryState.allocate, MemoryState.exceedsMaxObjectSize, AST.DataLayout.default64LE,
-        AST.DataLayout.getPointerLayout, AST.DataLayout.alignTo, SemanticsConfig.modern,
-        MemByte.uninitFor, stackI8Obj, stackI8Mem]
+      .ok (stackI8Obj, stackI8Mem) := rfl
 
 private theorem derive_stack_i8 :
     MemoryState.derivePointer AST.DataLayout.default64LE stackI8Obj =
-      { prov := .concrete 1, addrWidth := 64, addr := 8#64 } := by
-  simp [MemoryState.derivePointer, stackI8Obj, AST.DataLayout.default64LE, AST.DataLayout.getPointerLayout]
+      { prov := .concrete 1, addrWidth := 64, addr := 8#64 } := rfl
 
 private theorem verify_store_stack_i8 :
     stackI8Mem.verifyMemAccess { prov := .concrete 1, addrWidth := 64, addr := 8#64 } 1 1 true =
-      .ok (stackI8Obj, 0) := by
-  simp [MemoryState.verifyMemAccess, MemoryState.resolveObject?, stackI8Mem, stackI8Obj]
+      .ok (stackI8Obj, 0) := rfl
 
 private def stackI8ObjWith (b : MemByte) : MemoryObject :=
   { stackI8Obj with bytes := #[b] }
@@ -714,10 +714,7 @@ private theorem read_after_write_singleton (b : MemByte) :
     mem2.verifyMemAccess { prov := .concrete 1, addrWidth := 64, addr := 8#64 } 1 1 false =
       .ok (stackI8ObjWith b, 0) ∧
     MemoryState.readObjectBytes (stackI8ObjWith b) 0 1 = #[b] := by
-  constructor
-  · simp [MemoryState.writeObjectBytes, MemoryState.verifyMemAccess, MemoryState.resolveObject?,
-          stackI8Mem, stackI8Obj, stackI8ObjWith]
-  · rfl
+  exact ⟨rfl, rfl⟩
 
 theorem ret_x_refines_alloca_store_load_i8 :
   open scoped LeanNanoLlvm.AST.Syntax in
@@ -751,12 +748,8 @@ theorem ret_x_refines_alloca_store_load_i8 :
       rename_i v
       have hpx : (AST.Identifier.local_id (.name "p") == AST.Identifier.local_id (.name "x")) = false := rfl
       have hallocId : stackI8Obj.allocId = 1 := rfl
-      have hsize : AST.DataLayout.default64LE.typeAllocSize (.int (.concrete 8)) = 1 := by
-        simp [AST.DataLayout.default64LE, AST.DataLayout.typeAllocSize, AST.DataLayout.typeStoreSize,
-              AST.DataLayout.typeSizeInBits, AST.DataLayout.typeABIAlign, AST.DataLayout.intABIAlign,
-              AST.DataLayout.alignTo]
-      have hstore : AST.DataLayout.default64LE.typeStoreSize (.int (.concrete 8)) = 1 := by
-        simp [AST.DataLayout.default64LE, AST.DataLayout.typeStoreSize, AST.DataLayout.typeSizeInBits]
+      have hsize : AST.DataLayout.default64LE.typeAllocSize (.int (.concrete 8)) = 1 := rfl
+      have hstore : AST.DataLayout.default64LE.typeStoreSize (.int (.concrete 8)) = 1 := rfl
       obtain ⟨b, hb⟩ := valueToBytes_i8_singleton v
       have hrt : ∀ o : OracleState,
           bytesToValue .default64LE .modern #[b] (.int (.concrete 8)) o = (.bv 8 v, v == .poison, o) := by
@@ -774,7 +767,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
         subst hret
         refine ⟨o, .bv 8 v, ?_, RegisterValue.Refines.refl _⟩
         simp [simp_llvm, evalTypedExp, concretizeType, writeRegister, freeCurrentFrameAllocas,
-              AST.RawId.ToString, Std.ExtHashMap.getElem_insert, hpx, hallocId,
+              AST.RawId.ToString, hpx, hallocId,
               hsize, hstore, alloc_stack_i8, derive_stack_i8, verify_store_stack_i8,
               hb, hmem.1, hmem.2, hrt]
 

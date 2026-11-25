@@ -302,14 +302,15 @@ def div (rm : RoundingMode) (x y : IEEEFloat fmt) : IEEEFloat fmt :=
 /-- Modular exponentiation `(base ^ exp) % modulus` for fast exact `frem`. -/
 private def powMod (base exp modulus : Nat) : Nat :=
   if modulus == 0 then 0
-  else go (base % modulus) exp 1
+  else go (Nat.log2 exp + 1) (base % modulus) exp 1
 where
-  go (b e acc : Nat) : Nat :=
-    if e = 0 then acc
-    else
-      let acc' := if e % 2 == 1 then (acc * b) % modulus else acc
-      go ((b * b) % modulus) (e / 2) acc'
-  termination_by e
+  go : Nat → Nat → Nat → Nat → Nat
+    | 0, _, _, acc => acc
+    | fuel + 1, b, e, acc =>
+      if e == 0 then acc
+      else
+        let acc' := if e % 2 == 1 then (acc * b) % modulus else acc
+        go fuel ((b * b) % modulus) (e / 2) acc'
 
 /-- LLVM `frem` (C `fmod` / `APFloat::mod`): exact remainder preserving sign of dividend `x`. -/
 def rem (x y : IEEEFloat fmt) : IEEEFloat fmt :=
