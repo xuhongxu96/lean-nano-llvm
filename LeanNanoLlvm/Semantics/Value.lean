@@ -1288,7 +1288,10 @@ def evalGEPValuesPure (dl : DataLayout) (mem : MemoryState) (flags : GEPFlags)
           | some fi =>
             match dl.structFieldOffset? packed fieldTys fi, fieldTys[fi]? with
             | some byteOff, some fTy =>
-              let offVal := RegisterValue.bv idxW (.value (BitVec.ofNat idxW byteOff))
+              let offScalar := RegisterValue.bv idxW (.value (BitVec.ofNat idxW byteOff))
+              let offVal := match idxVal with
+                | .vector _ es => RegisterValue.vector (.int idxW) (List.replicate es.length offScalar)
+                | _ => offScalar
               let (r', a') ← applyScaled offVal 1 curRes accOff
               stepIdxs false r' a' (some fTy) rest
             | _, _ => .error (.staticError s!"Struct index {fi} out of bounds in getelementptr")

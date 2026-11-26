@@ -8,6 +8,7 @@ import LeanNanoLlvm.Semantics.Value
 namespace LeanNanoLlvm.Semantics
 
 open AST
+open RegisterValue (poisonOf)
 
 /-- Kernel-reducible string prefix check (avoids extern `ByteArray`-backed `String.startsWith`). -/
 def strHasPrefix (s p : String) : Bool :=
@@ -409,6 +410,334 @@ theorem AllocLibcallSpec.preserves_wf {dl cfg mem name retTy argVals retVal mem'
   | calloc_null _ _ _ _ _ => exact hwf
   | cxxNew_ok _ _ _ _ _ _ _ hspec => exact hspec.preserves_wf hwf
 
+/-- Pure deterministic (oracle-independent) LLVM intrinsics: saturating shifts, scmp/ucmp,
+    smulh/umulh, clmul, pdep/pext, vscale, stepvector, vector reverse/extract/insert/interleave/
+    deinterleave/splice, active lane mask, mask.beforefirst, vp.merge, matrix.transpose, and
+    experimental vector intrinsics. -/
+def evalPureDetIntrinsic? (cfg : SemanticsConfig) (name : String) (retTy : LlvmRetType)
+    (_fmf : FastMathFlags) (argVals : List RegisterValue) :
+    Option (Except ExecError RegisterValue) :=
+  if strHasPrefix name "llvm.sshl.sat" || strHasPrefix name "llvm.ushl.sat" then
+    some <| match argVals with
+      | [v1, v2] =>
+        let isSigned := strHasPrefix name "llvm.sshl.sat"
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
+        liftBinaryPure resElemTy v1 v2 fun a b =>
+          match a, b with
+          | .bv w1 (.value x), .bv w2 (.value amt) =>
+            if h : w1 = w2 then
+              let x' : BitVec w2 := h ▸ x
+              if amt.toNat ≥ w2 then .ok (.bv w2 .poison)
+              else if !isSigned then
+                let shifted := x'.toNat <<< amt.toNat
+                let res := if shifted ≥ (1 <<< w2) then BitVec.allOnes w2 else BitVec.ofNat w2 shifted
+                .ok (.bv w2 (.value res))
+              else
+                let shifted : Int := x'.toInt * Int.ofNat (1 <<< amt.toNat)
+                let hi : Int := Int.ofNat (1 <<< (w2 - 1)) - 1
+                let lo : Int := -(Int.ofNat (1 <<< (w2 - 1)))
+                let clamped := if shifted > hi then hi else if shifted < lo then lo else shifted
+                .ok (.bv w2 (.value (BitVec.ofInt w2 clamped)))
+            else .error (.staticError "width mismatch in sshl.sat/ushl.sat")
+          | .bv w _, _ => .ok (.bv w .poison)
+          | _, _ => .error (.staticError s!"{name} expects integer arguments")
+      | _ => .error (.staticError s!"{name} expects 2 arguments")
+  else if strHasPrefix name "llvm.scmp" || strHasPrefix name "llvm.ucmp" then
+    some <| match argVals with
+      | [v1, v2] =>
+        let isSigned := strHasPrefix name "llvm.scmp"
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i8
+        let rw := match resElemTy with | .int w => w | _ => 8
+        liftBinaryPure resElemTy v1 v2 fun a b =>
+          match a, b with
+          | .bv w1 (.value x), .bv w2 (.value y) =>
+            if h : w1 = w2 then
+              let x' : BitVec w2 := h ▸ x
+              let cmp : Int :=
+                if isSigned then
+                  if x'.toInt < y.toInt then -1 else if x'.toInt > y.toInt then 1 else 0
+                else
+                  if x'.toNat < y.toNat then -1 else if x'.toNat > y.toNat then 1 else 0
+              .ok (.bv rw (.value (BitVec.ofInt rw cmp)))
+            else .error (.staticError "width mismatch in scmp/ucmp")
+          | .bv _ _, _ => .ok (.bv rw .poison)
+          | _, _ => .error (.staticError s!"{name} expects integer arguments")
+      | _ => .error (.staticError s!"{name} expects 2 arguments")
+  else if strHasPrefix name "llvm.smulh" || strHasPrefix name "llvm.umulh" then
+    some <| match argVals with
+      | [v1, v2] =>
+        let isSigned := strHasPrefix name "llvm.smulh"
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
+        liftBinaryPure resElemTy v1 v2 fun a b =>
+          match a, b with
+          | .bv w1 (.value x), .bv w2 (.value y) =>
+            if h : w1 = w2 then
+              let x' : BitVec w2 := h ▸ x
+              if !isSigned then
+                .ok (.bv w2 (.value (BitVec.ofNat w2 ((x'.toNat * y.toNat) >>> w2))))
+              else
+                let prod : Int := x'.toInt * y.toInt
+                let q : Int := Int.fdiv prod (Int.ofNat (1 <<< w2))
+                .ok (.bv w2 (.value (BitVec.ofInt w2 q)))
+            else .error (.staticError "width mismatch in smulh/umulh")
+          | .bv w _, _ => .ok (.bv w .poison)
+          | _, _ => .error (.staticError s!"{name} expects integer arguments")
+      | _ => .error (.staticError s!"{name} expects 2 arguments")
+  else if strHasPrefix name "llvm.clmul" then
+    some <| match argVals with
+      | [v1, v2] =>
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
+        liftBinaryPure resElemTy v1 v2 fun a b =>
+          match a, b with
+          | .bv w1 (.value x), .bv w2 (.value y) =>
+            if h : w1 = w2 then
+              let x' : BitVec w2 := h ▸ x
+              let acc := (List.range w2).foldl (init := 0) fun acc i =>
+                if ((y.toNat >>> i) &&& 1) == 1 then acc ^^^ (x'.toNat <<< i) else acc
+              .ok (.bv w2 (.value (BitVec.ofNat w2 acc)))
+            else .error (.staticError "width mismatch in clmul")
+          | .bv w _, _ => .ok (.bv w .poison)
+          | _, _ => .error (.staticError "llvm.clmul expects integer arguments")
+      | _ => .error (.staticError "llvm.clmul expects 2 arguments")
+  else if strHasPrefix name "llvm.pdep" || strHasPrefix name "llvm.pext" then
+    some <| match argVals with
+      | [v1, v2] =>
+        let isDep := strHasPrefix name "llvm.pdep"
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
+        liftBinaryPure resElemTy v1 v2 fun a b =>
+          match a, b with
+          | .bv w1 (.value src), .bv w2 (.value mask) =>
+            if h : w1 = w2 then
+              let src' : BitVec w2 := h ▸ src
+              let (res, _) := (List.range w2).foldl (init := (0, 0)) fun (acc, k) i =>
+                if ((mask.toNat >>> i) &&& 1) == 1 then
+                  if isDep then
+                    let bit := (src'.toNat >>> k) &&& 1
+                    (acc ||| (bit <<< i), k + 1)
+                  else
+                    let bit := (src'.toNat >>> i) &&& 1
+                    (acc ||| (bit <<< k), k + 1)
+                else (acc, k)
+              .ok (.bv w2 (.value (BitVec.ofNat w2 res)))
+            else .error (.staticError "width mismatch in pdep/pext")
+          | .bv w _, _ => .ok (.bv w .poison)
+          | _, _ => .error (.staticError s!"{name} expects integer arguments")
+      | _ => .error (.staticError s!"{name} expects 2 arguments")
+  else if strHasPrefix name "llvm.vscale" then
+    some <| match retTy with
+      | .ret (.int w) => .ok (.bv w (.value (BitVec.ofNat w cfg.vscale)))
+      | _ => .error (.staticError "llvm.vscale expects integer return type")
+  else if strHasPrefix name "llvm.stepvector" then
+    some <| match retTy with
+      | .ret (.vector n (.int w)) =>
+        let elems := (List.range n).map fun i => RegisterValue.bv w (.value (BitVec.ofNat w i))
+        .ok (.vector (.int w) elems)
+      | _ => .error (.staticError "llvm.stepvector expects integer vector return type")
+  else if strHasPrefix name "llvm.vector.reverse" then
+    some <| match argVals with
+      | [.vector elemTy elems] => .ok (.vector elemTy elems.reverse)
+      | _ => .error (.staticError "llvm.vector.reverse expects 1 vector argument")
+  else if strHasPrefix name "llvm.vector.extract" then
+    some <| match argVals, retTy with
+      | [.vector elemTy elems, .bv _ (.value idxBV)], .ret (.vector subLen _) =>
+        let idx := idxBV.toNat
+        if idx + subLen > elems.length then
+          .ok (.vector elemTy (List.replicate subLen (poisonOf elemTy)))
+        else
+          .ok (.vector elemTy ((elems.drop idx).take subLen))
+      | [.vector elemTy _, .bv _ .poison], .ret (.vector subLen _) =>
+        .ok (.vector elemTy (List.replicate subLen (poisonOf elemTy)))
+      | _, _ => .error (.staticError "llvm.vector.extract expects (vector, int)")
+  else if strHasPrefix name "llvm.vector.insert" then
+    some <| match argVals with
+      | [.vector elemTy dst, .vector _ src, .bv _ (.value idxBV)] =>
+        let idx := idxBV.toNat
+        if idx + src.length > dst.length then
+          .ok (.vector elemTy (List.replicate dst.length (poisonOf elemTy)))
+        else
+          .ok (.vector elemTy ((dst.take idx) ++ src ++ (dst.drop (idx + src.length))))
+      | [.vector elemTy dst, .vector _ _, .bv _ .poison] =>
+        .ok (.vector elemTy (List.replicate dst.length (poisonOf elemTy)))
+      | _ => .error (.staticError "llvm.vector.insert expects (vector, vector, int)")
+  else if strHasPrefix name "llvm.vector.interleave" then
+    some <| match argVals with
+      | .vector elemTy first :: rest =>
+        let vecs := first :: rest.map (fun | .vector _ es => es | _ => [])
+        let n := first.length
+        let out := (List.range n).flatMap fun i =>
+          vecs.map fun v => v.getD i (poisonOf elemTy)
+        .ok (.vector elemTy out)
+      | _ => .error (.staticError s!"{name} expects vector arguments")
+  else if strHasPrefix name "llvm.vector.deinterleave" then
+    some <| match argVals, retTy with
+      | [.vector elemTy elems], .ret (.struct packed fieldTys) =>
+        let k := fieldTys.length
+        if k == 0 then .error (.staticError s!"{name}: empty struct return")
+        else
+          let n := elems.length / k
+          let fields := (List.range k).map fun j =>
+            RegisterValue.vector elemTy ((List.range n).map fun i => elems.getD (i * k + j) (poisonOf elemTy))
+          .ok (.struct packed fieldTys fields)
+      | _, _ => .error (.staticError s!"{name} expects 1 vector argument and struct return")
+  else if strHasPrefix name "llvm.vector.splice.left" || strHasPrefix name "llvm.vector.splice.right" then
+    some <| match argVals with
+      | [.vector elemTy v1, .vector _ v2, .bv _ (.value idxBV)] =>
+        let len := v1.length
+        let idx := idxBV.toNat
+        if idx > len then
+          .ok (.vector elemTy (List.replicate len (poisonOf elemTy)))
+        else if strHasPrefix name "llvm.vector.splice.left" then
+          .ok (.vector elemTy ((v1.drop idx) ++ (v2.take idx)))
+        else
+          let off := len - idx
+          .ok (.vector elemTy ((v1.drop off) ++ (v2.take off)))
+      | [.vector elemTy v1, .vector _ _, .bv _ .poison] =>
+        .ok (.vector elemTy (List.replicate v1.length (poisonOf elemTy)))
+      | _ => .error (.staticError s!"{name} expects (vector, vector, int)")
+  else if strHasPrefix name "llvm.get.active.lane.mask" then
+    some <| match argVals, retTy with
+      | [.bv _ (.value baseBV), .bv _ (.value nBV)], .ret (.vector len .i1) =>
+        let base := baseBV.toNat
+        let n := nBV.toNat
+        let elems := (List.range len).map fun i =>
+          let active := base < n && i < n - base
+          RegisterValue.bv 1 (.value (BitVec.ofBool active))
+        .ok (.vector .i1 elems)
+      | [.bv _ _, .bv _ _], .ret (.vector len .i1) =>
+        .ok (.vector .i1 (List.replicate len (.bv 1 .poison)))
+      | _, _ => .error (.staticError "llvm.get.active.lane.mask expects 2 integers and <N x i1> return")
+  else if strHasPrefix name "llvm.mask.beforefirst" then
+    some <| match argVals with
+      | [.vector .i1 elems] =>
+        let rec go (seenTrue seenPoison : Bool) : List RegisterValue → List RegisterValue
+          | [] => []
+          | e :: es =>
+            if seenTrue then .bv 1 (.value 0#1) :: go true seenPoison es
+            else if seenPoison then .bv 1 .poison :: go false true es
+            else match e with
+              | .bv 1 (.value b) =>
+                if b == 1#1 then .bv 1 (.value 0#1) :: go true false es
+                else .bv 1 (.value 1#1) :: go false false es
+              | _ => .bv 1 .poison :: go false true es
+        .ok (.vector .i1 (go false false elems))
+      | _ => .error (.staticError "llvm.mask.beforefirst expects <N x i1>")
+  else if strHasPrefix name "llvm.vp.merge" then
+    some <| match argVals with
+      | [.vector _ mask, .vector elemTy onTrue, .vector _ onFalse, .bv _ (.value evlBV)] =>
+        let len := onTrue.length
+        let evl := evlBV.toNat
+        if evl > len then
+          .ok (.vector elemTy (List.replicate len (poisonOf elemTy)))
+        else
+          let out := (List.range len).map fun i =>
+            if i ≥ evl then onFalse.getD i (poisonOf elemTy)
+            else match mask.getD i (.bv 1 .poison) with
+              | .bv 1 (.value b) =>
+                if b == 1#1 then onTrue.getD i (poisonOf elemTy)
+                else onFalse.getD i (poisonOf elemTy)
+              | _ => poisonOf elemTy
+          .ok (.vector elemTy out)
+      | [.vector _ _, .vector elemTy onTrue, .vector _ _, .bv _ .poison] =>
+        .ok (.vector elemTy (List.replicate onTrue.length (poisonOf elemTy)))
+      | _ => .error (.staticError "llvm.vp.merge expects (mask, onTrue, onFalse, evl)")
+  else if strHasPrefix name "llvm.matrix.transpose" then
+    some <| match argVals with
+      | [.vector elemTy elems, .bv _ (.value rBV), .bv _ (.value cBV)] =>
+        let rows := rBV.toNat
+        let cols := cBV.toNat
+        let out := (List.range rows).flatMap fun r =>
+          (List.range cols).map fun c =>
+            elems.getD (c * rows + r) (poisonOf elemTy)
+        .ok (.vector elemTy out)
+      | _ => .error (.staticError "llvm.matrix.transpose expects (vector, rows, cols)")
+  else if strHasPrefix name "llvm.experimental.cttz.elts" then
+    some <| match argVals, retTy with
+      | [.vector _ elems, .bv 1 (.value zpBV)], .ret (.int rw) =>
+        let isZeroPoison := zpBV == 1#1
+        let rec goCttz (idx : Nat) : List RegisterValue → RegisterValue
+          | [] => if isZeroPoison then .bv rw .poison else .bv rw (.value (BitVec.ofNat rw elems.length))
+          | e :: es =>
+            match e with
+            | .bv _ (.value b) => if b.toNat != 0 then .bv rw (.value (BitVec.ofNat rw idx)) else goCttz (idx + 1) es
+            | _ => .bv rw .poison
+        .ok (goCttz 0 elems)
+      | [_, _], .ret (.int rw) => .ok (.bv rw .poison)
+      | _, _ => .error (.staticError "llvm.experimental.cttz.elts expects (vector, i1)")
+  else if strHasPrefix name "llvm.experimental.get.vector.length" then
+    some <| match argVals, retTy with
+      | [.bv _ (.value cntBV), .bv _ (.value vfBV), .bv 1 (.value scBV)], .ret (.int rw) =>
+        let mult := if scBV == 1#1 then cfg.vscale else 1
+        let maxLanes := vfBV.toNat * mult
+        .ok (.bv rw (.value (BitVec.ofNat rw (min cntBV.toNat maxLanes))))
+      | [_, _, _], .ret (.int rw) => .ok (.bv rw .poison)
+      | _, _ => .error (.staticError "llvm.experimental.get.vector.length expects (cnt, vf, scalable)")
+  else if strHasPrefix name "llvm.experimental.vector.compress" then
+    some <| match argVals with
+      | [.vector elemTy vec, .vector _ mask, .vector _ passthru] =>
+        let hasPoisonMask := mask.any fun | .bv 1 (.value _) => false | _ => true
+        if hasPoisonMask then
+          .ok (.vector elemTy (List.replicate vec.length (poisonOf elemTy)))
+        else
+          let active := (List.range vec.length).filterMap fun i =>
+            match mask.getD i (.bv 1 (.value 0#1)) with
+            | .bv 1 (.value b) => if b == 1#1 then some (vec.getD i (poisonOf elemTy)) else none
+            | _ => none
+          let out := active ++ (passthru.drop active.length)
+          .ok (.vector elemTy (out.take vec.length))
+      | _ => .error (.staticError "llvm.experimental.vector.compress expects (vec, mask, passthru)")
+  else if strHasPrefix name "llvm.experimental.vector.extract.last.active" then
+    some <| match argVals with
+      | [.vector elemTy vec, .vector _ mask, passthru] =>
+        let rec findLast : List (RegisterValue × RegisterValue) → RegisterValue
+          | [] => passthru
+          | (v, m) :: rest =>
+            match m with
+            | .bv 1 (.value b) => if b == 1#1 then v else findLast rest
+            | _ => poisonOf elemTy
+        .ok (findLast (vec.zip mask).reverse)
+      | _ => .error (.staticError "llvm.experimental.vector.extract.last.active expects (vec, mask, passthru)")
+  else if strHasPrefix name "llvm.experimental.vector.match" then
+    some <| match argVals with
+      | [.vector _ vec, .vector _ setElems] =>
+        let hasPoisonSet := setElems.any (·.containsPoison)
+        let out := vec.map fun x =>
+          if x.containsPoison then RegisterValue.bv 1 .poison
+          else if setElems.any (fun s => !s.containsPoison && s == x) then RegisterValue.bv 1 (.value 1#1)
+          else if hasPoisonSet then RegisterValue.bv 1 .poison
+          else RegisterValue.bv 1 (.value 0#1)
+        .ok (.vector .i1 out)
+      | _ => .error (.staticError "llvm.experimental.vector.match expects (vec, set)")
+  else if strHasPrefix name "llvm.vector.reduce.add" || strHasPrefix name "llvm.vector.reduce.mul" ||
+          strHasPrefix name "llvm.vector.reduce.and" || strHasPrefix name "llvm.vector.reduce.or" ||
+          strHasPrefix name "llvm.vector.reduce.xor" || strHasPrefix name "llvm.vector.reduce.smax" ||
+          strHasPrefix name "llvm.vector.reduce.smin" || strHasPrefix name "llvm.vector.reduce.umax" ||
+          strHasPrefix name "llvm.vector.reduce.umin" then
+    some <| match argVals with
+      | [.vector _ (first :: rest)] =>
+        let combine {w : Nat} (a b : BitVec w) : BitVec w :=
+          if strHasPrefix name "llvm.vector.reduce.add" then a + b
+          else if strHasPrefix name "llvm.vector.reduce.mul" then a * b
+          else if strHasPrefix name "llvm.vector.reduce.and" then a &&& b
+          else if strHasPrefix name "llvm.vector.reduce.or" then a ||| b
+          else if strHasPrefix name "llvm.vector.reduce.xor" then a ^^^ b
+          else if strHasPrefix name "llvm.vector.reduce.smax" then if a.toInt ≥ b.toInt then a else b
+          else if strHasPrefix name "llvm.vector.reduce.smin" then if a.toInt ≤ b.toInt then a else b
+          else if strHasPrefix name "llvm.vector.reduce.umax" then if a.toNat ≥ b.toNat then a else b
+          else if a.toNat ≤ b.toNat then a else b
+        let rec goIntRed (acc : RegisterValue) : List RegisterValue → Except ExecError RegisterValue
+          | [] => .ok acc
+          | e :: es =>
+            match acc, e with
+            | .bv w1 (.value a), .bv w2 (.value b) =>
+              if h : w1 = w2 then goIntRed (.bv w2 (.value (combine (h ▸ a) b))) es
+              else .error (.staticError s!"width mismatch in {name}")
+            | .bv w _, .bv _ _ => goIntRed (.bv w .poison) es
+            | _, _ => .error (.staticError s!"expected integer elements in {name}")
+        goIntRed first rest
+      | _ => .error (.staticError s!"{name} expects a non-empty integer vector")
+  else
+    none
+
 /-- Pure non-memory LLVM intrinsics (integer, bit-manipulation, saturating, overflow, FP, assume). -/
 def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : LlvmRetType)
     (fmf : FastMathFlags) (argVals : List RegisterValue) (o : OracleState) :
@@ -485,16 +814,31 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
       | _ => .error (.staticError s!"{name} expects 1 argument")
   else if strHasPrefix name "llvm.fshl" || strHasPrefix name "llvm.fshr" then
     some <| match argVals with
-      | [.bv w1 (.value a), .bv w2 (.value b), .bv w3 (.value amt)] =>
-        if h1 : w1 = w3 then
-          if h2 : w2 = w3 then
-            let r := if strHasPrefix name "llvm.fshl"
-              then bvFshl (h1 ▸ a) (h2 ▸ b) amt
-              else bvFshr (h1 ▸ a) (h2 ▸ b) amt
-            .ok (.bv w3 (.value r), o)
-          else .error (.staticError "width mismatch in fshl/fshr")
-        else .error (.staticError "width mismatch in fshl/fshr")
-      | [.bv w _, _, _] => .ok (.bv w .poison, o)
+      | [v1, v2, v3] =>
+        let isLeft := strHasPrefix name "llvm.fshl"
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .i32
+        let doScalar (a b c : RegisterValue) : Except ExecError RegisterValue :=
+          match a, b, c with
+          | .bv w1 (.value x), .bv w2 (.value y), .bv w3 (.value amt) =>
+            if h1 : w1 = w3 then
+              if h2 : w2 = w3 then
+                let r := if isLeft then bvFshl (h1 ▸ x) (h2 ▸ y) amt else bvFshr (h1 ▸ x) (h2 ▸ y) amt
+                .ok (.bv w3 (.value r))
+              else .error (.staticError "width mismatch in fshl/fshr")
+            else .error (.staticError "width mismatch in fshl/fshr")
+          | .bv w _, _, _ => .ok (.bv w .poison)
+          | _, _, _ => .error (.staticError s!"{name} expects 3 integer arguments")
+        match v1, v2, v3 with
+        | .vector _ xs, .vector _ ys, .vector _ zs =>
+          let rec go : List RegisterValue → List RegisterValue → List RegisterValue → Except ExecError (List RegisterValue)
+            | [], [], [] => .ok []
+            | a :: as, b :: bs, c :: cs => do
+              let r ← doScalar a b c
+              let rs ← go as bs cs
+              .ok (r :: rs)
+            | _, _, _ => .error (.staticError "mismatched vector lengths in fshl/fshr")
+          (go xs ys zs).map fun rs => (.vector resElemTy rs, o)
+        | _, _, _ => (doScalar v1 v2 v3).map (·, o)
       | _ => .error (.staticError s!"{name} expects 3 integer arguments")
   else if strHasPrefix name "llvm.sadd.sat" || strHasPrefix name "llvm.uadd.sat" ||
           strHasPrefix name "llvm.ssub.sat" || strHasPrefix name "llvm.usub.sat" then
@@ -520,21 +864,38 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           strHasPrefix name "llvm.ssub.with.overflow" || strHasPrefix name "llvm.usub.with.overflow" ||
           strHasPrefix name "llvm.smul.with.overflow" || strHasPrefix name "llvm.umul.with.overflow" then
     some <| match argVals with
-      | [.bv w1 (.value x), .bv w2 (.value y)] =>
-        if h : w1 = w2 then
-          let x' : BitVec w2 := h ▸ x
-          let (res, ov) :=
-            if strHasPrefix name "llvm.sadd" then (x' + y, BitVec.saddOverflow x' y)
-            else if strHasPrefix name "llvm.uadd" then (x' + y, BitVec.uaddOverflow x' y)
-            else if strHasPrefix name "llvm.ssub" then (x' - y, BitVec.ssubOverflow x' y)
-            else if strHasPrefix name "llvm.usub" then (x' - y, BitVec.usubOverflow x' y)
-            else if strHasPrefix name "llvm.smul" then (x' * y, BitVec.smulOverflow x' y)
-            else (x' * y, BitVec.umulOverflow x' y)
-          .ok (.struct false [.int w2, .int 1]
-            [.bv w2 (.value res), .bv 1 (.value (BitVec.ofBool ov))], o)
-        else .error (.staticError "width mismatch in with.overflow intrinsic")
-      | [.bv w _, _] =>
-        .ok (.struct false [.int w, .int 1] [.bv w .poison, .bv 1 .poison], o)
+      | [v1, v2] =>
+        let doScalar (a b : RegisterValue) : Except ExecError (RegisterValue × RegisterValue) :=
+          match a, b with
+          | .bv w1 (.value x), .bv w2 (.value y) =>
+            if h : w1 = w2 then
+              let x' : BitVec w2 := h ▸ x
+              let (res, ov) :=
+                if strHasPrefix name "llvm.sadd" then (x' + y, BitVec.saddOverflow x' y)
+                else if strHasPrefix name "llvm.uadd" then (x' + y, BitVec.uaddOverflow x' y)
+                else if strHasPrefix name "llvm.ssub" then (x' - y, BitVec.ssubOverflow x' y)
+                else if strHasPrefix name "llvm.usub" then (x' - y, BitVec.usubOverflow x' y)
+                else if strHasPrefix name "llvm.smul" then (x' * y, BitVec.smulOverflow x' y)
+                else (x' * y, BitVec.umulOverflow x' y)
+              .ok (.bv w2 (.value res), .bv 1 (.value (BitVec.ofBool ov)))
+            else .error (.staticError "width mismatch in with.overflow intrinsic")
+          | .bv w _, _ => .ok (.bv w .poison, .bv 1 .poison)
+          | _, _ => .error (.staticError s!"{name} expects 2 integer arguments")
+        match v1, v2 with
+        | .vector elemTy xs, .vector _ ys =>
+          let rec goOv : List RegisterValue → List RegisterValue → Except ExecError (List RegisterValue × List RegisterValue)
+            | [], [] => .ok ([], [])
+            | a :: as, b :: bs => do
+              let (r, ov) ← doScalar a b
+              let (rs, ovs) ← goOv as bs
+              .ok (r :: rs, ov :: ovs)
+            | _, _ => .error (.staticError "mismatched vector lengths in with.overflow intrinsic")
+          (goOv xs ys).map fun (rs, ovs) =>
+            let n := xs.length
+            (.struct false [.vector n elemTy, .vector n .i1] [.vector elemTy rs, .vector .i1 ovs], o)
+        | .bv w _, _ =>
+          (doScalar v1 v2).map fun (r, ov) => (.struct false [.int w, .int 1] [r, ov], o)
+        | _, _ => .error (.staticError s!"{name} expects 2 integer arguments")
       | _ => .error (.staticError s!"{name} expects 2 integer arguments")
   else if strHasPrefix name "llvm.fabs" then
     some <| match argVals with
@@ -577,17 +938,39 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
       | _ => .error (.staticError "llvm.copysign expects 2 arguments")
   else if strHasPrefix name "llvm.fma" || strHasPrefix name "llvm.fmuladd" then
     some <| match argVals with
-      | [.float ft1 (.value a), .float ft2 (.value b), .float ft3 (.value c)] =>
-        if h1 : ft1 = ft3 then
-          if h2 : ft2 = ft3 then
-            let res := IEEEFloat.fma cfg.roundingMode (h1 ▸ a) (h2 ▸ b) c
-            let (nanSign, o1) := o.nextBool
-            let (nanPick, o2) := o1.nextNat
-            let final := applyNaNPropagation cfg.nanMode res [h1 ▸ a, h2 ▸ b, c] nanSign nanPick
-            .ok (.float ft3 (handleFMF fmf false false final), o2)
-          else .error (.staticError "Mismatched float types in llvm.fma")
-        else .error (.staticError "Mismatched float types in llvm.fma")
-      | [.float ft _, _, _] => .ok (.float ft .poison, o)
+      | [v1, v2, v3] =>
+        let useFma := strHasPrefix name "llvm.fma" || cfg.fuseFMulAdd
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .f32
+        let doScalar (ea eb ec : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
+          match ea, eb, ec with
+          | .float ft1 (.value a), .float ft2 (.value b), .float ft3 (.value c) =>
+            if h1 : ft1 = ft3 then
+              if h2 : ft2 = ft3 then
+                let a' := h1 ▸ a
+                let b' := h2 ▸ b
+                let res :=
+                  if useFma then IEEEFloat.fma cfg.roundingMode a' b' c
+                  else IEEEFloat.add cfg.roundingMode (IEEEFloat.mul cfg.roundingMode a' b') c
+                let (nanSign, o1) := o0.nextBool
+                let (nanPick, o2) := o1.nextNat
+                let final := applyNaNPropagation cfg.nanMode res [a', b', c] nanSign nanPick
+                .ok (.float ft3 (handleFMF fmf false false final), o2)
+              else .error (.staticError "Mismatched float types in llvm.fma")
+            else .error (.staticError "Mismatched float types in llvm.fma")
+          | .float ft _, _, _ => .ok (.float ft .poison, o0)
+          | _, _, _ => .error (.staticError s!"{name} expects 3 float arguments")
+        match v1, v2, v3 with
+        | .vector _ xs, .vector _ ys, .vector _ zs =>
+          let rec goFma : List RegisterValue → List RegisterValue → List RegisterValue → OracleState →
+              Except ExecError (List RegisterValue × OracleState)
+            | [], [], [], o0 => .ok ([], o0)
+            | a :: as, b :: bs, c :: cs, o0 => do
+              let (r, o1) ← doScalar a b c o0
+              let (rs, o2) ← goFma as bs cs o1
+              .ok (r :: rs, o2)
+            | _, _, _, _ => .error (.staticError "Mismatched vector lengths in llvm.fma")
+          (goFma xs ys zs o).map fun (rs, o') => (.vector resElemTy rs, o')
+        | _, _, _ => doScalar v1 v2 v3 o
       | _ => .error (.staticError s!"{name} expects 3 float arguments")
   else if strHasPrefix name "llvm.minimum" || strHasPrefix name "llvm.maximum" ||
           strHasPrefix name "llvm.minnum" || strHasPrefix name "llvm.maxnum" then
@@ -795,7 +1178,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
         goRed first rest o
       | _ => .error (.staticError s!"{name} expects a non-empty float vector argument")
   else
-    none
+    (evalPureDetIntrinsic? cfg name retTy fmf argVals).map fun r => r.map (·, o)
 
 /-- Decode a concrete `MemByte` into a `Nat` in `0..255`, returning `none` if any bit is poison/undef. -/
 private def memByteToConcreteNat? (mb : MemByte) : Option Nat :=
@@ -1187,6 +1570,506 @@ theorem evalNonAllocLibcall?_preserves_wf {dl mem name argVals res mem'}
                     · cases h
                     · cases h
 
+/-- Add a signed byte offset to a pointer, preserving provenance and address width. -/
+private def ptrAddBytes (p : Pointer) (delta : Int) : Pointer :=
+  { p with addr := p.addr + BitVec.ofInt p.addrWidth delta }
+
+/-- Load a single element of type `elemTy` from pointer `p` with alignment `align`. -/
+private def loadElemFromPtr (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (p : Pointer) (elemTy : LlvmType) (align : Nat) (o : OracleState) :
+    Except ExecError (RegisterValue × OracleState) :=
+  let sz := dl.typeStoreSize elemTy
+  match mem.verifyMemAccess p sz align false with
+  | .error e => .error e
+  | .ok (mo, off) =>
+    let bytes := MemoryState.readObjectBytes mo off sz
+    let (v, _, o') := bytesToValue dl cfg bytes elemTy o
+    .ok (v, o')
+
+/-- Store a single element of type `elemTy` to pointer `p` with alignment `align`. -/
+private def storeElemToPtr (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (p : Pointer) (elemTy : LlvmType) (val : RegisterValue) (align : Nat) :
+    Except ExecError MemoryState :=
+  let sz := dl.typeStoreSize elemTy
+  match mem.verifyMemAccess p sz align true with
+  | .error e => .error e
+  | .ok (mo, off) =>
+    let bytes := valueToBytes dl cfg val elemTy
+    .ok (mem.writeObjectBytes mo.allocId off bytes)
+
+private theorem storeElemToPtr_preserves_wf {dl cfg mem p elemTy val align mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : storeElemToPtr dl cfg mem p elemTy val align = .ok mem') :
+    MemoryState.WellFormed mem' := by
+  unfold storeElemToPtr at h; dsimp only at h
+  cases hv : mem.verifyMemAccess p (dl.typeStoreSize elemTy) align true with
+  | error e => rw [hv] at h; cases h
+  | ok pair => rw [hv] at h; cases h; exact MemoryState.writeObjectBytes_preserves_wf hwf _ _ _
+
+/-- Sequentially execute a list of `(Pointer, RegisterValue)` element stores. -/
+private def execStoreList (dl : DataLayout) (cfg : SemanticsConfig) (elemTy : LlvmType) (align : Nat)
+    (mem : MemoryState) : List (Pointer × RegisterValue) → Except ExecError MemoryState
+  | [] => .ok mem
+  | (p, v) :: rest =>
+    match storeElemToPtr dl cfg mem p elemTy v align with
+    | .error e => .error e
+    | .ok mem' => execStoreList dl cfg elemTy align mem' rest
+
+private theorem execStoreList_preserves_wf {dl cfg elemTy align mem writes mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : execStoreList dl cfg elemTy align mem writes = .ok mem') :
+    MemoryState.WellFormed mem' := by
+  induction writes generalizing mem with
+  | nil => unfold execStoreList at h; cases h; exact hwf
+  | cons w rest ih =>
+    unfold execStoreList at h
+    cases hs : storeElemToPtr dl cfg mem w.1 elemTy w.2 align with
+    | error e => rw [hs] at h; cases h
+    | ok m1 => rw [hs] at h; exact ih (storeElemToPtr_preserves_wf hwf hs) h
+
+/-- Sequentially execute active lanes of `llvm.experimental.vector.histogram.{add,uadd.sat,umax,umin}`. -/
+private def execHistogramLoop (dl : DataLayout) (cfg : SemanticsConfig) (op : String)
+    (w : Nat) (incVal : PoisonOr (BitVec w)) (mem : MemoryState) :
+    List Pointer → Except ExecError MemoryState
+  | [] => .ok mem
+  | p :: rest =>
+    let elemTy := LlvmType.int w
+    match loadElemFromPtr dl cfg mem p elemTy 1 default with
+    | .error e => .error e
+    | .ok (curVal, _) =>
+      let newVal : RegisterValue :=
+        match curVal, incVal with
+        | .bv w1 (.value x), .value inc =>
+          if h : w1 = w then
+            let x' : BitVec w := h ▸ x
+            let r : BitVec w :=
+              if op == "add" then x' + inc
+              else if op == "uadd.sat" then bvUAddSat x' inc
+              else if op == "umax" then if x'.toNat ≥ inc.toNat then x' else inc
+              else if x'.toNat ≤ inc.toNat then x' else inc
+            .bv w (.value r)
+          else .bv w .poison
+        | _, _ => .bv w .poison
+      match storeElemToPtr dl cfg mem p elemTy newVal 1 with
+      | .error e => .error e
+      | .ok mem' => execHistogramLoop dl cfg op w incVal mem' rest
+
+private theorem execHistogramLoop_preserves_wf {dl cfg op w incVal mem ptrs mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : execHistogramLoop dl cfg op w incVal mem ptrs = .ok mem') :
+    MemoryState.WellFormed mem' := by
+  induction ptrs generalizing mem with
+  | nil => unfold execHistogramLoop at h; cases h; exact hwf
+  | cons p rest ih =>
+    unfold execHistogramLoop at h; dsimp only at h
+    cases hl : loadElemFromPtr dl cfg mem p (.int w) 1 default with
+    | error e => rw [hl] at h; cases h
+    | ok pair =>
+      rw [hl] at h; dsimp only at h
+      cases hs : storeElemToPtr dl cfg mem p (.int w) _ 1 with
+      | error e => rw [hs] at h; cases h
+      | ok m1 => rw [hs] at h; exact ih (storeElemToPtr_preserves_wf hwf hs) h
+
+/-- Read-only vector/masked/VP/speculative memory load intrinsics (never modify `mem`). -/
+def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (name : String) (retTy : LlvmRetType) (argVals : List RegisterValue) (o : OracleState) :
+    Option (Except ExecError (RegisterValue × OracleState)) :=
+  if strHasPrefix name "llvm.masked.load" then
+    some <| match argVals, retTy with
+      | [ptrVal, .vector _ mask, .vector elemTy passthru], .ret (.vector len _) =>
+        let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
+        let rec goLoad (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
+            Except ExecError (List RegisterValue × OracleState) :=
+          if i ≥ len then .ok (acc.reverse, o0)
+          else match mask.getD i (.bv 1 .poison) with
+            | .bv 1 (.value b) =>
+              if b == 1#1 then
+                match ptrVal with
+                | .ptr _ (.value p) =>
+                  match loadElemFromPtr dl cfg mem (ptrAddBytes p (Int.ofNat i * stride)) elemTy 1 o0 with
+                  | .error e => .error e
+                  | .ok (v, o1) => goLoad (i + 1) o1 (v :: acc)
+                | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.load")
+              else goLoad (i + 1) o0 (passthru.getD i (poisonOf elemTy) :: acc)
+            | _ => .error (.immediateUB "poison mask lane in llvm.masked.load")
+        termination_by len - i
+        (goLoad 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
+      | _, _ => .error (.staticError "llvm.masked.load expects (ptr, mask, passthru)")
+  else if strHasPrefix name "llvm.masked.expandload" then
+    some <| match argVals, retTy with
+      | [ptrVal, .vector _ mask, .vector elemTy passthru], .ret (.vector len _) =>
+        let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
+        let rec goExpand (i memIdx : Nat) (o0 : OracleState) (acc : List RegisterValue) :
+            Except ExecError (List RegisterValue × OracleState) :=
+          if i ≥ len then .ok (acc.reverse, o0)
+          else match mask.getD i (.bv 1 .poison) with
+            | .bv 1 (.value b) =>
+              if b == 1#1 then
+                match ptrVal with
+                | .ptr _ (.value p) =>
+                  match loadElemFromPtr dl cfg mem (ptrAddBytes p (Int.ofNat memIdx * stride)) elemTy 1 o0 with
+                  | .error e => .error e
+                  | .ok (v, o1) => goExpand (i + 1) (memIdx + 1) o1 (v :: acc)
+                | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.expandload")
+              else goExpand (i + 1) memIdx o0 (passthru.getD i (poisonOf elemTy) :: acc)
+            | _ => .error (.immediateUB "poison mask lane in llvm.masked.expandload")
+        termination_by len - i
+        (goExpand 0 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
+      | _, _ => .error (.staticError "llvm.masked.expandload expects (ptr, mask, passthru)")
+  else if strHasPrefix name "llvm.masked.gather" then
+    some <| match argVals, retTy with
+      | [.vector _ ptrs, .vector _ mask, .vector elemTy passthru], .ret (.vector len _) =>
+        let rec goGather (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
+            Except ExecError (List RegisterValue × OracleState) :=
+          if i ≥ len then .ok (acc.reverse, o0)
+          else match mask.getD i (.bv 1 .poison) with
+            | .bv 1 (.value b) =>
+              if b == 1#1 then
+                match ptrs.getD i (.ptr 0 .poison) with
+                | .ptr _ (.value p) =>
+                  match loadElemFromPtr dl cfg mem p elemTy 1 o0 with
+                  | .error e => .error e
+                  | .ok (v, o1) => goGather (i + 1) o1 (v :: acc)
+                | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.gather")
+              else goGather (i + 1) o0 (passthru.getD i (poisonOf elemTy) :: acc)
+            | _ => .error (.immediateUB "poison mask lane in llvm.masked.gather")
+        termination_by len - i
+        (goGather 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
+      | _, _ => .error (.staticError "llvm.masked.gather expects (ptrs, mask, passthru)")
+  else if strHasPrefix name "llvm.vp.load" then
+    some <| match argVals, retTy with
+      | [ptrVal, .vector _ mask, .bv _ (.value evlBV)], .ret (.vector len elemTy) =>
+        let evl := evlBV.toNat
+        if evl > len then .error (.immediateUB "evl exceeds vector length in llvm.vp.load")
+        else
+          let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
+          let rec goVpLoad (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
+              Except ExecError (List RegisterValue × OracleState) :=
+            if i ≥ len then .ok (acc.reverse, o0)
+            else if i ≥ evl then goVpLoad (i + 1) o0 (poisonOf elemTy :: acc)
+            else match mask.getD i (.bv 1 .poison) with
+              | .bv 1 (.value b) =>
+                if b == 1#1 then
+                  match ptrVal with
+                  | .ptr _ (.value p) =>
+                    match loadElemFromPtr dl cfg mem (ptrAddBytes p (Int.ofNat i * stride)) elemTy 1 o0 with
+                    | .error e => .error e
+                    | .ok (v, o1) => goVpLoad (i + 1) o1 (v :: acc)
+                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.vp.load")
+                else goVpLoad (i + 1) o0 (poisonOf elemTy :: acc)
+              | _ => .error (.immediateUB "poison mask lane in llvm.vp.load")
+          termination_by len - i
+          (goVpLoad 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
+      | [_, _, .bv _ .poison], _ => .error (.immediateUB "poison evl in llvm.vp.load")
+      | _, _ => .error (.staticError "llvm.vp.load expects (ptr, mask, evl)")
+  else if strHasPrefix name "llvm.vp.gather" then
+    some <| match argVals, retTy with
+      | [.vector _ ptrs, .vector _ mask, .bv _ (.value evlBV)], .ret (.vector len elemTy) =>
+        let evl := evlBV.toNat
+        if evl > len then .error (.immediateUB "evl exceeds vector length in llvm.vp.gather")
+        else
+          let rec goVpGather (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
+              Except ExecError (List RegisterValue × OracleState) :=
+            if i ≥ len then .ok (acc.reverse, o0)
+            else if i ≥ evl then goVpGather (i + 1) o0 (poisonOf elemTy :: acc)
+            else match mask.getD i (.bv 1 .poison) with
+              | .bv 1 (.value b) =>
+                if b == 1#1 then
+                  match ptrs.getD i (.ptr 0 .poison) with
+                  | .ptr _ (.value p) =>
+                    match loadElemFromPtr dl cfg mem p elemTy 1 o0 with
+                    | .error e => .error e
+                    | .ok (v, o1) => goVpGather (i + 1) o1 (v :: acc)
+                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.vp.gather")
+                else goVpGather (i + 1) o0 (poisonOf elemTy :: acc)
+              | _ => .error (.immediateUB "poison mask lane in llvm.vp.gather")
+          termination_by len - i
+          (goVpGather 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
+      | [_, _, .bv _ .poison], _ => .error (.immediateUB "poison evl in llvm.vp.gather")
+      | _, _ => .error (.staticError "llvm.vp.gather expects (ptrs, mask, evl)")
+  else if strHasPrefix name "llvm.experimental.vp.strided.load" then
+    some <| match argVals, retTy with
+      | [ptrVal, .bv _ (.value strideBV), .vector _ mask, .bv _ (.value evlBV)], .ret (.vector len elemTy) =>
+        let evl := evlBV.toNat
+        if evl > len then .error (.immediateUB "evl exceeds vector length in llvm.experimental.vp.strided.load")
+        else
+          let stride : Int := strideBV.toInt
+          let rec goVpStrided (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
+              Except ExecError (List RegisterValue × OracleState) :=
+            if i ≥ len then .ok (acc.reverse, o0)
+            else if i ≥ evl then goVpStrided (i + 1) o0 (poisonOf elemTy :: acc)
+            else match mask.getD i (.bv 1 .poison) with
+              | .bv 1 (.value b) =>
+                if b == 1#1 then
+                  match ptrVal with
+                  | .ptr _ (.value p) =>
+                    match loadElemFromPtr dl cfg mem (ptrAddBytes p (Int.ofNat i * stride)) elemTy 1 o0 with
+                    | .error e => .error e
+                    | .ok (v, o1) => goVpStrided (i + 1) o1 (v :: acc)
+                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.experimental.vp.strided.load")
+                else goVpStrided (i + 1) o0 (poisonOf elemTy :: acc)
+              | _ => .error (.immediateUB "poison mask lane in llvm.experimental.vp.strided.load")
+          termination_by len - i
+          (goVpStrided 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
+      | [_, .bv _ .poison, _, _], _ | [_, _, _, .bv _ .poison], _ =>
+        .error (.immediateUB "poison stride/evl in llvm.experimental.vp.strided.load")
+      | _, _ => .error (.staticError "llvm.experimental.vp.strided.load expects (ptr, stride, mask, evl)")
+  else if strHasPrefix name "llvm.speculative.load" then
+    some <| match argVals, retTy with
+      | .ptr _ (.value p) :: .bv 1 (.value revBV) :: optBound, .ret ty =>
+        let totalSz := dl.typeStoreSize ty
+        let isRev := revBV == 1#1
+        let boundRes : Except ExecError Nat := match optBound with
+          | [] => .ok totalSz
+          | .bv _ .poison :: _ => .error (.immediateUB "poison bound in llvm.speculative.load")
+          | .bv _ (.value bBV) :: _ => .ok (min totalSz bBV.toNat)
+          | _ => .error (.immediateUB "invalid bound in llvm.speculative.load")
+        match boundRes with
+        | .error e => .error e
+        | .ok bound =>
+          if bound == 0 then
+            let bytes := Array.replicate totalSz MemByte.poison
+            let (v, _, o') := bytesToValue dl cfg bytes ty o
+            .ok (v, o')
+          else
+            let startOff := if isRev then totalSz - bound else 0
+            match mem.verifyMemAccess (ptrAddBytes p (Int.ofNat startOff)) bound 1 false with
+            | .error e => .error e
+            | .ok (mo, objOff) =>
+              let liveBytes := MemoryState.readObjectBytes mo objOff bound
+              let bytes := Array.ofFn (n := totalSz) fun i =>
+                if isRev then
+                  if i.val ≥ startOff then liveBytes.getD (i.val - startOff) MemByte.poison
+                  else MemByte.poison
+                else
+                  if i.val < bound then liveBytes.getD i.val MemByte.poison
+                  else MemByte.poison
+              let (v, _, o') := bytesToValue dl cfg bytes ty o
+              .ok (v, o')
+      | .ptr _ .poison :: _, _ | _ :: .bv 1 .poison :: _, _ =>
+        .error (.immediateUB "poison pointer or flag in llvm.speculative.load")
+      | _, _ => .error (.staticError "llvm.speculative.load expects (ptr, i1, ...)")
+  else
+    none
+
+private theorem evalVecMemRead?_none_indep {dl cfg mem name retTy argVals o o'}
+    (h : evalVecMemRead? dl cfg mem name retTy argVals o = none) :
+    evalVecMemRead? dl cfg mem name retTy argVals o' = none := by
+  have ite_none : ∀ {α : Type} {c : Prop} [Decidable c] {a : α} {b : Option α},
+      (if c then some a else b) = none → ¬ c ∧ b = none := by
+    intro α c _ a b h0; by_cases hc : c
+    · rw [if_pos hc] at h0; cases h0
+    · rw [if_neg hc] at h0; exact ⟨hc, h0⟩
+  unfold evalVecMemRead? at h ⊢
+  repeat (obtain ⟨hc, h⟩ := ite_none h; rw [if_neg hc])
+
+/-- Collect active `(Pointer, RegisterValue)` writes for masked/VP/strided/matrix stores. -/
+private def collectMaskedWrites (dl : DataLayout) (elemTy : LlvmType) (ptrVal : RegisterValue)
+    (vals mask : List RegisterValue) (evl : Nat) (stride : Int) (compress : Bool) :
+    Except ExecError (List (Pointer × RegisterValue)) :=
+  let rec go (i memIdx : Nat) (acc : List (Pointer × RegisterValue)) :
+      Except ExecError (List (Pointer × RegisterValue)) :=
+    if i ≥ evl then .ok acc.reverse
+    else match mask.getD i (.bv 1 .poison) with
+      | .bv 1 (.value b) =>
+        if b == 1#1 then
+          match ptrVal with
+          | .ptr _ (.value p) =>
+            let idx := if compress then memIdx else i
+            let p' := ptrAddBytes p (Int.ofNat idx * stride)
+            go (i + 1) (memIdx + 1) ((p', vals.getD i (poisonOf elemTy)) :: acc)
+          | _ => .error (.immediateUB "poison/invalid pointer in masked/vp store")
+        else go (i + 1) memIdx acc
+      | _ => .error (.immediateUB "poison mask lane in masked/vp store")
+  termination_by evl - i
+  let _ := dl
+  go 0 0 []
+
+/-- Collect active `(Pointer, RegisterValue)` writes for masked/VP scatter. -/
+private def collectScatterWrites (elemTy : LlvmType) (vals ptrs mask : List RegisterValue) (evl : Nat) :
+    Except ExecError (List (Pointer × RegisterValue)) :=
+  let rec go (i : Nat) (acc : List (Pointer × RegisterValue)) :
+      Except ExecError (List (Pointer × RegisterValue)) :=
+    if i ≥ evl then .ok acc.reverse
+    else match mask.getD i (.bv 1 .poison) with
+      | .bv 1 (.value b) =>
+        if b == 1#1 then
+          match ptrs.getD i (.ptr 0 .poison) with
+          | .ptr _ (.value p) =>
+            go (i + 1) ((p, vals.getD i (poisonOf elemTy)) :: acc)
+          | _ => .error (.immediateUB "poison/invalid pointer in masked/vp scatter")
+        else go (i + 1) acc
+      | _ => .error (.immediateUB "poison mask lane in masked/vp scatter")
+  termination_by evl - i
+  go 0 []
+
+/-- Vector/masked/VP/matrix/histogram memory store intrinsics (oracle-independent). -/
+def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (name : String) (argVals : List RegisterValue) : Option (Except ExecError MemoryState) :=
+  if strHasPrefix name "llvm.masked.store" || strHasPrefix name "llvm.masked.compressstore" then
+    some <| match argVals with
+      | [.vector elemTy vals, ptrVal, .vector _ mask] =>
+        let compress := strHasPrefix name "llvm.masked.compressstore"
+        let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
+        match collectMaskedWrites dl elemTy ptrVal vals mask vals.length stride compress with
+        | .error e => .error e
+        | .ok ws => execStoreList dl cfg elemTy 1 mem ws
+      | _ => .error (.staticError s!"{name} expects (val, ptr, mask)")
+  else if strHasPrefix name "llvm.masked.scatter" then
+    some <| match argVals with
+      | [.vector elemTy vals, .vector _ ptrs, .vector _ mask] =>
+        match collectScatterWrites elemTy vals ptrs mask vals.length with
+        | .error e => .error e
+        | .ok ws => execStoreList dl cfg elemTy 1 mem ws
+      | _ => .error (.staticError "llvm.masked.scatter expects (val, ptrs, mask)")
+  else if strHasPrefix name "llvm.vp.store" then
+    some <| match argVals with
+      | [.vector elemTy vals, ptrVal, .vector _ mask, .bv _ (.value evlBV)] =>
+        let evl := evlBV.toNat
+        if evl > vals.length then .error (.immediateUB "evl exceeds vector length in llvm.vp.store")
+        else
+          let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
+          match collectMaskedWrites dl elemTy ptrVal vals mask evl stride false with
+          | .error e => .error e
+          | .ok ws => execStoreList dl cfg elemTy 1 mem ws
+      | [_, _, _, .bv _ .poison] => .error (.immediateUB "poison evl in llvm.vp.store")
+      | _ => .error (.staticError "llvm.vp.store expects (val, ptr, mask, evl)")
+  else if strHasPrefix name "llvm.vp.scatter" then
+    some <| match argVals with
+      | [.vector elemTy vals, .vector _ ptrs, .vector _ mask, .bv _ (.value evlBV)] =>
+        let evl := evlBV.toNat
+        if evl > vals.length then .error (.immediateUB "evl exceeds vector length in llvm.vp.scatter")
+        else
+          match collectScatterWrites elemTy vals ptrs mask evl with
+          | .error e => .error e
+          | .ok ws => execStoreList dl cfg elemTy 1 mem ws
+      | [_, _, _, .bv _ .poison] => .error (.immediateUB "poison evl in llvm.vp.scatter")
+      | _ => .error (.staticError "llvm.vp.scatter expects (val, ptrs, mask, evl)")
+  else if strHasPrefix name "llvm.experimental.vp.strided.store" then
+    some <| match argVals with
+      | [.vector elemTy vals, ptrVal, .bv _ (.value strideBV), .vector _ mask, .bv _ (.value evlBV)] =>
+        let evl := evlBV.toNat
+        if evl > vals.length then .error (.immediateUB "evl exceeds vector length in llvm.experimental.vp.strided.store")
+        else
+          match collectMaskedWrites dl elemTy ptrVal vals mask evl strideBV.toInt false with
+          | .error e => .error e
+          | .ok ws => execStoreList dl cfg elemTy 1 mem ws
+      | [_, _, .bv _ .poison, _, _] | [_, _, _, _, .bv _ .poison] =>
+        .error (.immediateUB "poison stride/evl in llvm.experimental.vp.strided.store")
+      | _ => .error (.staticError "llvm.experimental.vp.strided.store expects (val, ptr, stride, mask, evl)")
+  else if strHasPrefix name "llvm.matrix.column.major.store" then
+    some <| match argVals with
+      | [.vector elemTy vals, ptrVal, .bv _ (.value strideBV), .bv 1 (.value _), .bv _ (.value rowsBV), .bv _ (.value colsBV)] =>
+        let rows := rowsBV.toNat
+        let cols := colsBV.toNat
+        let stride := strideBV.toNat
+        if stride < rows then .error (.immediateUB "stride < rows in llvm.matrix.column.major.store")
+        else if rows * cols == 0 then .ok mem
+        else match ptrVal with
+          | .ptr _ (.value p) =>
+            let elemSz := dl.typeAllocSize elemTy
+            let ws := (List.range cols).flatMap fun c =>
+              (List.range rows).map fun r =>
+                (ptrAddBytes p (Int.ofNat ((c * stride + r) * elemSz)),
+                 vals.getD (c * rows + r) (poisonOf elemTy))
+            execStoreList dl cfg elemTy 1 mem ws
+          | _ => .error (.immediateUB "poison/invalid pointer in llvm.matrix.column.major.store")
+      | [_, _, .bv _ .poison, _, _, _] | [_, _, _, .bv 1 .poison, _, _] =>
+        .error (.immediateUB "poison stride/volatile in llvm.matrix.column.major.store")
+      | _ => .error (.staticError "llvm.matrix.column.major.store expects 6 arguments")
+  else if strHasPrefix name "llvm.experimental.vector.histogram." then
+    some <| match argVals with
+      | [.vector _ ptrs, .bv w incVal, .vector _ mask] =>
+        let op :=
+          if strHasPrefix name "llvm.experimental.vector.histogram.add" then "add"
+          else if strHasPrefix name "llvm.experimental.vector.histogram.uadd.sat" then "uadd.sat"
+          else if strHasPrefix name "llvm.experimental.vector.histogram.umax" then "umax"
+          else "umin"
+        let rec collectPtrs (i : Nat) (acc : List Pointer) : Except ExecError (List Pointer) :=
+          if i ≥ ptrs.length then .ok acc.reverse
+          else match mask.getD i (.bv 1 .poison) with
+            | .bv 1 (.value b) =>
+              if b == 1#1 then
+                match ptrs.getD i (.ptr 0 .poison) with
+                | .ptr _ (.value p) => collectPtrs (i + 1) (p :: acc)
+                | _ => .error (.immediateUB "poison/invalid pointer in vector.histogram")
+              else collectPtrs (i + 1) acc
+            | _ => .error (.immediateUB "poison mask lane in vector.histogram")
+        termination_by ptrs.length - i
+        match collectPtrs 0 [] with
+        | .error e => .error e
+        | .ok activePtrs => execHistogramLoop dl cfg op w incVal mem activePtrs
+      | _ => .error (.staticError s!"{name} expects (ptrs, inc, mask)")
+  else
+    none
+
+private theorem evalVecMemWrite?_preserves_wf {dl cfg mem name argVals mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : evalVecMemWrite? dl cfg mem name argVals = some (.ok mem')) :
+    MemoryState.WellFormed mem' := by
+  unfold evalVecMemWrite? at h
+  split at h
+  · injection h with h; split at h
+    · dsimp only at h
+      cases hc : collectMaskedWrites dl _ _ _ _ _ _ _ with
+      | error e => rw [hc] at h; cases h
+      | ok ws => rw [hc] at h; exact execStoreList_preserves_wf hwf h
+    · cases h
+  · split at h
+    · injection h with h; split at h
+      · cases hc : collectScatterWrites _ _ _ _ _ with
+        | error e => rw [hc] at h; cases h
+        | ok ws => rw [hc] at h; exact execStoreList_preserves_wf hwf h
+      · cases h
+    · split at h
+      · injection h with h; split at h
+        · dsimp only at h; split at h
+          · cases h
+          · cases hc : collectMaskedWrites dl _ _ _ _ _ _ _ with
+            | error e => rw [hc] at h; cases h
+            | ok ws => rw [hc] at h; exact execStoreList_preserves_wf hwf h
+        · cases h
+        · cases h
+      · split at h
+        · injection h with h; split at h
+          · dsimp only at h; split at h
+            · cases h
+            · cases hc : collectScatterWrites _ _ _ _ _ with
+              | error e => rw [hc] at h; cases h
+              | ok ws => rw [hc] at h; exact execStoreList_preserves_wf hwf h
+          · cases h
+          · cases h
+        · split at h
+          · injection h with h; split at h
+            · dsimp only at h; split at h
+              · cases h
+              · cases hc : collectMaskedWrites dl _ _ _ _ _ _ _ with
+                | error e => rw [hc] at h; cases h
+                | ok ws => rw [hc] at h; exact execStoreList_preserves_wf hwf h
+            · cases h
+            · cases h
+            · cases h
+          · split at h
+            · injection h with h; split at h
+              · dsimp only at h; split at h
+                · cases h
+                · split at h
+                  · cases h; exact hwf
+                  · split at h
+                    · exact execStoreList_preserves_wf hwf h
+                    · cases h
+              · cases h
+              · cases h
+              · cases h
+            · split at h
+              · injection h with h; split at h
+                · dsimp only at h
+                  cases hc : evalVecMemWrite?.collectPtrs _ _ _ _ with
+                  | error e => rw [hc] at h; cases h
+                  | ok ps => rw [hc] at h; exact execHistogramLoop_preserves_wf hwf h
+                · cases h
+              · cases h
+
 /-- Non-allocating memory & pure intrinsics/libcalls (shared between `Step` and `Exec`). -/
 def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
     (name : String) (retTy : LlvmRetType) (fmf : FastMathFlags) (argVals : List RegisterValue)
@@ -1215,11 +2098,17 @@ def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : 
       | dst :: val :: len :: _ => (execMemSetPure mem dst val len).map (fun m' => (.void, m', o))
       | _ => .error (.staticError "llvm.memset requires at least 3 arguments")
   else
-    match (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
-    | some r => some (r.map fun (v, m') => (v, m', o))
+    match evalVecMemRead? dl cfg mem name retTy argVals o with
+    | some r => some (r.map fun (v, o') => (v, mem, o'))
     | none =>
-      (evalPureIntrinsicExec? cfg name retTy fmf argVals o).map fun r =>
-        r.map fun (v, o') => (v, mem, o')
+      match evalVecMemWrite? dl cfg mem name argVals with
+      | some r => some (r.map fun m' => (.void, m', o))
+      | none =>
+        match (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
+        | some r => some (r.map fun (v, m') => (v, m', o))
+        | none =>
+          (evalPureIntrinsicExec? cfg name retTy fmf argVals o).map fun r =>
+            r.map fun (v, o') => (v, mem, o')
 
 theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVals o allowLibcalls res mem' o'}
     (hwf : MemoryState.WellFormed mem)
@@ -1279,26 +2168,42 @@ theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVa
               | error e => rw [ht] at h; cases h
               | ok m1 => rw [ht] at h; cases h; exact execMemSetPure_preserves_wf hwf ht
           · rw [if_neg h5] at h
-            cases hl : (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
+            cases hvr : evalVecMemRead? dl cfg mem name retTy argVals o with
             | some r =>
-              rw [hl] at h
+              rw [hvr] at h
               cases r with
               | error e => cases h
-              | ok p =>
-                cases h
-                by_cases ha : allowLibcalls = true
-                · rw [if_pos ha] at hl; exact evalNonAllocLibcall?_preserves_wf hwf hl
-                · rw [if_neg ha] at hl; cases hl
+              | ok p => cases h; exact hwf
             | none =>
-              rw [hl] at h
-              cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
-              | none => rw [hp] at h; cases h
+              rw [hvr] at h
+              cases hvw : evalVecMemWrite? dl cfg mem name argVals with
               | some r =>
-                rw [hp] at h
-                dsimp only at h
+                rw [hvw] at h
                 cases r with
                 | error e => cases h
-                | ok p => cases h; exact hwf
+                | ok m1 => cases h; exact evalVecMemWrite?_preserves_wf hwf hvw
+              | none =>
+                rw [hvw] at h
+                cases hl : (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
+                | some r =>
+                  rw [hl] at h
+                  cases r with
+                  | error e => cases h
+                  | ok p =>
+                    cases h
+                    by_cases ha : allowLibcalls = true
+                    · rw [if_pos ha] at hl; exact evalNonAllocLibcall?_preserves_wf hwf hl
+                    · rw [if_neg ha] at hl; cases hl
+                | none =>
+                  rw [hl] at h
+                  cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
+                  | none => rw [hp] at h; cases h
+                  | some r =>
+                    rw [hp] at h
+                    dsimp only at h
+                    cases r with
+                    | error e => cases h
+                    | ok p => cases h; exact hwf
 
 private theorem ite_some_eq_none {α : Type} {c : Prop} [Decidable c] {a : α} {b : Option α}
     (h : (if c then some a else b) = none) : ¬ c ∧ b = none := by
@@ -1312,6 +2217,9 @@ theorem evalPureIntrinsicExec?_none_indep {cfg name retTy fmf argVals o o'}
     evalPureIntrinsicExec? cfg name retTy fmf argVals o' = none := by
   unfold evalPureIntrinsicExec? at h ⊢
   repeat (obtain ⟨hc, h⟩ := ite_some_eq_none h; rw [if_neg hc])
+  cases hd : evalPureDetIntrinsic? cfg name retTy fmf argVals with
+  | some r => simp [hd] at h
+  | none => rfl
 
 /-- Whether `evalNonAllocIntrinsicExec?` recognizes a name is independent of the oracle. -/
 theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals o o' allowLibcalls}
@@ -1323,14 +2231,23 @@ theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals
   obtain ⟨hc3, h⟩ := ite_some_eq_none h; rw [if_neg hc3]
   obtain ⟨hc4, h⟩ := ite_some_eq_none h; rw [if_neg hc4]
   obtain ⟨hc5, h⟩ := ite_some_eq_none h; rw [if_neg hc5]
-  cases hl : (if allowLibcalls = true then evalNonAllocLibcall? dl mem name argVals else none) with
-  | some r => simp [hl] at h
+  cases hvr : evalVecMemRead? dl cfg mem name retTy argVals o with
+  | some r => simp [hvr] at h
   | none =>
-    cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
-    | some r => simp [hl, hp] at h
+    rw [evalVecMemRead?_none_indep (o' := o') hvr]
+    simp only [hvr] at h
+    cases hvw : evalVecMemWrite? dl cfg mem name argVals with
+    | some r => simp [hvw] at h
     | none =>
-      have hp' := evalPureIntrinsicExec?_none_indep (o' := o') hp
-      simp [hp']
+      simp only [hvw] at h
+      cases hl : (if allowLibcalls = true then evalNonAllocLibcall? dl mem name argVals else none) with
+      | some r => simp [hl] at h
+      | none =>
+        cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
+        | some r => simp [hl, hp] at h
+        | none =>
+          have hp' := evalPureIntrinsicExec?_none_indep (o' := o') hp
+          simp [hp']
 
 /-- Check whether an `llvm.assume` operand bundle tag requires evaluating its operand arguments. -/
 def assumeBundleShouldEval (tag : String) : Bool :=
