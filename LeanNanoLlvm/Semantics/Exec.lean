@@ -527,7 +527,7 @@ def execPhis (dl : DataLayout) (cfg : SemanticsConfig)
   | [], o => .ok ([], mem, o)
   | (iid, instr) :: rest, o =>
     match instr with
-    | .phi ty fmf incs =>
+    | .phi ty fmf incs md =>
       match iid with
       | .void _ => .error (.staticError "phi instruction must have a local register id")
       | .id rid =>
@@ -539,10 +539,13 @@ def execPhis (dl : DataLayout) (cfg : SemanticsConfig)
           | .ok (rawV, m1, o1) =>
             match applyInputFMFExec fmf ty rawV o1 with
             | .error err => .error err
-            | .ok (v, o2) =>
-              match execPhis dl cfg regs predId m1 rest o2 with
+            | .ok (v1, o2) =>
+              match applyValueAttrsPure dl m1 ty v1 md with
               | .error err => .error err
-              | .ok (ups, m2, o3) => .ok ((rid, v) :: ups, m2, o3)
+              | .ok v =>
+                match execPhis dl cfg regs predId m1 rest o2 with
+                | .error err => .error err
+                | .ok (ups, m2, o3) => .ok ((rid, v) :: ups, m2, o3)
     | _ => .error (.staticError "Non-phi instruction in phi prefix")
 
 theorem execPhis_sound (dl : DataLayout) (cfg : SemanticsConfig)
@@ -553,7 +556,7 @@ theorem execPhis_sound (dl : DataLayout) (cfg : SemanticsConfig)
   | mem, (iid, instr) :: rest, o => by
     unfold execPhis
     cases instr with
-    | phi ty fmf incs =>
+    | phi ty fmf incs md =>
       dsimp only
       cases iid with
       | void n => exact EvalPhis.cons_void_err
@@ -571,14 +574,17 @@ theorem execPhis_sound (dl : DataLayout) (cfg : SemanticsConfig)
             cases hfmf : applyInputFMFExec fmf ty rawV o1 with
             | error err => exact EvalPhis.cons_fmf_err hfind ih1 ⟨o1, hfmf⟩
             | ok p2 =>
-              obtain ⟨v, o2⟩ := p2; dsimp only
-              have ih2 := execPhis_sound dl cfg regs predId m1 rest o2
-              cases h2 : execPhis dl cfg regs predId m1 rest o2 with
-              | error err => rw [h2] at ih2; exact EvalPhis.cons_tail_err hfind ih1 ⟨o1, o2, hfmf⟩ ih2
-              | ok p3 =>
-                rw [h2] at ih2; obtain ⟨ups, m2, o3⟩ := p3; dsimp only at ih2 ⊢
-                exact EvalPhis.cons_ok hfind ih1 ⟨o1, o2, hfmf⟩ ih2
-    | _ => exact EvalPhis.cons_nonphi_err (by intro _ _ _ h; cases h)
+              obtain ⟨v1, o2⟩ := p2; dsimp only
+              cases hmd : applyValueAttrsPure dl m1 ty v1 md with
+              | error err => exact EvalPhis.cons_md_err hfind ih1 ⟨o1, o2, hfmf⟩ hmd
+              | ok v =>
+                have ih2 := execPhis_sound dl cfg regs predId m1 rest o2
+                cases h2 : execPhis dl cfg regs predId m1 rest o2 with
+                | error err => rw [h2] at ih2; exact EvalPhis.cons_tail_err hfind ih1 ⟨o1, o2, hfmf⟩ hmd ih2
+                | ok p3 =>
+                  rw [h2] at ih2; obtain ⟨ups, m2, o3⟩ := p3; dsimp only at ih2 ⊢
+                  exact EvalPhis.cons_ok hfind ih1 ⟨o1, o2, hfmf⟩ hmd ih2
+    | _ => exact EvalPhis.cons_nonphi_err (by intro _ _ _ _ h; cases h)
 
 def execCallee (dl : DataLayout) (cfg : SemanticsConfig)
     (regs : AssocMap Identifier RegisterValue) (mem : MemoryState)
@@ -668,6 +674,49 @@ theorem execJump_sound {st frame callers mem dest o c' o'}
         rw [hp] at ih h; obtain ⟨ups, mem', o1⟩ := p; cases h
         exact StepJump.ok hblk hsp ih
 
+def execAssumeBundles (dl : DataLayout) (cfg : SemanticsConfig)
+    (regs : AssocMap Identifier RegisterValue) (mem : MemoryState) :
+    List (String × List (LlvmType × Exp)) → OracleState →
+    Except ExecError (MemoryState × OracleState)
+  | [], o => .ok (mem, o)
+  | (tag, bargs) :: rest, o =>
+    if assumeBundleShouldEval tag then
+      match execExpList dl cfg regs mem bargs o with
+      | .error err => .error err
+      | .ok (vals, m1, o1) =>
+        match evalAssumeBundlePure dl m1 tag vals with
+        | .error err => .error err
+        | .ok () => execAssumeBundles dl cfg regs m1 rest o1
+    else
+      execAssumeBundles dl cfg regs mem rest o
+
+theorem execAssumeBundles_sound (dl : DataLayout) (cfg : SemanticsConfig)
+    (regs : AssocMap Identifier RegisterValue) :
+    ∀ (mem : MemoryState) (bundles : List (String × List (LlvmType × Exp))) (o : OracleState),
+      EvalAssumeBundles dl cfg regs mem bundles
+        ((execAssumeBundles dl cfg regs mem bundles o).map Prod.fst)
+  | mem, [], _ => EvalAssumeBundles.nil
+  | mem, (tag, bargs) :: rest, o => by
+    unfold execAssumeBundles
+    by_cases htag : assumeBundleShouldEval tag = true
+    · rw [if_pos htag]
+      have ih1 := execExpList_sound dl cfg regs mem bargs o
+      cases h1 : execExpList dl cfg regs mem bargs o with
+      | error err => rw [h1] at ih1; exact EvalAssumeBundles.cons_eval_err htag ih1
+      | ok p1 =>
+        rw [h1] at ih1; obtain ⟨vals, m1, o1⟩ := p1; dsimp only at ih1 ⊢
+        cases hchk : evalAssumeBundlePure dl m1 tag vals with
+        | error err => exact EvalAssumeBundles.cons_check_err htag ih1 hchk
+        | ok u =>
+          cases u
+          have ih2 := execAssumeBundles_sound dl cfg regs m1 rest o1
+          cases h2 : execAssumeBundles dl cfg regs m1 rest o1 with
+          | error err => rw [h2] at ih2; exact EvalAssumeBundles.cons_tail_err htag ih1 hchk ih2
+          | ok p2 => rw [h2] at ih2; obtain ⟨m2, o2⟩ := p2; dsimp only [Except.map] at ih2 ⊢; exact EvalAssumeBundles.cons_ok htag ih1 hchk ih2
+    · have htagF : assumeBundleShouldEval tag = false := Bool.eq_false_iff.mpr htag
+      rw [if_neg htag]
+      exact EvalAssumeBundles.cons_skip htagF (execAssumeBundles_sound dl cfg regs mem rest o)
+
 def execRet (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (retTy : LlvmRetType) (retVal : RegisterValue) (m1 : MemoryState) : Config :=
   let m2 := freeAllocaList m1 frame.frameAllocas
@@ -680,13 +729,16 @@ def execRet (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       match caller.returnDest? with
       | none => .staticError "Missing return continuation on call stack"
       | some rd =>
-        match applyRetFMFAndAttrsPure st.dataLayout m2 rd.retTy rd.fmf rd.retAttrs retVal1 with
-        | .error err => Config.ofError err
-        | .ok retVal2 =>
-          let regs' := match rd.retTy, rd.destId with
-            | .ret _, .id rid => caller.registers.insert (.local_id rid) retVal2
-            | _, _ => caller.registers
-          .running (st.withFramesAndMemory (((caller.withRegisters regs').withReturnDest none) :: restCallers) m2)
+        if frame.defn.prototype.isNoReturn || rd.isNoReturn then
+          .ub "Return from a noreturn function/callsite"
+        else
+          match applyRetFMFAndAttrsPure st.dataLayout m2 rd.retTy rd.fmf rd.retAttrs retVal1 with
+          | .error err => Config.ofError err
+          | .ok retVal2 =>
+            let regs' := match rd.retTy, rd.destId with
+              | .ret _, .id rid => caller.registers.insert (.local_id rid) retVal2
+              | _, _ => caller.registers
+            .running (st.withFramesAndMemory (((caller.withRegisters regs').withReturnDest none) :: restCallers) m2)
 
 theorem execRet_sound (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (retTy : LlvmRetType) (retVal : RegisterValue) (m1 : MemoryState) :
@@ -705,10 +757,14 @@ theorem execRet_sound (st : MachineState) (frame : CallFrame) (callers : List Ca
       | none => exact StepRet.missing_dest rfl h1 hrd
       | some rd =>
         dsimp only
-        cases h2 : applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-            rd.retTy rd.fmf rd.retAttrs retVal1 with
-        | error err => exact StepRet.caller_attr_err rfl h1 hrd h2
-        | ok retVal2 => exact StepRet.call_ok rfl h1 hrd h2
+        by_cases hnr : (frame.defn.prototype.isNoReturn || rd.isNoReturn) = true
+        · rw [if_pos hnr]; exact StepRet.noreturn_ub rfl h1 hrd hnr
+        · have hnrF : (frame.defn.prototype.isNoReturn || rd.isNoReturn) = false := Bool.eq_false_iff.mpr hnr
+          rw [if_neg hnr]
+          cases h2 : applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
+              rd.retTy rd.fmf rd.retAttrs retVal1 with
+          | error err => exact StepRet.caller_attr_err rfl h1 hrd hnrF h2
+          | ok retVal2 => exact StepRet.call_ok rfl h1 hrd hnrF h2
 
 /-! ### Executable Instruction, Terminator, and Single-Step Functions -/
 
@@ -790,7 +846,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
             match applyInputFMFExec fmf valTy rawRes o3 with
             | .ok (res, o4) => (none, finishRegInstr st frame callers rest iid res m3, o4)
             | .error err => (none, Config.ofError err, o3)
-  | .phi _ _ _ =>
+  | .phi _ _ _ _ =>
     (none, .staticError "Unexpected phi instruction outside block entry", o)
   | .alloca allocTy numEl? align? addrSpace =>
     let cntRes : Except ExecError (Nat × MemoryState × OracleState) :=
@@ -925,7 +981,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     | .ok (val, m1, o1) =>
       match freezeValue dl cfg val o1 with
       | (frozen, o2) => (none, finishRegInstr st frame callers rest iid frozen m1, o2)
-  | .call retTy fmf calleeExp args retAttrs =>
+  | .call retTy fmf calleeExp args retAttrs bundles isNoRet =>
     match execCallArgs dl cfg regs st.memory args o with
     | .error err => (none, Config.ofError err, o)
     | .ok (argVals, m1, o1) =>
@@ -944,9 +1000,13 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
         else
           match evalNonAllocIntrinsicExec? dl cfg m2 fname retTy fmf argVals o2 with
           | some (.ok (rawRet, m3, o3)) =>
-            match applyRetFMFAndAttrsPure dl m3 retTy fmf retAttrs rawRet with
-            | .ok finalRet => (none, finishCallResult st frame callers rest iid retTy finalRet m3, o3)
+            let effBundles := if fname == "llvm.assume" then bundles else []
+            match execAssumeBundles dl cfg regs m3 effBundles o3 with
             | .error err => (none, Config.ofError err, o3)
+            | .ok (m4, o4) =>
+              match applyRetFMFAndAttrsPure dl m4 retTy fmf retAttrs rawRet with
+              | .ok finalRet => (none, finishCallResult st frame callers rest iid retTy finalRet m4, o4)
+              | .error err => (none, Config.ofError err, o4)
           | some (.error err) => (none, Config.ofError err, o2)
           | none =>
             match st.functions.get? fid with
@@ -955,11 +1015,11 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
               if cfg.maxStackDepth != 0 && st.frames.length ≥ cfg.maxStackDepth then
                 (none, .resourceError .stackOverflow, o2)
               else
-                match mkEntryFrameWithMem dl cfg m2 calleeDef argVals with
+                match mkCallEntryFrameWithMem dl cfg m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals with
                 | .error err => (none, Config.ofError err, o2)
                 | .ok (calleeFrame, m3) =>
                   let caller' := (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
-                    (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs })
+                    (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet })
                   (none, .running (st.withFramesAndMemory (calleeFrame :: caller' :: callers) m3), o2)
 
 /-- Kernel-reducible block-terminator step (mirroring `StepTerm`). -/
@@ -1148,7 +1208,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
             cases hfmf : applyInputFMFExec fmf valTy rawRes o3 with
             | error err => rw [hfmf] at h; cases h; exact StepInstr.select_fmf_err ih1 ih2 ih3 hs ⟨_, hfmf⟩
             | ok p4 => rw [hfmf] at h; obtain ⟨res, o4⟩ := p4; cases h; exact StepInstr.select_ok ih1 ih2 ih3 hs ⟨_, _, hfmf⟩
-  | phi ty fmf incs =>
+  | phi ty fmf incs md =>
     dsimp only at h
     cases h; exact StepInstr.stray_phi
   | alloca allocTy numEl? align? addrSpace =>
@@ -1376,7 +1436,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       | mk frozen o2 =>
         rw [hfz] at hfr h; cases h
         exact StepInstr.freeze_ok ih1 hfr
-  | call retTy fmf calleeExp args retAttrs =>
+  | call retTy fmf calleeExp args retAttrs bundles isNoRet =>
     dsimp only at h
     have iha := execCallArgs_sound st.dataLayout st.config frame.registers st.memory args o
     cases ha : execCallArgs st.dataLayout st.config frame.registers st.memory args o with
@@ -1412,13 +1472,21 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
             | error err => cases h; exact StepInstr.call_intrinsic_err iha ihc hallocF ⟨_, hint⟩
             | ok pm =>
               obtain ⟨rawRet, m3, o3⟩ := pm; dsimp only at h
-              cases hattr : applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet with
+              let effBundles := if fid.ToString == "llvm.assume" then bundles else []
+              have ihb := execAssumeBundles_sound st.dataLayout st.config frame.registers m3 effBundles o3
+              cases hb : execAssumeBundles st.dataLayout st.config frame.registers m3 effBundles o3 with
               | error err =>
-                rw [hattr] at h; cases h
-                exact StepInstr.call_intrinsic_retattr_err iha ihc hallocF ⟨_, _, hint⟩ hattr
-              | ok finalRet =>
-                rw [hattr] at h; cases h
-                exact StepInstr.call_intrinsic_ok iha ihc hallocF ⟨_, _, hint⟩ hattr
+                rw [hb] at ihb h; cases h
+                exact StepInstr.call_intrinsic_bundle_err iha ihc hallocF ⟨_, _, hint⟩ ihb
+              | ok pb =>
+                rw [hb] at ihb h; obtain ⟨m4, o4⟩ := pb; dsimp only at ihb h
+                cases hattr : applyRetFMFAndAttrsPure st.dataLayout m4 retTy fmf retAttrs rawRet with
+                | error err =>
+                  rw [hattr] at h; cases h
+                  exact StepInstr.call_intrinsic_retattr_err iha ihc hallocF ⟨_, _, hint⟩ ihb hattr
+                | ok finalRet =>
+                  rw [hattr] at h; cases h
+                  exact StepInstr.call_intrinsic_ok iha ihc hallocF ⟨_, _, hint⟩ ihb hattr
           | none =>
             rw [hint] at h; dsimp only at h
             have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o0 = none :=
@@ -1438,7 +1506,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                   · simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq, not_and] at hov
                     have := hov hz
                     exact Or.inr (by omega)
-                cases hentry : mkEntryFrameWithMem st.dataLayout st.config m2 calleeDef argVals with
+                cases hentry : mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals with
                 | error err =>
                   rw [hentry] at h; cases h
                   exact StepInstr.call_user_entry_err iha ihc hallocF hnoneAll hfn hdepth hentry
@@ -1631,14 +1699,14 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig) :
   | ent :: rest, mem, fns, decls =>
     match ent with
     | .declaration decl =>
-      match mem.allocate dl cfg 0 1 decl.name.ToString dl.programAddrSpace .zeroed .func true with
+      match mem.allocate dl cfg 7 8 decl.name.ToString dl.programAddrSpace .zeroed .func true with
       | .error e => .error e
       | .ok (obj, mem') =>
         let ptr := MemoryState.derivePointer dl obj
         let mem'' := mem'.insertFuncAddr decl.name obj.baseAddr ptr
         initModulePass1 dl cfg rest mem'' fns (decls.insert decl.name decl)
     | .definition defn =>
-      match mem.allocate dl cfg 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+      match mem.allocate dl cfg 7 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
       | .error e => .error e
       | .ok (obj, mem') =>
         let ptr := MemoryState.derivePointer dl obj
@@ -1646,7 +1714,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig) :
         initModulePass1 dl cfg rest mem'' (fns.insert defn.prototype.name defn) decls
     | .global gv =>
       let size := dl.typeAllocSize gv.ty
-      let effAlign := gv.align.getD (dl.typeABIAlign gv.ty)
+      let effAlign := max 8 (gv.align.getD (dl.typeABIAlign gv.ty))
       let initKind := if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized
       match mem.allocate dl cfg size effAlign gv.name.ToString gv.addrSpace initKind .global gv.isConstant with
       | .error e => .error e
@@ -1704,21 +1772,21 @@ private theorem initModulePass1_wf {dl cfg ents mem fns decls mem' fns' decls'}
     cases ent with
     | declaration decl =>
       dsimp only at h
-      cases ha : mem.allocate dl cfg 0 1 decl.name.ToString dl.programAddrSpace .zeroed .func true with
+      cases ha : mem.allocate dl cfg 7 8 decl.name.ToString dl.programAddrSpace .zeroed .func true with
       | error e => rw [ha] at h; cases h
       | ok p =>
         rw [ha] at h; obtain ⟨obj, m1⟩ := p
         exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
     | definition defn =>
       dsimp only at h
-      cases ha : mem.allocate dl cfg 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+      cases ha : mem.allocate dl cfg 7 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
       | error e => rw [ha] at h; cases h
       | ok p =>
         rw [ha] at h; obtain ⟨obj, m1⟩ := p
         exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
     | global gv =>
       dsimp only at h
-      cases ha : mem.allocate dl cfg (dl.typeAllocSize gv.ty) (gv.align.getD (dl.typeABIAlign gv.ty))
+      cases ha : mem.allocate dl cfg (dl.typeAllocSize gv.ty) (max 8 (gv.align.getD (dl.typeABIAlign gv.ty)))
           gv.name.ToString gv.addrSpace
           (if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized)
           .global gv.isConstant with

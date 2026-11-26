@@ -1199,7 +1199,7 @@ define i32 @caller_byval_isolated() {
 entry:
   %x = alloca i32, align 4
   store i32 7, ptr %x, align 4
-  %r = call i32 @mutate_copy(ptr %x)
+  %r = call i32 @mutate_copy(ptr byval(i32) %x)
   %orig = load i32, ptr %x, align 4
   -- r = 7 + 99 = 106, orig must still be 7 => 113
   %tot = add i32 %r, %orig
@@ -1208,7 +1208,7 @@ entry:
 
 define i32 @caller_byval_poison_ub() {
 entry:
-  %r = call i32 @mutate_copy(ptr poison)
+  %r = call i32 @mutate_copy(ptr byval(i32) poison)
   ret i32 %r
 }
 ]

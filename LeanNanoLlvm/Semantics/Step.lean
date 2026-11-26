@@ -362,34 +362,42 @@ inductive EvalPhis (dl : DataLayout) (cfg : SemanticsConfig)
     MemoryState → Code → Except ExecError (List (RawId × RegisterValue) × MemoryState) → Prop where
   | nil {mem} :
       EvalPhis dl cfg regs predId mem [] (.ok ([], mem))
-  | cons_ok {mem rid ty fmf incs rest incExp b rawV m1 v ups m2} :
+  | cons_ok {mem rid ty fmf incs md rest incExp b rawV m1 v1 v ups m2} :
       incs.find? (fun (_, b') => b' == predId) = some (incExp, b) →
       EvalExp dl cfg regs mem ty incExp (.ok (rawV, m1)) →
-      (∃ o o', applyInputFMFExec fmf ty rawV o = .ok (v, o')) →
+      (∃ o o', applyInputFMFExec fmf ty rawV o = .ok (v1, o')) →
+      applyValueAttrsPure dl m1 ty v1 md = .ok v →
       EvalPhis dl cfg regs predId m1 rest (.ok (ups, m2)) →
-      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs) :: rest) (.ok ((rid, v) :: ups, m2))
-  | cons_void_err {mem n ty fmf incs rest msg} :
-      EvalPhis dl cfg regs predId mem ((.void n, .phi ty fmf incs) :: rest) (.error (.staticError msg))
-  | cons_missing_pred {mem rid ty fmf incs rest msg} :
+      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs md) :: rest) (.ok ((rid, v) :: ups, m2))
+  | cons_void_err {mem n ty fmf incs md rest msg} :
+      EvalPhis dl cfg regs predId mem ((.void n, .phi ty fmf incs md) :: rest) (.error (.staticError msg))
+  | cons_missing_pred {mem rid ty fmf incs md rest msg} :
       incs.find? (fun (_, b) => b == predId) = none →
-      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs) :: rest) (.error (.staticError msg))
-  | cons_exp_err {mem rid ty fmf incs rest incExp b err} :
+      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs md) :: rest) (.error (.staticError msg))
+  | cons_exp_err {mem rid ty fmf incs md rest incExp b err} :
       incs.find? (fun (_, b') => b' == predId) = some (incExp, b) →
       EvalExp dl cfg regs mem ty incExp (.error err) →
-      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs) :: rest) (.error err)
-  | cons_fmf_err {mem rid ty fmf incs rest incExp b rawV m1 err} :
+      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs md) :: rest) (.error err)
+  | cons_fmf_err {mem rid ty fmf incs md rest incExp b rawV m1 err} :
       incs.find? (fun (_, b') => b' == predId) = some (incExp, b) →
       EvalExp dl cfg regs mem ty incExp (.ok (rawV, m1)) →
       (∃ o, applyInputFMFExec fmf ty rawV o = .error err) →
-      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs) :: rest) (.error err)
-  | cons_tail_err {mem rid ty fmf incs rest incExp b rawV m1 v err} :
+      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs md) :: rest) (.error err)
+  | cons_md_err {mem rid ty fmf incs md rest incExp b rawV m1 v1 err} :
       incs.find? (fun (_, b') => b' == predId) = some (incExp, b) →
       EvalExp dl cfg regs mem ty incExp (.ok (rawV, m1)) →
-      (∃ o o', applyInputFMFExec fmf ty rawV o = .ok (v, o')) →
+      (∃ o o', applyInputFMFExec fmf ty rawV o = .ok (v1, o')) →
+      applyValueAttrsPure dl m1 ty v1 md = .error err →
+      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs md) :: rest) (.error err)
+  | cons_tail_err {mem rid ty fmf incs md rest incExp b rawV m1 v1 v err} :
+      incs.find? (fun (_, b') => b' == predId) = some (incExp, b) →
+      EvalExp dl cfg regs mem ty incExp (.ok (rawV, m1)) →
+      (∃ o o', applyInputFMFExec fmf ty rawV o = .ok (v1, o')) →
+      applyValueAttrsPure dl m1 ty v1 md = .ok v →
       EvalPhis dl cfg regs predId m1 rest (.error err) →
-      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs) :: rest) (.error err)
+      EvalPhis dl cfg regs predId mem ((.id rid, .phi ty fmf incs md) :: rest) (.error err)
   | cons_nonphi_err {mem iid instr rest msg} :
-      (∀ ty fmf incs, instr ≠ .phi ty fmf incs) →
+      (∀ ty fmf incs md, instr ≠ .phi ty fmf incs md) →
       EvalPhis dl cfg regs predId mem ((iid, instr) :: rest) (.error (.staticError msg))
 
 theorem EvalPhis.preserves_wf {dl cfg regs predId mem phis ups mem'}
@@ -398,7 +406,7 @@ theorem EvalPhis.preserves_wf {dl cfg regs predId mem phis ups mem'}
     MemoryState.WellFormed mem' := by
   cases h with
   | nil => exact hwf
-  | cons_ok _ he _ hrest => exact EvalPhis.preserves_wf (EvalExp.preserves_wf hwf he) hrest
+  | cons_ok _ he _ _ hrest => exact EvalPhis.preserves_wf (EvalExp.preserves_wf hwf he) hrest
 
 /-- Relational resolution of a `call` callee expression (direct `@fn` or indirect function pointer). -/
 inductive EvalCallee (dl : DataLayout) (cfg : SemanticsConfig)
@@ -457,6 +465,46 @@ inductive StepJump (st : MachineState) (frame : CallFrame) (callers : List CallF
       frame.defn.findBlock? dest = none →
       StepJump st frame callers mem dest (.staticError msg)
 
+/-- Relational evaluation of `llvm.assume` operand bundles. -/
+inductive EvalAssumeBundles (dl : DataLayout) (cfg : SemanticsConfig)
+    (regs : AssocMap Identifier RegisterValue) :
+    MemoryState → List (String × List (LlvmType × Exp)) → Except ExecError MemoryState → Prop where
+  | nil {mem} : EvalAssumeBundles dl cfg regs mem [] (.ok mem)
+  | cons_skip {mem tag bargs rest res} :
+      assumeBundleShouldEval tag = false →
+      EvalAssumeBundles dl cfg regs mem rest res →
+      EvalAssumeBundles dl cfg regs mem ((tag, bargs) :: rest) res
+  | cons_ok {mem tag bargs rest vals m1 m2} :
+      assumeBundleShouldEval tag = true →
+      EvalExpList dl cfg regs mem bargs (.ok (vals, m1)) →
+      evalAssumeBundlePure dl m1 tag vals = .ok () →
+      EvalAssumeBundles dl cfg regs m1 rest (.ok m2) →
+      EvalAssumeBundles dl cfg regs mem ((tag, bargs) :: rest) (.ok m2)
+  | cons_eval_err {mem tag bargs rest err} :
+      assumeBundleShouldEval tag = true →
+      EvalExpList dl cfg regs mem bargs (.error err) →
+      EvalAssumeBundles dl cfg regs mem ((tag, bargs) :: rest) (.error err)
+  | cons_check_err {mem tag bargs rest vals m1 err} :
+      assumeBundleShouldEval tag = true →
+      EvalExpList dl cfg regs mem bargs (.ok (vals, m1)) →
+      evalAssumeBundlePure dl m1 tag vals = .error err →
+      EvalAssumeBundles dl cfg regs mem ((tag, bargs) :: rest) (.error err)
+  | cons_tail_err {mem tag bargs rest vals m1 err} :
+      assumeBundleShouldEval tag = true →
+      EvalExpList dl cfg regs mem bargs (.ok (vals, m1)) →
+      evalAssumeBundlePure dl m1 tag vals = .ok () →
+      EvalAssumeBundles dl cfg regs m1 rest (.error err) →
+      EvalAssumeBundles dl cfg regs mem ((tag, bargs) :: rest) (.error err)
+
+theorem EvalAssumeBundles.preserves_wf {dl cfg regs mem bundles mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : EvalAssumeBundles dl cfg regs mem bundles (.ok mem')) :
+    MemoryState.WellFormed mem' := by
+  cases h with
+  | nil => exact hwf
+  | cons_skip _ hrest => exact EvalAssumeBundles.preserves_wf hwf hrest
+  | cons_ok _ he _ hrest => exact EvalAssumeBundles.preserves_wf (EvalExpList.preserves_wf hwf he) hrest
+
 /-- Relational return-value completion (frees frame allocas, applies callee & caller return attrs, pops frame). -/
 inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (retTy : LlvmRetType) (retVal : RegisterValue) (m1 : MemoryState) : Config → Prop where
@@ -470,6 +518,7 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
         retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
       caller.returnDest? = some rd →
+      (frame.defn.prototype.isNoReturn || rd.isNoReturn) = false →
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
         rd.retTy rd.fmf rd.retAttrs retVal1 = .ok retVal2 →
       StepRet st frame callers retTy retVal m1
@@ -478,6 +527,13 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
               | .ret _, .id rid => caller.registers.insert (.local_id rid) retVal2
               | _, _ => caller.registers)).withReturnDest none) :: restCallers)
           (freeAllocaList m1 frame.frameAllocas)))
+  | noreturn_ub {caller restCallers retVal1 rd msg} :
+      callers = caller :: restCallers →
+      applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
+        retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
+      caller.returnDest? = some rd →
+      (frame.defn.prototype.isNoReturn || rd.isNoReturn) = true →
+      StepRet st frame callers retTy retVal m1 (.ub msg)
   | callee_attr_err {err} :
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
         retTy {} frame.defn.prototype.retAttrs retVal = .error err →
@@ -487,6 +543,7 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
         retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
       caller.returnDest? = some rd →
+      (frame.defn.prototype.isNoReturn || rd.isNoReturn) = false →
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
         rd.retTy rd.fmf rd.retAttrs retVal1 = .error err →
       StepRet st frame callers retTy retVal m1 (Config.ofError err)
@@ -649,8 +706,8 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       StepInstr st frame callers iid rest (.select fmf condTy cond valTy tv fv) none (Config.ofError err)
 
   /- Stray Phi -/
-  | stray_phi {ty fmf incs msg} :
-      StepInstr st frame callers iid rest (.phi ty fmf incs) none (.staticError msg)
+  | stray_phi {ty fmf incs md msg} :
+      StepInstr st frame callers iid rest (.phi ty fmf incs md) none (.staticError msg)
 
   /- Alloca (relational via MemoryState.AllocSpec) -/
   | alloca_ok {allocTy numEl? align? addrSpace count m1 obj mem'} :
@@ -905,80 +962,89 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       StepInstr st frame callers iid rest (.freeze (ty, e)) none (Config.ofError err)
 
   /- Call (alloc libcalls via AllocLibcallSpec, non-alloc intrinsics, user-defined functions) -/
-  | call_args_err {retTy fmf calleeExp args retAttrs err} :
+  | call_args_err {retTy fmf calleeExp args retAttrs bundles isNoRet err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.error err) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
-  | call_callee_err {retTy fmf calleeExp args retAttrs argVals m1 err} :
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_callee_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.error err) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
-  | call_alloc_ok {retTy fmf calleeExp args retAttrs argVals m1 fid m2 rawRet m3 finalRet} :
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_alloc_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 finalRet} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = true →
       AllocLibcallSpec st.dataLayout st.config m2 fid.ToString retTy argVals (.ok (rawRet, m3)) →
       applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet = .ok finalRet →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
         (finishCallResult st frame callers rest iid retTy finalRet m3)
-  | call_alloc_retattr_err {retTy fmf calleeExp args retAttrs argVals m1 fid m2 rawRet m3 err} :
+  | call_alloc_retattr_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = true →
       AllocLibcallSpec st.dataLayout st.config m2 fid.ToString retTy argVals (.ok (rawRet, m3)) →
       applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet = .error err →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
-  | call_alloc_err {retTy fmf calleeExp args retAttrs argVals m1 fid m2 err} :
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_alloc_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = true →
       AllocLibcallSpec st.dataLayout st.config m2 fid.ToString retTy argVals (.error err) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
-  | call_intrinsic_ok {retTy fmf calleeExp args retAttrs argVals m1 fid m2 rawRet m3 finalRet} :
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_intrinsic_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 m4 finalRet} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = false →
       (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = some (.ok (rawRet, m3, o'))) →
-      applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet = .ok finalRet →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none
-        (finishCallResult st frame callers rest iid retTy finalRet m3)
-  | call_intrinsic_retattr_err {retTy fmf calleeExp args retAttrs argVals m1 fid m2 rawRet m3 err} :
+      EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.ok m4) →
+      applyRetFMFAndAttrsPure st.dataLayout m4 retTy fmf retAttrs rawRet = .ok finalRet →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
+        (finishCallResult st frame callers rest iid retTy finalRet m4)
+  | call_intrinsic_bundle_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = false →
       (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = some (.ok (rawRet, m3, o'))) →
-      applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet = .error err →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
-  | call_intrinsic_err {retTy fmf calleeExp args retAttrs argVals m1 fid m2 err} :
+      EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.error err) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_intrinsic_retattr_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 m4 err} :
+      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
+      isAllocLibcall fid.ToString = false →
+      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = some (.ok (rawRet, m3, o'))) →
+      EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.ok m4) →
+      applyRetFMFAndAttrsPure st.dataLayout m4 retTy fmf retAttrs rawRet = .error err →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_intrinsic_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = false →
       (∃ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = some (.error err)) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
-  | call_user_ok {retTy fmf calleeExp args retAttrs argVals m1 fid m2 calleeDef calleeFrame m3} :
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_user_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 calleeDef calleeFrame m3} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = false →
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkEntryFrameWithMem st.dataLayout st.config m2 calleeDef argVals = .ok (calleeFrame, m3) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals = .ok (calleeFrame, m3) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
         (.running (st.withFramesAndMemory
           (calleeFrame ::
             (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
-              (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs }) ::
+              (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet }) ::
             callers)
           m3))
-  | call_user_entry_err {retTy fmf calleeExp args retAttrs argVals m1 fid m2 calleeDef err} :
+  | call_user_entry_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 calleeDef err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = false →
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkEntryFrameWithMem st.dataLayout st.config m2 calleeDef argVals = .error err →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
-  | call_user_overflow {retTy fmf calleeExp args retAttrs argVals m1 fid m2 calleeDef} :
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals = .error err →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_user_overflow {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 calleeDef} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = false →
@@ -986,14 +1052,14 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       st.functions.get? fid = some calleeDef →
       st.config.maxStackDepth ≠ 0 →
       st.frames.length ≥ st.config.maxStackDepth →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (.resourceError .stackOverflow)
-  | call_external_err {retTy fmf calleeExp args retAttrs argVals m1 fid m2 msg} :
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (.resourceError .stackOverflow)
+  | call_external_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 msg} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = false →
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = none) →
       st.functions.get? fid = none →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (.staticError msg)
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (.staticError msg)
 
 /-- Relational small-step execution of a block terminator (indexed by `Terminator`). -/
 inductive StepTerm (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
@@ -1145,9 +1211,10 @@ private theorem stepRet_wf {st frame callers retTy retVal m1 c'}
     Config.WellFormed c' := by
   cases h with
   | top_ok _ _ => exact freeAllocaList_preserves_wf hwf _
-  | call_ok _ _ _ _ => exact freeAllocaList_preserves_wf hwf _
+  | call_ok _ _ _ _ _ => exact freeAllocaList_preserves_wf hwf _
+  | noreturn_ub _ _ _ _ => trivial
   | callee_attr_err _ => exact configOfError_wf _
-  | caller_attr_err _ _ _ _ => exact configOfError_wf _
+  | caller_attr_err _ _ _ _ _ => exact configOfError_wf _
   | missing_dest _ _ _ => trivial
 
 theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
@@ -1185,11 +1252,11 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
   | freeze_ok h1 _ => exact finishRegInstr_wf (EvalExp.preserves_wf hwf h1)
   | call_alloc_ok ha hc _ hspec _ =>
     exact finishCallResult_wf (AllocLibcallSpec.preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hspec)
-  | call_intrinsic_ok ha hc _ hint _ =>
+  | call_intrinsic_ok ha hc _ hint hb _ =>
     obtain ⟨o, o', hev⟩ := hint
-    exact finishCallResult_wf (evalNonAllocIntrinsicExec?_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hev)
+    exact finishCallResult_wf (EvalAssumeBundles.preserves_wf (evalNonAllocIntrinsicExec?_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hev) hb)
   | call_user_ok ha hc _ _ _ _ hmk =>
-    exact mkEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hmk
+    exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hmk
   | _ => first | exact configOfError_wf _ | trivial
 
 theorem StepTerm.preserves_wf {st frame callers tid term c'}
@@ -1646,9 +1713,10 @@ theorem Step.ret_top_leaf_iff {st frame tid ty e v}
       have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
       cases hr with
       | top_ok _ hattr => rw [hattr]; exact ⟨rfl, rfl⟩
-      | call_ok hne _ _ _ => cases hne
+      | call_ok hne _ _ _ _ => cases hne
+      | noreturn_ub hne _ _ _ => cases hne
       | callee_attr_err hattr => rw [hattr]; exact ⟨rfl, rfl⟩
-      | caller_attr_err hne _ _ _ => cases hne
+      | caller_attr_err hne _ _ _ _ => cases hne
       | missing_dest hne _ _ => cases hne
     | ret_exp_err _ he' => have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
     | ret_ty_err hne => exact False.elim (hne hretTy)
@@ -1678,9 +1746,10 @@ theorem Step.retVoid_top_iff {st frame tid}
     | retVoid_ok _ hr =>
       cases hr with
       | top_ok _ hattr' => rw [hattr] at hattr'; cases hattr'; exact ⟨rfl, rfl⟩
-      | call_ok hne _ _ _ => cases hne
+      | call_ok hne _ _ _ _ => cases hne
+      | noreturn_ub hne _ _ _ => cases hne
       | callee_attr_err hattr' => rw [hattr] at hattr'; cases hattr'
-      | caller_attr_err hne _ _ _ => cases hne
+      | caller_attr_err hne _ _ _ _ => cases hne
       | missing_dest hne _ _ => cases hne
     | retVoid_ty_err hne => exact False.elim (hne hretTy)
   · rintro ⟨rfl, rfl⟩

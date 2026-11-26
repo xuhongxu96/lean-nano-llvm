@@ -190,7 +190,7 @@ def Instruction.print : Instruction → String
       printConversionOp name flags fromTy v toTy
   | .select fmf cTy c vTy tv fv =>
       s!"select{formatFlags fmf.toStrings} {cTy.print} {c.print}, {vTy.print} {tv.print}, {vTy.print} {fv.print}"
-  | .phi ty fmf incoming =>
+  | .phi ty fmf incoming _ =>
       let incStr := String.intercalate ", " (incoming.map fun (e, b) => s!"[ {e.print}, %{b.ToString} ]")
       s!"phi{formatFlags fmf.toStrings} {ty.print} {incStr}"
   | .alloca allocTy numEl align as =>
@@ -237,7 +237,7 @@ def Instruction.print : Instruction → String
         | some i => s!"i32 {i}"
         | none => "i32 poison")
       s!"shufflevector {vecTy.print} {v1.print}, {vecTy.print} {v2.print}, <{mask.length} x i32> <{maskStr}>"
-  | .call retTy fmf callee args retAttrs =>
+  | .call retTy fmf callee args retAttrs _ _ =>
       let retAttrStr := formatFlags (retAttrs.map ValueAttr.print)
       let argStr := String.intercalate ", " (args.map fun (t, e, attrs) =>
         s!"{t.print}{formatFlags (attrs.map ValueAttr.print)} {e.print}")

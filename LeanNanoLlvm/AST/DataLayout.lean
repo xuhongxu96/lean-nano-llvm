@@ -26,6 +26,7 @@ structure DataLayout : Type where
   programAddrSpace  : Nat := 0
   allocaAddrSpace   : Nat := 0
   globalsAddrSpace  : Nat := 0
+  intAligns         : List (Nat × Nat) := []
 deriving Repr, DecidableEq, Inhabited
 
 namespace DataLayout
@@ -103,7 +104,11 @@ mutual
 
 /-- Compute `(sizeInBits, abiAlignInBytes)` structurally for an `LlvmType`. -/
 def typeLayout (dl : DataLayout) : LlvmType → Nat × Nat
-  | .int w => (w, intABIAlign w)
+  | .int w =>
+      let al := match dl.intAligns.find? (fun p => p.1 == w) with
+        | some (_, a) => a
+        | none => intABIAlign w
+      (w, al)
   | .float ft => (ft.bitWidth, floatABIAlign ft)
   | .ptr as => (dl.getPointerSizeInBits as, dl.getPointerABIAlign as)
   | .vector n elem =>

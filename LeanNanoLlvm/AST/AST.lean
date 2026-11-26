@@ -445,6 +445,7 @@ inductive Instruction : Type where
   | select         (fmf : FastMathFlags) (condTy : LlvmType) (cond : Exp)
                    (valTy : LlvmType) (tv : Exp) (fv : Exp)
   | phi            (ty : LlvmType) (fmf : FastMathFlags) (incoming : List (Exp × BlockId))
+                   (metadata : List ValueAttr := [])
   | alloca         (allocTy : LlvmType) (numElements : Option (LlvmType × Exp))
                    (align : Option Nat) (addrSpace : Nat := 0)
   | load           (ty : LlvmType) (ptrTy : LlvmType) (ptr : Exp)
@@ -463,6 +464,8 @@ inductive Instruction : Type where
   | call           (retTy : LlvmRetType) (fmf : FastMathFlags) (callee : Exp)
                    (args : List (LlvmType × Exp × List ValueAttr))
                    (retAttrs : List ValueAttr := [])
+                   (bundles : List (String × List (LlvmType × Exp)) := [])
+                   (isNoReturn : Bool := false)
   | freeze         (v : TypedExp)
 deriving Repr
 
@@ -477,10 +480,11 @@ inductive Terminator : Type where
 deriving Repr
 
 structure Declaration where
-  name     : FunctionId
-  type     : LlvmType
-  argAttrs : List (List ValueAttr) := []
-  retAttrs : List ValueAttr := []
+  name       : FunctionId
+  type       : LlvmType
+  argAttrs   : List (List ValueAttr) := []
+  retAttrs   : List ValueAttr := []
+  isNoReturn : Bool := false
 deriving Repr
 
 abbrev Code := List (InstructionId × Instruction)
@@ -607,10 +611,11 @@ private def resolveInstr (defs : List (LocalId × LlvmType)) (fuel : Nat) :
   | .fcmp fmf pr t e1 e2 => do .ok (.fcmp fmf pr (← resolveType defs fuel t) (← resolveExp defs fuel e1) (← resolveExp defs fuel e2))
   | .conversionOp op fTy e tTy => do .ok (.conversionOp op (← resolveType defs fuel fTy) (← resolveExp defs fuel e) (← resolveType defs fuel tTy))
   | .select fmf cTy c vTy tv fv => do .ok (.select fmf (← resolveType defs fuel cTy) (← resolveExp defs fuel c) (← resolveType defs fuel vTy) (← resolveExp defs fuel tv) (← resolveExp defs fuel fv))
-  | .phi ty fmf inc => do
+  | .phi ty fmf inc md => do
     let ty' ← resolveType defs fuel ty
     let inc' ← inc.mapM fun (e, b) => do .ok (← resolveExp defs fuel e, b)
-    .ok (.phi ty' fmf inc')
+    let md' ← md.mapM (resolveAttr defs fuel)
+    .ok (.phi ty' fmf inc' md')
   | .alloca aTy cnt? al as => do
     let aTy' ← resolveType defs fuel aTy
     let cnt?' ← match cnt? with
@@ -636,13 +641,16 @@ private def resolveInstr (defs : List (LocalId × LlvmType)) (fuel : Nat) :
   | .extractelement vTy v iTy i => do .ok (.extractelement (← resolveType defs fuel vTy) (← resolveExp defs fuel v) (← resolveType defs fuel iTy) (← resolveExp defs fuel i))
   | .insertelement vTy v valTy val iTy i => do .ok (.insertelement (← resolveType defs fuel vTy) (← resolveExp defs fuel v) (← resolveType defs fuel valTy) (← resolveExp defs fuel val) (← resolveType defs fuel iTy) (← resolveExp defs fuel i))
   | .shufflevector vTy v1 v2 m => do .ok (.shufflevector (← resolveType defs fuel vTy) (← resolveExp defs fuel v1) (← resolveExp defs fuel v2) m)
-  | .call rTy fmf callee args retAttrs => do
+  | .call rTy fmf callee args retAttrs bundles isNoRet => do
     let rTy' ← resolveRetType defs fuel rTy
     let callee' ← resolveExp defs fuel callee
     let args' ← args.mapM fun (t, e, as) => do
       .ok (← resolveType defs fuel t, ← resolveExp defs fuel e, ← as.mapM (resolveAttr defs fuel))
     let retAttrs' ← retAttrs.mapM (resolveAttr defs fuel)
-    .ok (.call rTy' fmf callee' args' retAttrs')
+    let bundles' ← bundles.mapM fun (tag, bargs) => do
+      let bargs' ← bargs.mapM fun (t, e) => do .ok (← resolveType defs fuel t, ← resolveExp defs fuel e)
+      .ok (tag, bargs')
+    .ok (.call rTy' fmf callee' args' retAttrs' bundles' isNoRet)
   | .freeze (t, e) => do .ok (.freeze (← resolveType defs fuel t, ← resolveExp defs fuel e))
 
 private def resolveTerm (defs : List (LocalId × LlvmType)) (fuel : Nat) :

@@ -1369,26 +1369,33 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
       | other => .ok other
   | .dereferenceable bytes =>
     match val with
+    | .ptr _ .poison =>
+      .error (.immediateUB s!"Poison pointer violates `dereferenceable({bytes})` attribute")
     | .ptr as (.value p) =>
-      if p.isNull dl as then .ok (.ptr as .poison)
+      if p.isNull dl as then
+        .error (.immediateUB s!"Null pointer violates `dereferenceable({bytes})` attribute")
       else match mem.resolveObject? p with
-        | none => .ok (.ptr as .poison)
+        | none =>
+          .error (.immediateUB s!"Pointer with invalid/nullary provenance violates `dereferenceable({bytes})` attribute")
         | some mo =>
           if mo.state == .freed || bytes > mo.size || p.addr.toNat < mo.baseAddr ||
              p.addr.toNat - mo.baseAddr > mo.size - bytes then
-            .ok (.ptr as .poison)
+            .error (.immediateUB s!"Pointer violates `dereferenceable({bytes})` attribute")
           else .ok (.ptr as (.value p))
     | other => .ok other
   | .dereferenceableOrNull bytes =>
     match val with
+    | .ptr _ .poison =>
+      .error (.immediateUB s!"Poison pointer violates `dereferenceable_or_null({bytes})` attribute")
     | .ptr as (.value p) =>
       if p.isNull dl as then .ok (.ptr as (.value p))
       else match mem.resolveObject? p with
-        | none => .ok (.ptr as .poison)
+        | none =>
+          .error (.immediateUB s!"Pointer with invalid/nullary provenance violates `dereferenceable_or_null({bytes})` attribute")
         | some mo =>
           if mo.state == .freed || bytes > mo.size || p.addr.toNat < mo.baseAddr ||
              p.addr.toNat - mo.baseAddr > mo.size - bytes then
-            .ok (.ptr as .poison)
+            .error (.immediateUB s!"Pointer violates `dereferenceable_or_null({bytes})` attribute")
           else .ok (.ptr as (.value p))
     | other => .ok other
   | .byval _ => .ok val

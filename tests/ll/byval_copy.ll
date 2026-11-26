@@ -14,7 +14,7 @@ define i32 @main() {
 entry:
   %x = alloca i32, align 4
   store i32 7, ptr %x, align 4
-  %r = call i32 @mutate_byval(ptr %x)
+  %r = call i32 @mutate_byval(ptr byval(i32) %x)
   %orig = load i32, ptr %x, align 4
   %tot = add i32 %r, %orig
   ret i32 %tot

@@ -124,10 +124,11 @@ theorem Trace.IsRefinedBy.trans {f g : MemoryInjection} :
 
 /-- Return continuation recorded in a caller's frame when awaiting a callee return. -/
 structure ReturnDest : Type where
-  destId   : InstructionId
-  retTy    : LlvmRetType
-  fmf      : FastMathFlags := {}
-  retAttrs : List ValueAttr := []
+  destId     : InstructionId
+  retTy      : LlvmRetType
+  fmf        : FastMathFlags := {}
+  retAttrs   : List ValueAttr := []
+  isNoReturn : Bool := false
 deriving Repr
 
 /-- Explicit activation record on the small-step call stack (mirrors `llubi::Frame`). -/
@@ -411,6 +412,51 @@ theorem mkEntryFrameWithMem_preserves_wf {dl cfg mem defn argVals frame' mem'}
   cases hmk : mkEntryFrame dl mem defn argVals with
   | error e => rw [hmk] at h; cases h
   | ok frame => rw [hmk] at h; exact applyByValCopies_preserves_wf hwf h
+
+/-- Check that a callsite's return type and `byval` attributes match the callee prototype. -/
+def checkCallSignatureAndByVal (dl : DataLayout) (retTy : LlvmRetType)
+    (callArgAttrs : List (List ValueAttr)) (defn : Definition) : Except ExecError Unit :=
+  match defn.prototype.type with
+  | .function calleeRetTy _ _ =>
+    if calleeRetTy != retTy then
+      .error (.immediateUB "Call through function pointer with mismatched return type")
+    else
+      let rec go (i : Nat) : List (List ValueAttr) → Except ExecError Unit
+        | [] =>
+          -- Check if callee has any remaining byval params past callArgAttrs
+          if (defn.prototype.argAttrs.drop i).any (fun as => as.any (fun | .byval _ => true | _ => false)) then
+            .error (.immediateUB "Mismatched byval attribute between callee and callsite")
+          else .ok ()
+        | cAttrs :: rest =>
+          let pAttrs := defn.prototype.argAttrs.getD i []
+          let cByVal := cAttrs.findSome? (fun | .byval ty => some ty | _ => none)
+          let pByVal := pAttrs.findSome? (fun | .byval ty => some ty | _ => none)
+          match cByVal, pByVal with
+          | none, none => go (i + 1) rest
+          | some t1, some t2 =>
+            if t1 == t2 then go (i + 1) rest
+            else .error (.immediateUB "Mismatched byval attribute type between callee and callsite")
+          | _, _ =>
+            .error (.immediateUB "Mismatched byval attribute between callee and callsite")
+      go 0 callArgAttrs
+  | _ => .error (.staticError "Callee does not have function type")
+
+/-- Construct a callee entry frame for a `call` instruction, checking signature & `byval` match. -/
+def mkCallEntryFrameWithMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (retTy : LlvmRetType) (callArgAttrs : List (List ValueAttr))
+    (defn : Definition) (argVals : List RegisterValue) : Except ExecError (CallFrame × MemoryState) :=
+  match checkCallSignatureAndByVal dl retTy callArgAttrs defn with
+  | .error e => .error e
+  | .ok () => mkEntryFrameWithMem dl cfg mem defn argVals
+
+theorem mkCallEntryFrameWithMem_preserves_wf {dl cfg mem retTy callArgAttrs defn argVals frame' mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : mkCallEntryFrameWithMem dl cfg mem retTy callArgAttrs defn argVals = .ok (frame', mem')) :
+    MemoryState.WellFormed mem' := by
+  unfold mkCallEntryFrameWithMem at h
+  cases hc : checkCallSignatureAndByVal dl retTy callArgAttrs defn with
+  | error e => rw [hc] at h; cases h
+  | ok u => rw [hc] at h; exact mkEntryFrameWithMem_preserves_wf hwf h
 
 /-- Construct the initial small-step `Config` for calling `defn` with `argVals` in `(cfg, dl, initMem)`. -/
 def initCallConfig (cfg : SemanticsConfig) (dl : DataLayout) (initMem : MemoryState)

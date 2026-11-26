@@ -1784,7 +1784,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
       | poison => llvm_simp
       | value bv => llvm_simp
     have hlookupId : helperId32Env.fns.get? (.name "id32") = some helperId32Def := rfl
-    have hmkCallee : mkEntryFrameWithMem .default64LE .modern initMem helperId32Def [.bv 32 v] =
+    have hmkCallee : mkCallEntryFrameWithMem .default64LE .modern initMem (.ret (.int 32)) [[]] helperId32Def [.bv 32 v] =
       .ok ({ defn := helperId32Def, curBlock := .name "entry", remainingCode := [],
              terminator := entryTerm helperId32Def,
              registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
@@ -1817,7 +1817,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
             (Step.term rfl rfl rfl
               (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
                 (StepRet.call_ok (rd := { destId := .id (.name "r"), retTy := .ret (.int 32), fmf := {}, retAttrs := [] })
-                  rfl (by llvm_step [helperId32Def]; rfl) rfl (by llvm_step; rfl))))
+                  rfl (by llvm_step [helperId32Def]; rfl) rfl rfl (by llvm_step; rfl))))
             (StarStep.step (ev := none)
               (Step.term rfl rfl rfl
                 (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
@@ -1859,7 +1859,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
             injection he with hpair; cases hpair
             cases hsr with
             | top_ok hnil => cases hnil
-            | call_ok hcons h1 hrd h2 =>
+            | call_ok hcons h1 hrd _ h2 =>
               cases hcons
               simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
               injection h1 with hv1; subst hv1
@@ -1867,10 +1867,13 @@ theorem caller_add0_is_refined_by_direct_in_module :
               simp only [applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
               injection h2 with hv2; subst hv2
               exact ⟨rfl, rfl⟩
+            | noreturn_ub hcons _ hrd hnr =>
+              cases hcons; injection hrd with hrd'; subst hrd'
+              simp [helperId32Def] at hnr
             | callee_attr_err h1 =>
               simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
               cases h1
-            | caller_attr_err hcons h1 hrd h2 =>
+            | caller_attr_err hcons h1 hrd _ h2 =>
               cases hcons
               simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
               injection h1 with hv1; subst hv1
@@ -1886,7 +1889,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
           exact Step.term rfl rfl rfl
             (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
               (StepRet.call_ok (rd := { destId := .id (.name "r"), retTy := .ret (.int 32), fmf := {}, retAttrs := [] })
-                rfl (by llvm_step [helperId32Def]; rfl) rfl (by llvm_step))))
+                rfl (by llvm_step [helperId32Def]; rfl) rfl rfl (by llvm_step))))
       hY3
     have hY1 := det_step_chain (st := {
         frames := [{ defn := callerDirectDef, curBlock := .name "entry",
@@ -1922,7 +1925,8 @@ theorem caller_add0_is_refined_by_direct_in_module :
             cases hcallee with
             | direct => cases halloc
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
-          | call_intrinsic_ok hargsEv hcallee _ hintr _ | call_intrinsic_retattr_err hargsEv hcallee _ hintr _ =>
+          | call_intrinsic_ok hargsEv hcallee _ hintr _ _ | call_intrinsic_bundle_err hargsEv hcallee _ hintr _
+          | call_intrinsic_retattr_err hargsEv hcallee _ hintr _ _ =>
             cases hcallee with
             | direct =>
               cases hargsEv with
@@ -1954,6 +1958,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
                 simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
                 rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
+                dsimp only [List.map] at hmk
                 rw [hmkCallee] at hmk; injection hmk with hpair; cases hpair
                 exact ⟨rfl, rfl⟩
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
@@ -1967,6 +1972,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
                 simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
                 rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
+                dsimp only [List.map] at hmk
                 rw [hmkCallee] at hmk; cases hmk
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_user_overflow _ _ _ _ _ _ hge => simp [SemanticsConfig.modern] at hge

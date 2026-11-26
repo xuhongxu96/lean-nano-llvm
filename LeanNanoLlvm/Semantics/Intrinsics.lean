@@ -212,8 +212,7 @@ def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
           let maxAlign := heapAllocAlign dl as
           match mem.allocate dl cfg sz.toNat maxAlign "malloc" as .uninitialized .heap false with
           | .ok (obj, mem') => .ok (.ptr as (.value (MemoryState.derivePointer dl obj)), mem')
-          | .error .outOfMemory => .ok (.ptr as (.value (Pointer.null dl as)), mem)
-          | .error e => .error e
+          | .error _ => .ok (.ptr as (.value (Pointer.null dl as)), mem)
         | _ => .error (.staticError "malloc expects 1 integer argument")
       | _ => .error (.staticError "malloc expects 1 integer argument")
   else if name == "calloc" then
@@ -228,8 +227,7 @@ def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
           else
             match mem.allocate dl cfg total maxAlign "calloc" as .zeroed .heap false with
             | .ok (obj, mem') => .ok (.ptr as (.value (MemoryState.derivePointer dl obj)), mem')
-            | .error .outOfMemory => .ok (.ptr as (.value (Pointer.null dl as)), mem)
-            | .error e => .error e
+            | .error _ => .ok (.ptr as (.value (Pointer.null dl as)), mem)
         | _, _ => .error (.immediateUB "calloc called with poison/invalid arguments")
       | _ => .error (.immediateUB "calloc called with poison/invalid arguments")
   else
@@ -278,10 +276,8 @@ theorem execAllocLibcall_sound {dl cfg mem name retTy argVals res}
             | ok p =>
               exact AllocLibcallSpec.malloc_ok retTy w sz p.1 p.2
                 (MemoryState.allocate_satisfies_AllocSpec hwf halloc)
-            | error e =>
-              rcases allocate_error_cases halloc with rfl | ⟨msg, rfl, hsz⟩
-              · exact AllocLibcallSpec.malloc_oom retTy w sz
-              · exact AllocLibcallSpec.malloc_bad_size retTy w sz msg hsz
+            | error _ =>
+              exact AllocLibcallSpec.malloc_oom retTy w sz
         | _ => exact AllocLibcallSpec.malloc_bad_args retTy _ (by intro w v heq; simp at heq)
       | cons b bs => exact AllocLibcallSpec.malloc_bad_args retTy (a :: b :: bs) (by intro w v heq; cases heq)
     | nil => exact AllocLibcallSpec.malloc_bad_args retTy [] (by intro w v heq; cases heq)
@@ -318,10 +314,8 @@ theorem execAllocLibcall_sound {dl cfg mem name retTy argVals res}
                       | ok p =>
                         exact AllocLibcallSpec.calloc_ok retTy w1 w2 cnt sz p.1 p.2 hlt
                           (MemoryState.allocate_satisfies_AllocSpec hwf halloc)
-                      | error e =>
-                        rcases allocate_error_cases halloc with rfl | ⟨msg, rfl, hsz⟩
-                        · exact AllocLibcallSpec.calloc_null retTy w1 w2 cnt sz
-                        · exact AllocLibcallSpec.calloc_bad_size retTy w1 w2 cnt sz msg hlt hsz
+                      | error _ =>
+                        exact AllocLibcallSpec.calloc_null retTy w1 w2 cnt sz
                   | poison =>
                     exact AllocLibcallSpec.calloc_bad_args retTy _ (by
                       intro _ _ _ _ heq
@@ -942,5 +936,86 @@ theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals
   | none =>
     rw [evalPureIntrinsicExec?_none_indep (o' := o') hp]
     rfl
+
+/-- Check whether an `llvm.assume` operand bundle tag requires evaluating its operand arguments. -/
+def assumeBundleShouldEval (tag : String) : Bool :=
+  tag == "nonnull" || tag == "noundef" || tag == "align" ||
+  tag == "dereferenceable" || tag == "dereferenceable_or_null" || tag == "range"
+
+/-- Evaluate a single `llvm.assume` operand bundle on already-evaluated operand values. -/
+def evalAssumeBundlePure (dl : DataLayout) (mem : MemoryState)
+    (tag : String) (vals : List RegisterValue) : Except ExecError Unit :=
+  match tag with
+  | "nonnull" =>
+    match vals with
+    | [.ptr _ .poison] => .error (.immediateUB "llvm.assume nonnull violated (poison)")
+    | [.ptr as (.value p)] =>
+      if p.isNull dl as then .error (.immediateUB "llvm.assume nonnull violated (null)")
+      else .ok ()
+    | _ => .ok ()
+  | "noundef" =>
+    match vals with
+    | [v] =>
+      if v.containsPoison then .error (.immediateUB "llvm.assume noundef violated (poison)")
+      else .ok ()
+    | _ => .ok ()
+  | "dereferenceable" =>
+    match vals with
+    | [pVal, .bv _ (.value sz)] =>
+      match applySingleAttrPure dl mem (.ptr 0) pVal (.dereferenceable sz.toNat) with
+      | .ok _ => .ok ()
+      | .error e => .error e
+    | [_, .bv _ .poison] => .error (.immediateUB "llvm.assume dereferenceable size is poison")
+    | _ => .ok ()
+  | "dereferenceable_or_null" =>
+    match vals with
+    | [pVal, .bv _ (.value sz)] =>
+      match applySingleAttrPure dl mem (.ptr 0) pVal (.dereferenceableOrNull sz.toNat) with
+      | .ok _ => .ok ()
+      | .error e => .error e
+    | [_, .bv _ .poison] => .error (.immediateUB "llvm.assume dereferenceable_or_null size is poison")
+    | _ => .ok ()
+  | "align" =>
+    match vals with
+    | .ptr _ .poison :: _ => .error (.immediateUB "llvm.assume align pointer is poison")
+    | .ptr as (.value p) :: aVal :: rest =>
+      if p.isNull dl as then .ok ()
+      else
+        match aVal with
+        | .bv _ .poison => .error (.immediateUB "llvm.assume align value is poison")
+        | .bv _ (.value abv) =>
+          let a := abv.toNat
+          if a == 0 || (a &&& (a - 1)) != 0 then
+            .error (.immediateUB s!"llvm.assume align({a}) is not a power of 2")
+          else
+            let off? : Except ExecError Nat := match rest with
+              | [] => .ok 0
+              | .bv _ .poison :: _ => .error (.immediateUB "llvm.assume align offset is poison")
+              | .bv _ (.value obv) :: _ => .ok obv.toNat
+              | _ => .ok 0
+            match off? with
+            | .error e => .error e
+            | .ok off =>
+              if (p.addr.toNat + a - (off % a)) % a != 0 then
+                .error (.immediateUB s!"llvm.assume align({a}) violated for pointer")
+              else .ok ()
+        | _ => .ok ()
+    | _ => .ok ()
+  | "range" =>
+    match vals with
+    | [.bv _ .poison, _, _] => .error (.immediateUB "llvm.assume range value is poison")
+    | [.bv _ (.value vbv), .bv _ (.value lbv), .bv _ (.value hbv)] =>
+      let v := vbv.toNat
+      let lo := lbv.toNat
+      let hi := hbv.toNat
+      let inRange :=
+        if lo ≤ hi then lo ≤ v && v < hi
+        else v ≥ lo || v < hi
+      if inRange then .ok ()
+      else .error (.immediateUB "llvm.assume range violated")
+    | [_, .bv _ .poison, _] | [_, _, .bv _ .poison] =>
+      .error (.immediateUB "llvm.assume range bound is poison")
+    | _ => .ok ()
+  | _ => .ok ()
 
 end LeanNanoLlvm.Semantics

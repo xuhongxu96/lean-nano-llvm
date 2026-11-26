@@ -151,7 +151,7 @@ def Instruction.WellFormedWith (cfg : SemanticsConfig) (locals : List LocalId)
       ∧ cond.WellFormedFor cfg condTy ∧ cond.WellScopedTo locals
       ∧ tv.WellFormedFor cfg valTy ∧ tv.WellScopedTo locals
       ∧ fv.WellFormedFor cfg valTy ∧ fv.WellScopedTo locals
-  | .phi ty _ incoming =>
+  | .phi ty _ incoming _ =>
       instrId.DefinesLocal
       ∧ ty.isFirstClass = true
       ∧ incoming ≠ []
@@ -208,7 +208,7 @@ def Instruction.WellFormedWith (cfg : SemanticsConfig) (locals : List LocalId)
       ∧ mask ≠ []
       ∧ v1.WellFormedFor cfg vecTy ∧ v1.WellScopedTo locals
       ∧ v2.WellFormedFor cfg vecTy ∧ v2.WellScopedTo locals
-  | .call retTy _ callee args _ =>
+  | .call retTy _ callee args _ _ _ =>
       (match retTy with | .void => instrId.IsVoid | .ret _ => True)
       ∧ callee.WellScopedTo locals
       ∧ ∀ a ∈ args, a.2.1.WellFormedFor cfg a.1 ∧ a.2.1.WellScopedTo locals

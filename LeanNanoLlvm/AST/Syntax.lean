@@ -569,7 +569,7 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
         mkAppM ``Prod.mk #[← elabNanoLlvmExp e, ← elabNanoLlvmRawId lbl]
       | _ => throwUnsupportedSyntax
     let lst ← mkListLit pairTy incExprs
-    mkAppM ``Instruction.phi #[← elabNanoLlvmType ty, toExpr (elabFastMathFlags flags), lst]
+    mkAppM ``Instruction.phi #[← elabNanoLlvmType ty, toExpr (elabFastMathFlags flags), lst, ← mkListLit (mkConst ``ValueAttr) []]
   | `(nanollvm_instruction| alloca $ty:nanollvm_type $[, $opts:nanollvm_alloca_opt]*) => do
     let tyE ← elabNanoLlvmType ty
     let mut numElOpt : Option Expr := none
@@ -637,7 +637,8 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
         mkAppM ``Prod.mk #[← elabNanoLlvmType t, inner]
       | _ => throwUnsupportedSyntax
     let argList ← mkListLit argTupleT argExprs
-    mkAppM ``Instruction.call #[← elabNanoLlvmRetType retTy, toExpr (elabFastMathFlags flags), ← elabNanoLlvmExp callee, argList, ← elabValueAttrList retAttrs]
+    let emptyBundles ← mkListLit (← mkAppM ``Prod #[mkConst ``String, ← mkAppM ``List #[← mkAppM ``Prod #[mkConst ``LlvmType, mkConst ``Exp]]]) []
+    mkAppM ``Instruction.call #[← elabNanoLlvmRetType retTy, toExpr (elabFastMathFlags flags), ← elabNanoLlvmExp callee, argList, ← elabValueAttrList retAttrs, emptyBundles, toExpr false]
   | `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp) => do
     let tv ← mkAppM ``Prod.mk #[← elabNanoLlvmType ty, ← elabNanoLlvmExp v]
     mkAppM ``Instruction.freeze #[tv]
@@ -709,7 +710,7 @@ def elabNanoLlvmDeclaration : Syntax → TermElabM Expr
     let attrListT ← mkAppM ``List #[mkConst ``ValueAttr]
     let argAttrsList ← mkListLit attrListT argAttrs.toList
     let fnTy ← mkAppM ``LlvmType.function #[retTyE, argList, toExpr isVarArg]
-    mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs]
+    mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false]
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-declaration|" p:nanollvm_declaration "]" : term => elabNanoLlvmDeclaration p
@@ -806,7 +807,7 @@ def elabNanoLlvmDefinition : Syntax → TermElabM Expr
       curLine := curLine + nLines
       blockExprs := blockExprs.push bE
     let blockList ← mkListLit (mkConst ``Block) blockExprs.toList
-    let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs]
+    let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false]
     mkAppM ``Definition.mk #[decl, argNameList, blockList]
   | _ => throwUnsupportedSyntax
 
