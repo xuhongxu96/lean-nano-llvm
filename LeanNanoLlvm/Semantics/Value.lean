@@ -323,6 +323,44 @@ theorem IsRefinedByList.trans {f g : MemoryInjection} :
   | [], [], _ :: _, _, h23 | _ :: _, _ :: _, [], _, h23 => False.elim h23
 end
 
+mutual
+theorem IsRefinedBy.mono {f g : MemoryInjection} (hext : f.Extends g) :
+    ∀ {v1 v2 : RegisterValue}, IsRefinedBy f v1 v2 → IsRefinedBy g v1 v2
+  | .bv _ .poison, .bv _ _, h => h
+  | .bv _ (.value _), .bv _ (.value _), h => h
+  | .bv _ (.value _), .bv _ .poison, h => h
+  | .float _ .poison, .float _ _, h => h
+  | .float _ (.value _), .float _ (.value _), h => h
+  | .float _ (.value _), .float _ .poison, h => h
+  | .ptr _ .poison, .ptr _ _, h => h
+  | .ptr _ (.value _), .ptr _ (.value _), h => ⟨h.1, Pointer.IsRefinedBy.mono hext h.2⟩
+  | .ptr _ (.value _), .ptr _ .poison, h => h
+  | .vector _ _, .vector _ _, h => ⟨h.1, IsRefinedByList.mono hext h.2⟩
+  | .array _ _, .array _ _, h => ⟨h.1, IsRefinedByList.mono hext h.2⟩
+  | .struct _ _ _, .struct _ _ _, h => ⟨h.1, h.2.1, IsRefinedByList.mono hext h.2.2⟩
+  | .void, .void, _ => trivial
+  | .bv _ _, .float _ _, h | .bv _ _, .ptr _ _, h | .bv _ _, .vector _ _, h
+  | .bv _ _, .array _ _, h | .bv _ _, .struct _ _ _, h | .bv _ _, .void, h
+  | .float _ _, .bv _ _, h | .float _ _, .ptr _ _, h | .float _ _, .vector _ _, h
+  | .float _ _, .array _ _, h | .float _ _, .struct _ _ _, h | .float _ _, .void, h
+  | .ptr _ _, .bv _ _, h | .ptr _ _, .float _ _, h | .ptr _ _, .vector _ _, h
+  | .ptr _ _, .array _ _, h | .ptr _ _, .struct _ _ _, h | .ptr _ _, .void, h
+  | .vector _ _, .bv _ _, h | .vector _ _, .float _ _, h | .vector _ _, .ptr _ _, h
+  | .vector _ _, .array _ _, h | .vector _ _, .struct _ _ _, h | .vector _ _, .void, h
+  | .array _ _, .bv _ _, h | .array _ _, .float _ _, h | .array _ _, .ptr _ _, h
+  | .array _ _, .vector _ _, h | .array _ _, .struct _ _ _, h | .array _ _, .void, h
+  | .struct _ _ _, .bv _ _, h | .struct _ _ _, .float _ _, h | .struct _ _ _, .ptr _ _, h
+  | .struct _ _ _, .vector _ _, h | .struct _ _ _, .array _ _, h | .struct _ _ _, .void, h
+  | .void, .bv _ _, h | .void, .float _ _, h | .void, .ptr _ _, h
+  | .void, .vector _ _, h | .void, .array _ _, h | .void, .struct _ _ _, h => False.elim h
+
+theorem IsRefinedByList.mono {f g : MemoryInjection} (hext : f.Extends g) :
+    ∀ {xs ys : List RegisterValue}, IsRefinedByList f xs ys → IsRefinedByList g xs ys
+  | [], [], _ => trivial
+  | _ :: _, _ :: _, h => ⟨IsRefinedBy.mono hext h.1, IsRefinedByList.mono hext h.2⟩
+  | [], _ :: _, h | _ :: _, [], h => False.elim h
+end
+
 end RegisterValue
 
 def castRegValue? (w : Nat) : RegisterValue → Option (IntW w)
@@ -1854,5 +1892,8 @@ theorem evalConversionExec_preserves_wf {dl cfg mem op fromTy val toTy o res mem
   · split at h
     · cases h; exact hwf
     · cases h
+
+attribute [simp_llvm] liftUnaryPure liftBinaryPure evalIntBinaryScalarPure
+attribute [simp_step] applyValueAttrsPure
 
 end LeanNanoLlvm.Semantics

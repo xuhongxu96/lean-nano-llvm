@@ -1071,6 +1071,21 @@ theorem comp_idOn {f g : MemoryInjection} {ids : List AllocId}
   intro i hi
   simp [comp, hf i hi, hg i hi]
 
+/-- `inj1.Extends inj2` means `inj2` agrees with `inj1` on every allocation mapped by `inj1`. -/
+def Extends (inj1 inj2 : MemoryInjection) : Prop :=
+  ∀ a b, inj1.map a = some b → inj2.map a = some b
+
+theorem Extends.refl (inj : MemoryInjection) : inj.Extends inj :=
+  fun _ _ h => h
+
+theorem Extends.trans {inj1 inj2 inj3 : MemoryInjection}
+    (h12 : inj1.Extends inj2) (h23 : inj2.Extends inj3) : inj1.Extends inj3 :=
+  fun a b h => h23 a b (h12 a b h)
+
+theorem Extends.idOn {inj1 inj2 : MemoryInjection} {ids : List AllocId}
+    (hext : inj1.Extends inj2) (hid : inj1.IdOn ids) : inj2.IdOn ids :=
+  fun id h => hext id id (hid id h)
+
 end MemoryInjection
 
 /-- Provenance refinement under a `MemoryInjection` (source `ps` is refined by target `pt`). -/
@@ -1091,6 +1106,19 @@ theorem Provenance.IsRefinedBy.refl (p : Provenance) : Provenance.IsRefinedBy .i
   | concrete _ => rfl
   | wildcard _ k => cases k <;> trivial
 
+theorem Provenance.IsRefinedBy.mono {f g : MemoryInjection} {p1 p2 : Provenance}
+    (hext : f.Extends g) (h : Provenance.IsRefinedBy f p1 p2) :
+    Provenance.IsRefinedBy g p1 p2 := by
+  cases p1 <;> cases p2
+  all_goals simp only [Provenance.IsRefinedBy] at h ⊢
+  all_goals try exact h
+  · exact hext _ _ h
+  · rename_i k1 _ k2
+    cases k1 <;> cases k2
+    all_goals dsimp only at h ⊢
+    all_goals try exact h
+    exact hext _ _ h
+
 theorem Provenance.IsRefinedBy.trans {f g : MemoryInjection} {p1 p2 p3 : Provenance}
     (h12 : Provenance.IsRefinedBy f p1 p2) (h23 : Provenance.IsRefinedBy g p2 p3) :
     Provenance.IsRefinedBy (f.comp g) p1 p3 := by
@@ -1110,6 +1138,11 @@ def Pointer.IsRefinedBy (inj : MemoryInjection) (ps pt : Pointer) : Prop :=
 
 theorem Pointer.IsRefinedBy.refl (p : Pointer) : Pointer.IsRefinedBy .id p p :=
   ⟨⟨rfl, rfl⟩, Provenance.IsRefinedBy.refl p.prov⟩
+
+theorem Pointer.IsRefinedBy.mono {f g : MemoryInjection} {p1 p2 : Pointer}
+    (hext : f.Extends g) (h : Pointer.IsRefinedBy f p1 p2) :
+    Pointer.IsRefinedBy g p1 p2 :=
+  ⟨h.1, Provenance.IsRefinedBy.mono hext h.2⟩
 
 theorem Pointer.IsRefinedBy.trans {f g : MemoryInjection} {p1 p2 p3 : Pointer}
     (h12 : Pointer.IsRefinedBy f p1 p2) (h23 : Pointer.IsRefinedBy g p2 p3) :
@@ -1145,6 +1178,23 @@ theorem MemBit.IsRefinedBy.refl (b : MemBit) : MemBit.IsRefinedBy .id b b := by
     | none => trivial
     | some p => exact ⟨rfl, Provenance.IsRefinedBy.refl p.1⟩
 
+theorem MemBit.IsRefinedBy.mono {f g : MemoryInjection} {b1 b2 : MemBit}
+    (hext : f.Extends g) (h : MemBit.IsRefinedBy f b1 b2) :
+    MemBit.IsRefinedBy g b1 b2 := by
+  cases b1 with
+  | poison => trivial
+  | undef => trivial
+  | concrete bs ps =>
+    cases b2 with
+    | poison => cases h
+    | undef => cases h
+    | concrete bt pt =>
+      refine ⟨h.1, ?_⟩
+      cases ps <;> cases pt
+      all_goals dsimp only at h ⊢
+      all_goals try exact h.2
+      exact ⟨h.2.1, Provenance.IsRefinedBy.mono hext h.2.2⟩
+
 theorem MemBit.IsRefinedBy.trans {f g : MemoryInjection} {b1 b2 b3 : MemBit}
     (h12 : MemBit.IsRefinedBy f b1 b2) (h23 : MemBit.IsRefinedBy g b2 b3) :
     MemBit.IsRefinedBy (f.comp g) b1 b3 := by
@@ -1177,6 +1227,11 @@ def MemByte.IsRefinedBy (inj : MemoryInjection) (bs bt : MemByte) : Prop :=
 theorem MemByte.IsRefinedBy.refl (b : MemByte) : MemByte.IsRefinedBy .id b b :=
   fun i _ => MemBit.IsRefinedBy.refl (b.getBit i)
 
+theorem MemByte.IsRefinedBy.mono {f g : MemoryInjection} {b1 b2 : MemByte}
+    (hext : f.Extends g) (h : MemByte.IsRefinedBy f b1 b2) :
+    MemByte.IsRefinedBy g b1 b2 :=
+  fun i hi => MemBit.IsRefinedBy.mono hext (h i hi)
+
 theorem MemByte.IsRefinedBy.trans {f g : MemoryInjection} {b1 b2 b3 : MemByte}
     (h12 : MemByte.IsRefinedBy f b1 b2) (h23 : MemByte.IsRefinedBy g b2 b3) :
     MemByte.IsRefinedBy (f.comp g) b1 b3 :=
@@ -1208,6 +1263,16 @@ theorem MemoryState.IsRefinedBy.refl (callerIds : List AllocId) (mem : MemorySta
   cases mem.objects.get? id with
   | none => trivial
   | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.IsRefinedBy.refl _⟩
+
+theorem MemoryState.IsRefinedBy.mono {f g : MemoryInjection} {callerIds : List AllocId}
+    {m1 m2 : MemoryState} (hext : f.Extends g) (h : MemoryState.IsRefinedBy f callerIds m1 m2) :
+    MemoryState.IsRefinedBy g callerIds m1 m2 := by
+  intro id hid
+  have r := h id hid
+  cases hm1 : m1.objects.get? id <;> cases hm2 : m2.objects.get? id
+  all_goals simp only [hm1, hm2] at r ⊢
+  all_goals try exact r
+  exact ⟨r.1, r.2.1, fun hnf i hi => MemByte.IsRefinedBy.mono hext (r.2.2 hnf i hi)⟩
 
 theorem MemoryState.IsRefinedBy.trans {f g : MemoryInjection} {callerIds : List AllocId}
     {m1 m2 m3 : MemoryState}

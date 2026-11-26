@@ -7,61 +7,15 @@ namespace LeanNanoLlvm.Refinement
 open LeanNanoLlvm
 open Semantics
 
-/-! ### Reusable Small-Step Refinement Proof Combinators -/
-
-private theorem refines_of_det_halted {initMem : MemoryState} {cY cX : Config}
-    {retY retX : RegisterValue} {memY memX : MemoryState}
-    (hY : ¬ CanAbort cY ∧ ¬ Diverges cY ∧
-      ∀ tr r m, Terminates cY tr r m → tr = [] ∧ r = retY ∧ m = memY)
-    (hX_term : Terminates cX [] retX memX)
-    (hret : RegisterValue.IsRefinedBy .id retX retY)
-    (hmem : MemoryState.IsRefinedBy .id initMem.allocIds memX memY) :
-    CanAbort cX ∨
-    (¬ CanAbort cY ∧
-      (∀ trY rY mY, Terminates cY trY rY mY →
-        ∃ trX rX mX inj,
-          inj.IdOn initMem.allocIds ∧
-          Terminates cX trX rX mX ∧
-          Trace.IsRefinedBy inj trX trY ∧
-          RegisterValue.IsRefinedBy inj rX rY ∧
-          MemoryState.IsRefinedBy inj initMem.allocIds mX mY) ∧
-      (Diverges cY → Diverges cX)) := by
-  refine Or.inr ⟨hY.1, ?_, fun hd => False.elim (hY.2.1 hd)⟩
-  intro trY rY mY ht
-  obtain ⟨rfl, rfl, rfl⟩ := hY.2.2 trY rY mY ht
-  exact ⟨[], retX, memX, .id, MemoryInjection.id_idOn _, hX_term, trivial, hret, hmem⟩
-
-private theorem det_step_to_halted {st : MachineState} {v : RegisterValue} {m : MemoryState}
-    (hdet : ∀ ev c', Step (.running st) ev c' ↔ ev = none ∧ c' = .halted v m) :
-    ¬ CanAbort (.running st) ∧
-    ¬ Diverges (.running st) ∧
-    (∀ tr r mem, Terminates (.running st) tr r mem → tr = [] ∧ r = v ∧ mem = m) := by
-  refine ⟨?_, ?_, ?_⟩
-  · rw [CanAbort.of_det_step hdet]; exact not_canAbort_halted
-  · rw [Diverges.of_det_step hdet]; exact not_diverges_halted
-  · intro tr r mem ht
-    rw [terminates_of_det_step_none hdet, terminates_halted_iff] at ht
-    exact ht
-
-private theorem det_step_chain {st : MachineState} {c1 : Config}
-    (hdet : ∀ ev c', Step (.running st) ev c' ↔ ev = none ∧ c' = c1)
-    {v : RegisterValue} {m : MemoryState}
-    (h1 : ¬ CanAbort c1 ∧ ¬ Diverges c1 ∧
-      ∀ tr r mem, Terminates c1 tr r mem → tr = [] ∧ r = v ∧ mem = m) :
-    ¬ CanAbort (.running st) ∧
-    ¬ Diverges (.running st) ∧
-    (∀ tr r mem, Terminates (.running st) tr r mem → tr = [] ∧ r = v ∧ mem = m) := by
-  refine ⟨?_, ?_, ?_⟩
-  · rw [CanAbort.of_det_step hdet]; exact h1.1
-  · rw [Diverges.of_det_step hdet]; exact h1.2.1
-  · intro tr r mem ht
-    rw [terminates_of_det_step_none hdet] at ht
-    exact h1.2.2 tr r mem ht
-
 private def entryTerm (d : AST.Definition) : AST.InstructionId × AST.Terminator :=
   match d.blocks with
   | b :: _ => b.terminator
   | [] => (.void 0, .unreachable)
+
+private def entryCode (d : AST.Definition) : AST.Code :=
+  match d.blocks with
+  | b :: _ => b.code
+  | [] => []
 
 private theorem initCallConfig_0 (cfg : SemanticsConfig) (dl : AST.DataLayout)
     (mem : MemoryState) (defn : AST.Definition) {retTy : AST.LlvmRetType}
@@ -163,10 +117,9 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨arg, _ | _⟩
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, retAddX0Def] at hargs
+  · llvm_wf [retAddX0Def] at hargs
   · cases arg <;>
-      simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
-            Semantics.RegisterValue.WellFormedFor, retAddX0Def] at hargs
+      llvm_wf [retAddX0Def] at hargs
     subst hargs
     rename_i v
     have hm : (RegisterValue.bv w v).matchesType (.int w) = true := by
@@ -176,27 +129,27 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
     have haddVal : liftBinaryPure (.int w) (.bv w v) (.bv w (.value (BitVec.ofInt w 0)))
         (evalIntBinaryScalarPure (.add false false)) = .ok (.bv w v) := by
       cases v using PoisonOr.casesOn' with
-      | poison => simp [liftBinaryPure, evalIntBinaryScalarPure, simp_llvm, simp_llvm_option]
-      | value bv => simp [liftBinaryPure, evalIntBinaryScalarPure, simp_llvm, simp_llvm_option]
-    refine refines_of_det_halted
+      | poison => llvm_simp
+      | value bv => llvm_simp
+    refine Config.IsRefinedBy.of_det_halted
       (det_step_to_halted fun ev c' => by
-        rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv w v) (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
+        rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv w v) (by llvm_step)]
         rfl)
       (StarStep.step (ev := none)
         (Step.instr rfl rfl
           (StepInstr.intBinaryOp_ok
-            (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]))
+            (EvalExp.leaf_ok (by llvm_step))
             (EvalExp.leaf_ok (by simp [evalPureLeafExp?]))
             haddVal))
         (StarStep.step (ev := none)
           (Step.term rfl rfl rfl
             (StepTerm.ret_ok rfl
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-              (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, retAddX0Def]))))
+              (EvalExp.leaf_ok (by llvm_step; rfl))
+              (StepRet.top_ok rfl (by llvm_step [retAddX0Def]))))
           (StarStep.refl _)))
       (RegisterValue.IsRefinedBy.refl _)
       (MemoryState.IsRefinedBy.refl _ _)
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, retAddX0Def] at hargs
+  · llvm_wf [retAddX0Def] at hargs
 
 theorem ret_add_x_0_is_refined_by_ret_x :
     retAddX0Def 8 ⊒ retXDef 8 :=
@@ -293,14 +246,14 @@ private theorem step_mul_undef_2_inv (w : Nat) (initMem : MemoryState) :
     obtain ⟨b, rfl, _⟩ := undefValRel_int_iff.mp hu1
     rw [EvalExp.leaf_iff (v := .bv w (.value (BitVec.ofInt w 2))) (by simp [evalPureLeafExp?])] at he2
     cases he2
-    simp [liftBinaryPure, evalIntBinaryScalarPure, simp_llvm, simp_llvm_option] at hbin
+    llvm_simp at hbin
   | intBinaryOp_ok he1 he2 hbin =>
     rw [EvalExp.undef_iff (by rfl) (by rfl)] at he1
     obtain ⟨v1, h1, hu1⟩ := he1; cases h1
     obtain ⟨b, rfl, _⟩ := undefValRel_int_iff.mp hu1
     rw [EvalExp.leaf_iff (v := .bv w (.value (BitVec.ofInt w 2))) (by simp [evalPureLeafExp?])] at he2
     cases he2
-    simp [liftBinaryPure, evalIntBinaryScalarPure, simp_llvm, simp_llvm_option] at hbin
+    llvm_simp at hbin
     subst hbin
     exact ⟨rfl, b, rfl⟩
 
@@ -323,7 +276,7 @@ private theorem step_mul_undef_2_ret (w : Nat) (initMem : MemoryState) (b : BitV
   intro ev c'
   rw [Step.ret_top_leaf_iff rfl rfl rfl rfl
     (v := .bv w (.value (b * BitVec.ofInt w 2)))
-    (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
+    (by llvm_step)]
   rfl
 
 theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
@@ -332,7 +285,7 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
   intro initMem args _ hargs
   cases args with
   | cons _ _ =>
-    simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, undefAddDefGeneric] at hargs
+    llvm_wf [undefAddDefGeneric] at hargs
   | nil =>
     right
     have hstep1 := step_mul_undef_2_inv w initMem
@@ -361,12 +314,12 @@ theorem undef_add_is_refined_by_undef_mul2_generic (w : Nat) :
             (Step.instr rfl rfl (StepInstr.intBinaryOp_ok
               (EvalExp.undef_ok rfl (UndefValRel.int w b (by intro h; cases h)))
               (EvalExp.undef_ok rfl (UndefValRel.int w b (by intro h; cases h)))
-              (by simp [liftBinaryPure, evalIntBinaryScalarPure, simp_llvm, simp_llvm_option]; rfl)))
+              (by llvm_simp; rfl)))
             (StarStep.step (ev := none)
               (Step.term rfl rfl rfl
                 (StepTerm.ret_ok rfl
-                  (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-                  (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, undefAddDefGeneric]))))
+                  (EvalExp.leaf_ok (by llvm_step; rfl))
+                  (StepRet.top_ok rfl (by llvm_step [undefAddDefGeneric]))))
               (StarStep.refl _))
         exact ⟨[], .bv w (.value (b * BitVec.ofInt w 2)), initMem, .id,
           MemoryInjection.id_idOn _, hTermX, trivial,
@@ -381,7 +334,7 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
   rintro ⟨_, hbeh⟩
   have hstep1 := step_mul_undef_2_inv w {}
   have hinst := hbeh {} [] MemoryState.empty_wf
-    (by simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, undefMul2DefGeneric])
+    (by llvm_wf [undefMul2DefGeneric])
   rcases hinst with habortX | ⟨_, hterm, _⟩
   · rcases habortX with ⟨tr, msg, hstar⟩ | ⟨tr, err, hstar⟩
     · cases hstar with
@@ -399,12 +352,12 @@ theorem undef_mul2_is_not_refined_by_undef_add_generic (w : Nat) (hpos : 0 < w) 
         (Step.instr rfl rfl (StepInstr.intBinaryOp_ok
           (EvalExp.undef_ok rfl (UndefValRel.int w (1#w) (by intro h; cases h)))
           (EvalExp.undef_ok rfl (UndefValRel.int w (0#w) (by intro h; cases h)))
-          (by simp [liftBinaryPure, evalIntBinaryScalarPure, simp_llvm, simp_llvm_option]; rfl)))
+          (by llvm_simp; rfl)))
         (StarStep.step (ev := none)
           (Step.term rfl rfl rfl
             (StepTerm.ret_ok rfl
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-              (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, undefAddDefGeneric]))))
+              (EvalExp.leaf_ok (by llvm_step; rfl))
+              (StepRet.top_ok rfl (by llvm_step [undefAddDefGeneric]))))
           (StarStep.refl _))
     obtain ⟨trX, retX, memX, inj, _, hTermX, _, hvalRef, _⟩ := hterm [] _ {} hTermY
     cases hTermX with
@@ -468,18 +421,18 @@ theorem poison_is_refined_by_zero : poisonDef ⊒ zeroDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   cases args with
-  | cons _ _ => simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, poisonDef] at hargs
+  | cons _ _ => llvm_wf [poisonDef] at hargs
   | nil =>
     have hY := det_step_to_halted (zeroDef_det .modern initMem)
     have hX : Terminates (initCallConfig .modern .default64LE initMem ∅ ∅ poisonDef [])
         [] (.bv 8 .poison) initMem :=
       StarStep.step ((poisonDef_det .modern initMem _ _).mpr ⟨rfl, rfl⟩) (StarStep.refl _)
-    exact refines_of_det_halted hY hX rfl (MemoryState.IsRefinedBy.refl _ _)
+    exact Config.IsRefinedBy.of_det_halted hY hX rfl (MemoryState.IsRefinedBy.refl _ _)
 
 theorem zero_is_not_refined_by_poison : ¬ (zeroDef ⊒ poisonDef) := by
   rintro ⟨_, hbeh⟩
   have hinst := hbeh {} [] MemoryState.empty_wf
-    (by simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, zeroDef])
+    (by llvm_wf [zeroDef])
   have hZ := det_step_to_halted (zeroDef_det .modern {})
   rcases hinst with habort | ⟨_, hterm, _⟩
   · exact hZ.1 habort
@@ -513,10 +466,9 @@ theorem ret_42_refines_udiv_by_zero : udivZeroDef ⊒ ret42Def := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨arg, _ | _⟩
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, udivZeroDef] at hargs
+  · llvm_wf [udivZeroDef] at hargs
   · cases arg <;>
-      simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
-            Semantics.RegisterValue.WellFormedFor, udivZeroDef] at hargs
+      llvm_wf [udivZeroDef] at hargs
     subst hargs
     rename_i v
     left; left
@@ -530,11 +482,11 @@ theorem ret_42_refines_udiv_by_zero : udivZeroDef ⊒ ret42Def := by
     exact StarStep.step (ev := none)
       (Step.instr rfl rfl
         (StepInstr.intBinaryOp_eval_err
-          (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]))
+          (EvalExp.leaf_ok (by llvm_step))
           (EvalExp.leaf_ok (by simp [evalPureLeafExp?]))
           hub))
       (StarStep.refl _)
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, udivZeroDef] at hargs
+  · llvm_wf [udivZeroDef] at hargs
 
 /-! ### 5. True Nondeterministic `freeze` Refinement -/
 
@@ -595,14 +547,14 @@ private theorem step_freeze_poison_ret (initMem : MemoryState) (b : BitVec 8) :
       }) ev c' ↔
       ev = none ∧ c' = .halted (.bv 8 (.value b)) initMem := by
   intro ev c'
-  rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 (.value b)) (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
+  rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 (.value b)) (by llvm_step)]
   rfl
 
 theorem zero_refines_freeze_poison : freezePoisonDef ⊒ zeroDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   cases args with
-  | cons _ _ => simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, freezePoisonDef] at hargs
+  | cons _ _ => llvm_wf [freezePoisonDef] at hargs
   | nil =>
     have hY := det_step_to_halted (zeroDef_det .modern initMem)
     have hTermX : Terminates (initCallConfig .modern .default64LE initMem ∅ ∅ freezePoisonDef [])
@@ -616,10 +568,10 @@ theorem zero_refines_freeze_poison : freezePoisonDef ⊒ zeroDef := by
         (StarStep.step (ev := none)
           (Step.term rfl rfl rfl
             (StepTerm.ret_ok rfl
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-              (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, freezePoisonDef]))))
+              (EvalExp.leaf_ok (by llvm_step; rfl))
+              (StepRet.top_ok rfl (by llvm_step [freezePoisonDef]))))
           (StarStep.refl _))
-    exact refines_of_det_halted hY hTermX
+    exact Config.IsRefinedBy.of_det_halted hY hTermX
       (RegisterValue.IsRefinedBy.refl _)
       (MemoryState.IsRefinedBy.refl _ _)
 
@@ -627,7 +579,7 @@ theorem freeze_poison_refines_poison : poisonDef ⊒ freezePoisonDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   cases args with
-  | cons _ _ => simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, poisonDef] at hargs
+  | cons _ _ => llvm_wf [poisonDef] at hargs
   | nil =>
     right
     have hstep1 := step_freeze_poison_inv initMem
@@ -660,7 +612,7 @@ theorem freeze_poison_refines_poison : poisonDef ⊒ freezePoisonDef := by
 theorem freeze_poison_not_refines_zero : ¬ (zeroDef ⊒ freezePoisonDef) := by
   rintro ⟨_, hbeh⟩
   have hinst := hbeh {} [] MemoryState.empty_wf
-    (by simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, zeroDef])
+    (by llvm_wf [zeroDef])
   have hZ := det_step_to_halted (zeroDef_det .modern {})
   rcases hinst with habort | ⟨_, hterm, _⟩
   · exact hZ.1 habort
@@ -675,8 +627,8 @@ theorem freeze_poison_not_refines_zero : ¬ (zeroDef ⊒ freezePoisonDef) := by
         (StarStep.step (ev := none)
           (Step.term rfl rfl rfl
             (StepTerm.ret_ok rfl
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-              (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, freezePoisonDef]))))
+              (EvalExp.leaf_ok (by llvm_step; rfl))
+              (StepRet.top_ok rfl (by llvm_step [freezePoisonDef]))))
           (StarStep.refl _))
     obtain ⟨trX, retX, memX, inj, _, hTermX, _, hvalRef, _⟩ := hterm [] _ {} hTermY
     obtain ⟨rfl, rfl, rfl⟩ := hZ.2.2 _ _ _ hTermX
@@ -706,10 +658,9 @@ theorem fneg_fneg_is_refined_by_id : fnegFnegDef ⊒ idFloatDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨arg, _ | _⟩
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, fnegFnegDef] at hargs
+  · llvm_wf [fnegFnegDef] at hargs
   · cases arg <;>
-      simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
-            Semantics.RegisterValue.WellFormedFor, fnegFnegDef] at hargs
+      llvm_wf [fnegFnegDef] at hargs
     subst hargs
     rename_i v
     rw [initCallConfig_1 .modern .default64LE initMem idFloatDef rfl (Or.inl rfl) rfl rfl rfl rfl]
@@ -722,30 +673,30 @@ theorem fneg_fneg_is_refined_by_id : fnegFnegDef ⊒ idFloatDef := by
       cases v using PoisonOr.casesOn' with
       | poison => rfl
       | value flt => simp [evalFloatUnaryExec, evalFloatUnaryOp, handleFMF, OracleState.nextBool]
-    exact refines_of_det_halted
+    exact Config.IsRefinedBy.of_det_halted
       (det_step_to_halted fun ev c' => by
         rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .float .float v)
-          (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
+          (by llvm_step)]
         rfl)
       (StarStep.step (ev := none)
         (Step.instr rfl rfl
           (StepInstr.floatUnaryOp_ok
-            (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]))
+            (EvalExp.leaf_ok (by llvm_step))
             ⟨default, _, hfneg1⟩))
         (StarStep.step (ev := none)
           (Step.instr rfl rfl
             (StepInstr.floatUnaryOp_ok
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]))
+              (EvalExp.leaf_ok (by llvm_step))
               ⟨default, _, hfneg2⟩))
           (StarStep.step (ev := none)
             (Step.term rfl rfl rfl
               (StepTerm.ret_ok rfl
-                (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-                (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, fnegFnegDef]))))
+                (EvalExp.leaf_ok (by llvm_step; rfl))
+                (StepRet.top_ok rfl (by llvm_step [fnegFnegDef]))))
             (StarStep.refl _))))
       (RegisterValue.IsRefinedBy.refl _)
       (MemoryState.IsRefinedBy.refl _ _)
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, fnegFnegDef] at hargs
+  · llvm_wf [fnegFnegDef] at hargs
 
 private theorem handleDenormal_ieee (x : IEEEFloat FloatFormat.single) (b1 b2 : Bool) :
     handleDenormal .ieee b1 b2 x = x := by
@@ -815,11 +766,10 @@ theorem fadd_refines_fadd_nnan : faddNnanDef ⊒ faddDef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨a, _ | ⟨b, _ | _⟩⟩
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, faddNnanDef] at hargs
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, faddNnanDef] at hargs
+  · llvm_wf [faddNnanDef] at hargs
+  · llvm_wf [faddNnanDef] at hargs
   · cases a <;> cases b <;>
-      simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
-            Semantics.RegisterValue.WellFormedFor, faddNnanDef] at hargs
+      llvm_wf [faddNnanDef] at hargs
     rcases hargs with ⟨rfl, rfl⟩
     rename_i va vb
     have hba : (AST.Identifier.local_id (.name "b") == AST.Identifier.local_id (.name "a")) = false := rfl
@@ -900,7 +850,7 @@ theorem fadd_refines_fadd_nnan : faddNnanDef ⊒ faddDef := by
         ev = none ∧ c' = .halted (.float .float rt) initMem := by
       intro rt ev c'
       rw [Step.ret_top_leaf_iff rfl rfl rfl rfl
-        (v := .float .float rt) (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
+        (v := .float .float rt) (by llvm_step)]
       rfl
     refine ⟨?_, ?_, ?_⟩
     · rintro (⟨tr, msg, hstar⟩ | ⟨tr, err, hstar⟩)
@@ -924,14 +874,14 @@ theorem fadd_refines_fadd_nnan : faddNnanDef ⊒ faddDef := by
                 rfl (Or.inl rfl) rfl rfl rfl rfl rfl]
           exact StarStep.step (ev := none)
             (Step.instr rfl rfl (StepInstr.floatBinaryOp_ok
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hba]))
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]))
+              (EvalExp.leaf_ok (by llvm_step [hba]))
+              (EvalExp.leaf_ok (by llvm_step))
               ⟨o, o2, hokS⟩))
             (StarStep.step (ev := none)
               (Step.term rfl rfl rfl
                 (StepTerm.ret_ok rfl
-                  (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-                  (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, faddNnanDef]))))
+                  (EvalExp.leaf_ok (by llvm_step; rfl))
+                  (StepRet.top_ok rfl (by llvm_step [faddNnanDef]))))
               (StarStep.refl _))
         exact ⟨[], .float .float rs, initMem, .id,
           MemoryInjection.id_idOn _, hTermX,
@@ -940,7 +890,7 @@ theorem fadd_refines_fadd_nnan : faddNnanDef ⊒ faddDef := by
       obtain ⟨ev, c1, hs, hdiv1⟩ := Diverges.step_inv hdiv
       obtain ⟨rfl, _, rt, _, _, _, _, rfl⟩ := hstep1 ev c1 hs
       exact False.elim ((det_step_to_halted (hstep2 rt)).2.1 hdiv1)
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, faddNnanDef] at hargs
+  · llvm_wf [faddNnanDef] at hargs
 
 /-! ### 7. Select Non-Poison-Propagation Refinement -/
 
@@ -965,11 +915,10 @@ theorem ret_a_refines_select_true : selectTrueDef ⊒ retADef := by
   refine ⟨rfl, ?_⟩
   intro initMem args _ hargs
   rcases args with _ | ⟨a, _ | ⟨b, _ | _⟩⟩
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, selectTrueDef] at hargs
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, selectTrueDef] at hargs
+  · llvm_wf [selectTrueDef] at hargs
+  · llvm_wf [selectTrueDef] at hargs
   · cases a <;> cases b <;>
-      simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
-            Semantics.RegisterValue.WellFormedFor, selectTrueDef] at hargs
+      llvm_wf [selectTrueDef] at hargs
     rcases hargs with ⟨rfl, rfl⟩
     rename_i va vb
     have hba : (AST.Identifier.local_id (.name "b") == AST.Identifier.local_id (.name "a")) = false := rfl
@@ -977,28 +926,28 @@ theorem ret_a_refines_select_true : selectTrueDef ⊒ retADef := by
           rfl (Or.inl rfl) rfl rfl rfl rfl rfl]
     rw [initCallConfig_2 .modern .default64LE initMem selectTrueDef
           rfl (Or.inl rfl) rfl rfl rfl rfl rfl]
-    exact refines_of_det_halted
+    exact Config.IsRefinedBy.of_det_halted
       (det_step_to_halted fun ev c' => by
         rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 32 va)
-          (by simp [evalPureLeafExp?, AssocMap.get?_insert, hba])]
+          (by llvm_step [hba])]
         rfl)
       (StarStep.step (ev := none)
         (Step.instr rfl rfl
           (StepInstr.select_ok
             (EvalExp.leaf_ok (by simp [evalPureLeafExp?]; rfl))
-            (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hba]; rfl))
-            (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
+            (EvalExp.leaf_ok (by llvm_step [hba]; rfl))
+            (EvalExp.leaf_ok (by llvm_step; rfl))
             (by rfl)
             ⟨default, default, rfl⟩))
         (StarStep.step (ev := none)
           (Step.term rfl rfl rfl
             (StepTerm.ret_ok rfl
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-              (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, selectTrueDef]))))
+              (EvalExp.leaf_ok (by llvm_step; rfl))
+              (StepRet.top_ok rfl (by llvm_step [selectTrueDef]))))
           (StarStep.refl _)))
       (RegisterValue.IsRefinedBy.refl _)
       (MemoryState.IsRefinedBy.refl _ _)
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, selectTrueDef] at hargs
+  · llvm_wf [selectTrueDef] at hargs
 
 /-! ### 8. Arbitrary Caller-Memory Store-to-Load Forwarding & Dead `alloca` Elimination -/
 
@@ -1174,10 +1123,9 @@ theorem ret_x_refines_alloca_store_load_i8 :
   refine ⟨rfl, ?_⟩
   intro initMem args hwfMem hargs
   rcases args with _ | ⟨arg, _ | _⟩
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, allocaStoreLoadI8Def] at hargs
+  · llvm_wf [allocaStoreLoadI8Def] at hargs
   · cases arg <;>
-      simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
-            Semantics.RegisterValue.WellFormedFor, allocaStoreLoadI8Def] at hargs
+      llvm_wf [allocaStoreLoadI8Def] at hargs
     subst hargs
     rename_i v
     rw [initCallConfig_1 .modern .default64LE initMem (retXDef 8) rfl (Or.inl rfl) rfl rfl rfl rfl]
@@ -1218,10 +1166,10 @@ theorem ret_x_refines_alloca_store_load_i8 :
         cases initMem.objects.get? id with
         | none => trivial
         | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.IsRefinedBy.refl _⟩
-      refine refines_of_det_halted
+      refine Config.IsRefinedBy.of_det_halted
         (det_step_to_halted fun ev c' => by
           rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 v)
-                (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
+                (by llvm_step)]
           simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, retXDef]
           rfl)
         (StarStep.step (ev := none)
@@ -1231,25 +1179,25 @@ theorem ret_x_refines_alloca_store_load_i8 :
           (StarStep.step (ev := none)
             (Step.instr rfl rfl
               (StepInstr.store_ok
-                (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hpx]))
-                (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; exact ⟨rfl, rfl⟩))
+                (EvalExp.leaf_ok (by llvm_step [hpx]))
+                (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
                 (by simpa [typeStoreSize_i8] using hverStore)))
             (StarStep.step (ev := none)
               (Step.instr rfl rfl
                 (StepInstr.load_ok
-                  (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; exact ⟨rfl, rfl⟩))
+                  (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
                   (by simpa [typeStoreSize_i8, hb] using hverLoad)
                   (by simpa [typeStoreSize_i8] using hbtv)
                   (by intro h; cases h)))
               (StarStep.step (ev := none)
                 (Step.term rfl rfl rfl
                   (StepTerm.ret_ok rfl
-                    (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-                    (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, allocaStoreLoadI8Def]))))
+                    (EvalExp.leaf_ok (by llvm_step; rfl))
+                    (StepRet.top_ok rfl (by llvm_step [allocaStoreLoadI8Def]))))
                 (StarStep.refl _)))))
         (RegisterValue.IsRefinedBy.refl _)
         hmemRef
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, allocaStoreLoadI8Def] at hargs
+  · llvm_wf [allocaStoreLoadI8Def] at hargs
 
 open scoped LeanNanoLlvm.AST.Syntax in
 def deadAllocaStoreI8Def : AST.Definition := [llvm-definition|
@@ -1267,10 +1215,9 @@ theorem dead_alloca_store_elim_i8 :
   refine ⟨rfl, ?_⟩
   intro initMem args hwfMem hargs
   rcases args with _ | ⟨arg, _ | _⟩
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, deadAllocaStoreI8Def] at hargs
+  · llvm_wf [deadAllocaStoreI8Def] at hargs
   · cases arg <;>
-      simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
-            Semantics.RegisterValue.WellFormedFor, deadAllocaStoreI8Def] at hargs
+      llvm_wf [deadAllocaStoreI8Def] at hargs
     subst hargs
     rename_i v
     rw [initCallConfig_1 .modern .default64LE initMem (retXDef 8) rfl (Or.inl rfl) rfl rfl rfl rfl]
@@ -1304,10 +1251,10 @@ theorem dead_alloca_store_elim_i8 :
         cases initMem.objects.get? id with
         | none => trivial
         | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.IsRefinedBy.refl _⟩
-      refine refines_of_det_halted
+      refine Config.IsRefinedBy.of_det_halted
         (det_step_to_halted fun ev c' => by
           rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 v)
-                (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
+                (by llvm_step)]
           simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, retXDef]
           rfl)
         (StarStep.step (ev := none)
@@ -1318,17 +1265,17 @@ theorem dead_alloca_store_elim_i8 :
             (Step.instr rfl rfl
               (StepInstr.store_ok
                 (EvalExp.leaf_ok (by simp [evalPureLeafExp?]))
-                (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; exact ⟨rfl, rfl⟩))
+                (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
                 (by simpa [typeStoreSize_i8] using hverStore)))
             (StarStep.step (ev := none)
               (Step.term rfl rfl rfl
                 (StepTerm.ret_ok rfl
-                  (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hpx]; rfl))
-                  (StepRet.top_ok rfl (by simp [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, deadAllocaStoreI8Def]))))
+                  (EvalExp.leaf_ok (by llvm_step [hpx]; rfl))
+                  (StepRet.top_ok rfl (by llvm_step [deadAllocaStoreI8Def]))))
               (StarStep.refl _))))
         (RegisterValue.IsRefinedBy.refl _)
         hmemRef
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, deadAllocaStoreI8Def] at hargs
+  · llvm_wf [deadAllocaStoreI8Def] at hargs
 
 /-! ### 9. Caller-Visible Memory Refinement (Positive & Negative Tests) -/
 
@@ -1361,11 +1308,10 @@ theorem dead_store_elim_caller_mem_i8 :
   refine ⟨rfl, ?_⟩
   intro initMem args hwfMem hargs
   rcases args with _ | ⟨pArg, _ | ⟨vArg, _ | _⟩⟩
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, doubleStoreCallerDef] at hargs
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, doubleStoreCallerDef] at hargs
+  · llvm_wf [doubleStoreCallerDef] at hargs
+  · llvm_wf [doubleStoreCallerDef] at hargs
   · cases pArg <;> cases vArg <;>
-      simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList,
-            Semantics.RegisterValue.WellFormedFor, doubleStoreCallerDef] at hargs
+      llvm_wf [doubleStoreCallerDef] at hargs
     rcases hargs with ⟨rfl, rfl⟩
     rename_i pv vv
     have hvp : (AST.Identifier.local_id (.name "v") == AST.Identifier.local_id (.name "p")) = false := rfl
@@ -1380,7 +1326,7 @@ theorem dead_store_elim_caller_mem_i8 :
       apply Step.instr rfl rfl
       exact StepInstr.store_ptr_poison
         (EvalExp.leaf_ok (by simp [evalPureLeafExp?]; rfl))
-        (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hvp]; rfl))
+        (EvalExp.leaf_ok (by llvm_step [hvp]; rfl))
     | value ptr =>
       cases hver : initMem.verifyMemAccess ptr 1 1 true with
       | error err =>
@@ -1390,7 +1336,7 @@ theorem dead_store_elim_caller_mem_i8 :
         refine Step.instr rfl rfl ?_
         exact StepInstr.store_mem_err (err := .immediateUB msg)
           (EvalExp.leaf_ok (by simp [evalPureLeafExp?]; rfl))
-          (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hvp]; exact ⟨rfl, rfl⟩))
+          (EvalExp.leaf_ok (by llvm_step [hvp]; exact ⟨rfl, rfl⟩))
           (by simpa [typeStoreSize_i8] using hver)
       | ok pair =>
         obtain ⟨mo, offset⟩ := pair
@@ -1405,13 +1351,13 @@ theorem dead_store_elim_caller_mem_i8 :
               (valueToBytes .default64LE .modern (.bv 8 vv) (.int 8)) := by
           rw [hb1, hb2]
           exact MemoryState.writeObjectBytes_overwrite_singleton initMem mo.allocId offset b1 b2
-        refine refines_of_det_halted
+        refine Config.IsRefinedBy.of_det_halted
           (det_step_chain
             (fun ev c' => by
               rw [Step.store_leaf_iff rfl rfl
                     (val := .bv 8 vv) (as := 0) (p := ptr)
-                    (by simp [evalPureLeafExp?, AssocMap.get?_insert])
-                    (by simp [evalPureLeafExp?, AssocMap.get?_insert, hvp])]
+                    (by llvm_step)
+                    (by llvm_step [hvp])]
               simp only [typeStoreSize_i8, Option.getD, hver, ↓reduceIte, Bool.false_eq_true]
               rfl)
             (det_step_to_halted fun ev c' => by
@@ -1420,20 +1366,20 @@ theorem dead_store_elim_caller_mem_i8 :
             (Step.instr rfl rfl
               (StepInstr.store_ok
                 (EvalExp.leaf_ok (by simp [evalPureLeafExp?]; rfl))
-                (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hvp]; exact ⟨rfl, rfl⟩))
+                (EvalExp.leaf_ok (by llvm_step [hvp]; exact ⟨rfl, rfl⟩))
                 (by simpa [typeStoreSize_i8] using hver)))
             (StarStep.step (ev := none)
               (Step.instr rfl rfl
                 (StepInstr.store_ok
-                  (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; rfl))
-                  (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert, hvp]; exact ⟨rfl, rfl⟩))
+                  (EvalExp.leaf_ok (by llvm_step; rfl))
+                  (EvalExp.leaf_ok (by llvm_step [hvp]; exact ⟨rfl, rfl⟩))
                   (by simpa [typeStoreSize_i8, hb1] using hver2)))
               (StarStep.step (ev := none)
                 (Step.term rfl rfl rfl (StepTerm.retVoid_ok rfl (StepRet.top_ok rfl rfl)))
                 (StarStep.refl _))))
           (RegisterValue.IsRefinedBy.refl _)
           (by dsimp only [MachineState.withFramesAndMemory, CallFrame.advance, freeAllocaList]; rw [hmemEq]; exact MemoryState.IsRefinedBy.refl _ _)
-  · simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, doubleStoreCallerDef] at hargs
+  · llvm_wf [doubleStoreCallerDef] at hargs
 
 private def callerObj1 : MemoryObject :=
   { allocId := 1, baseAddr := 8, size := 1, align := 1, addrSpace := 0, name := "caller",
@@ -1511,7 +1457,7 @@ theorem bogus_store_to_caller_mem_not_refines_nop :
           (Step.instr rfl rfl
             (StepInstr.store_ok
               (EvalExp.leaf_ok (by simp [evalPureLeafExp?]; rfl))
-              (EvalExp.leaf_ok (by simp [evalPureLeafExp?, AssocMap.get?_insert]; exact ⟨rfl, rfl⟩))
+              (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
               (by simpa [typeStoreSize_i8] using hver)))
           (StarStep.step (ev := none)
             (Step.term rfl rfl rfl (StepTerm.retVoid_ok rfl (StepRet.top_ok rfl rfl)))
@@ -1550,7 +1496,7 @@ theorem undef_mul2_refines_poison_via_trans :
     refine ⟨rfl, ?_⟩
     intro initMem args _ hargs
     cases args with
-    | cons _ _ => simp [Semantics.Definition.ArgValuesWellFormed, Semantics.RegisterValue.WellFormedForList, poisonDef] at hargs
+    | cons _ _ => llvm_wf [poisonDef] at hargs
     | nil =>
       right
       have hstep1 : ∀ ev c',
@@ -1583,13 +1529,13 @@ theorem undef_mul2_refines_poison_via_trans :
           rw [EvalExp.undef_iff (by rfl) (by rfl)] at he2; obtain ⟨_, h2, hu2⟩ := he2; cases h2
           obtain ⟨b1, rfl, _⟩ := undefValRel_int_iff.mp hu1
           obtain ⟨b2, rfl, _⟩ := undefValRel_int_iff.mp hu2
-          simp [liftBinaryPure, evalIntBinaryScalarPure, simp_llvm, simp_llvm_option] at hbin
+          llvm_simp at hbin
         | intBinaryOp_ok he1 he2 hbin =>
           rw [EvalExp.undef_iff (by rfl) (by rfl)] at he1; obtain ⟨_, h1, hu1⟩ := he1; cases h1
           rw [EvalExp.undef_iff (by rfl) (by rfl)] at he2; obtain ⟨_, h2, hu2⟩ := he2; cases h2
           obtain ⟨b1, rfl, _⟩ := undefValRel_int_iff.mp hu1
           obtain ⟨b2, rfl, _⟩ := undefValRel_int_iff.mp hu2
-          simp [liftBinaryPure, evalIntBinaryScalarPure, simp_llvm, simp_llvm_option] at hbin
+          llvm_simp at hbin
           subst hbin
           exact ⟨rfl, b1, b2, rfl⟩
       have hstep2 : ∀ (b1 b2 : BitVec 8) ev c',
@@ -1609,7 +1555,7 @@ theorem undef_mul2_refines_poison_via_trans :
           ev = none ∧ c' = .halted (.bv 8 (.value (b1 + b2))) initMem := by
         intro b1 b2 ev c'
         rw [Step.ret_top_leaf_iff rfl rfl rfl rfl
-              (v := .bv 8 (.value (b1 + b2))) (by simp [evalPureLeafExp?, AssocMap.get?_insert])]
+              (v := .bv 8 (.value (b1 + b2))) (by llvm_step)]
         simp only [freeAllocaList, applyRetFMFAndAttrsPure, undefAddDef8]
         rfl
       refine ⟨?_, ?_, ?_⟩
@@ -1639,5 +1585,402 @@ theorem undef_mul2_refines_poison_via_trans :
         obtain ⟨rfl, b1, b2, rfl⟩ := hstep1 ev c1 hs
         exact False.elim ((det_step_to_halted (hstep2 b1 b2)).2.1 hdiv1)
   exact Definition.IsRefinedByWith.trans hAddRefPoison undef_add_is_refined_by_undef_mul2_i8
+
+/-! ### 11. Backward Simulation (`Config.IsRefinedBy.of_simulation`) on Diverging Loops -/
+
+open scoped LeanNanoLlvm.AST.Syntax in
+def loopWithAddDef : AST.Definition := [llvm-definition|
+  define void @spin(i32 %x) {
+  entry:
+    %y = add i32 %x, 0
+    br label %entry
+  }
+]
+
+open scoped LeanNanoLlvm.AST.Syntax in
+def tightLoopDef : AST.Definition := [llvm-definition|
+  define void @spin(i32 %x) {
+  entry:
+    br label %entry
+  }
+]
+
+/--
+Eliminating a redundant `%y = add i32 %x, 0` inside an infinite loop preserves full behavioral
+refinement (including `Diverges`), proved cleanly via `Config.IsRefinedBy.of_simulation` with
+a 2-to-1 `PlusStep` simulation!
+-/
+theorem loop_with_add_is_refined_by_tight_loop :
+    loopWithAddDef ⊒ tightLoopDef := by
+  refine ⟨rfl, ?_⟩
+  intro initMem args _ hargs
+  rcases args with _ | ⟨arg, _ | _⟩
+  · llvm_wf [loopWithAddDef] at hargs
+  · cases arg <;> llvm_wf [loopWithAddDef] at hargs
+    subst hargs
+    rename_i v
+    rw [initCallConfig_1 .modern .default64LE initMem loopWithAddDef rfl (Or.inl rfl) rfl rfl rfl rfl]
+    rw [initCallConfig_1 .modern .default64LE initMem tightLoopDef rfl (Or.inl rfl) rfl rfl rfl rfl]
+    let regs0 : AssocMap AST.Identifier RegisterValue :=
+      (∅ : AssocMap AST.Identifier RegisterValue).insert (.local_id (.name "x")) (.bv 32 v)
+    let stY : MachineState := {
+      frames := [{ defn := tightLoopDef, curBlock := .name "entry", remainingCode := [],
+                   terminator := entryTerm tightLoopDef, registers := regs0 }]
+      memory := initMem, config := .modern, dataLayout := .default64LE }
+    -- Source register map after 0 or more loop iterations (either `regs0` or `regs0.insert %y v`)
+    let isSourceLoopState (cX : Config) : Prop :=
+      ∃ regsX : AssocMap AST.Identifier RegisterValue,
+        regsX.get? (.local_id (.name "x")) = some (.bv 32 v) ∧
+        cX = .running {
+          frames := [{ defn := loopWithAddDef, curBlock := .name "entry",
+                       remainingCode := entryCode loopWithAddDef,
+                       terminator := entryTerm loopWithAddDef, registers := regsX }]
+          memory := initMem, config := .modern, dataLayout := .default64LE }
+    let R : MemoryInjection → Config → Config → Prop :=
+      fun inj cX cY => inj = .id ∧ isSourceLoopState cX ∧ cY = .running stY
+    refine Config.IsRefinedBy.of_simulation R (fun _ => 0) ?_ ?_ ?_ (MemoryInjection.id_idOn _)
+      ⟨rfl, ⟨regs0, by llvm_step [regs0], rfl⟩, rfl⟩
+    · rintro _ _ _ _ ⟨_, _, hcY⟩; cases hcY
+    · rintro _ _ _ ⟨_, _, hcY⟩ (⟨_, h⟩ | ⟨_, h⟩) <;> rw [hcY] at h <;> cases h
+    · rintro inj cX cY evY cY' ⟨rfl, ⟨regsX, hgetX, rfl⟩, rfl⟩ hsY
+      -- Target deterministically branches back to `stY`
+      rw [Step.term_iff rfl rfl rfl] at hsY
+      obtain ⟨rfl, hsY⟩ := hsY
+      cases hsY with
+      | br_step hj =>
+        cases hj with
+        | ok hfind hsplit hphi =>
+          have hfind' : tightLoopDef.findBlock? (.name "entry") = some (tightLoopDef.blocks.head (by decide)) := rfl
+          rw [hfind'] at hfind
+          injection hfind with hblk; subst hblk
+          cases hsplit
+          cases hphi with
+          | nil =>
+            -- Source takes 2 steps (`add` then `br`) back to `isSourceLoopState`
+            have haddVal : liftBinaryPure (.int 32) (.bv 32 v) (.bv 32 (.value 0#32))
+                (evalIntBinaryScalarPure (.add false false)) = .ok (.bv 32 v) := by
+              cases v using PoisonOr.casesOn' with
+              | poison => llvm_simp
+              | value bv => llvm_simp
+            have hs1 : Step (.running {
+                frames := [{ defn := loopWithAddDef, curBlock := .name "entry",
+                             remainingCode := entryCode loopWithAddDef,
+                             terminator := entryTerm loopWithAddDef, registers := regsX }]
+                memory := initMem, config := .modern, dataLayout := .default64LE })
+              none
+              (.running {
+                frames := [{ defn := loopWithAddDef, curBlock := .name "entry",
+                             remainingCode := [],
+                             terminator := entryTerm loopWithAddDef,
+                             registers := regsX.insert (.local_id (.name "y")) (.bv 32 v) }]
+                memory := initMem, config := .modern, dataLayout := .default64LE }) :=
+              Step.instr rfl rfl
+                (StepInstr.intBinaryOp_ok
+                  (EvalExp.leaf_ok (by simp [evalPureLeafExp?, hgetX]))
+                  (EvalExp.leaf_ok (by llvm_step))
+                  haddVal)
+            have hs2 : Step (.running {
+                frames := [{ defn := loopWithAddDef, curBlock := .name "entry",
+                             remainingCode := [],
+                             terminator := entryTerm loopWithAddDef,
+                             registers := regsX.insert (.local_id (.name "y")) (.bv 32 v) }]
+                memory := initMem, config := .modern, dataLayout := .default64LE })
+              none
+              (.running {
+                frames := [{ defn := loopWithAddDef, curBlock := .name "entry",
+                             remainingCode := entryCode loopWithAddDef,
+                             terminator := entryTerm loopWithAddDef,
+                             registers := regsX.insert (.local_id (.name "y")) (.bv 32 v) }]
+                memory := initMem, config := .modern, dataLayout := .default64LE }) :=
+              Step.term rfl rfl rfl
+                (StepTerm.br_step (StepJump.ok (nextBlk := loopWithAddDef.blocks.head (by decide)) rfl rfl EvalPhis.nil))
+            have hyx : (AST.Identifier.local_id (.name "y") == AST.Identifier.local_id (.name "x")) = false := rfl
+            refine Or.inr ⟨[], _, .id, MemoryInjection.Extends.refl _,
+              Or.inl ⟨none, _, [], hs1, StarStep.single hs2, rfl⟩, trivial,
+              rfl, ⟨regsX.insert (.local_id (.name "y")) (.bv 32 v),
+                by simp [AssocMap.get?_insert, hyx, hgetX], rfl⟩, rfl⟩
+        | phi_err hfind hsplit hphi =>
+          have hfind' : tightLoopDef.findBlock? (.name "entry") = some (tightLoopDef.blocks.head (by decide)) := rfl
+          rw [hfind'] at hfind
+          injection hfind with hblk; subst hblk
+          cases hsplit
+          cases hphi
+        | missing_block hfind =>
+          have : tightLoopDef.findBlock? (.name "entry") ≠ none := by decide +kernel
+          exact absurd hfind this
+  · llvm_wf [loopWithAddDef] at hargs
+
+/-! ### 12. Module-Aware Refinement (`RefinementEnv`) with Helper Function Calls -/
+
+open scoped LeanNanoLlvm.AST.Syntax in
+def helperId32Def : AST.Definition := [llvm-definition|
+  define i32 @id32(i32 %v) {
+  entry:
+    ret i32 %v
+  }
+]
+
+def helperId32Env : RefinementEnv :=
+  RefinementEnv.ofTopLevel ⟨[.definition helperId32Def]⟩
+
+open scoped LeanNanoLlvm.AST.Syntax in
+def callerWithAdd0Def : AST.Definition := [llvm-definition|
+  define i32 @caller(i32 %x) {
+  entry:
+    %y = add i32 %x, 0
+    %r = call i32 @id32(i32 %y)
+    ret i32 %r
+  }
+]
+
+open scoped LeanNanoLlvm.AST.Syntax in
+def callerDirectDef : AST.Definition := [llvm-definition|
+  define i32 @caller(i32 %x) {
+  entry:
+    %r = call i32 @id32(i32 %x)
+    ret i32 %r
+  }
+]
+
+/-- Module-aware refinement: simplifying an argument before calling module helper `@id32`. -/
+theorem caller_add0_is_refined_by_direct_in_module :
+    callerWithAdd0Def ⊒⟨helperId32Env⟩ callerDirectDef := by
+  refine ⟨rfl, ?_⟩
+  intro initMem args _ hargs
+  rcases args with _ | ⟨arg, _ | _⟩
+  · llvm_wf [callerWithAdd0Def] at hargs
+  · cases arg <;> llvm_wf [callerWithAdd0Def] at hargs
+    subst hargs
+    rename_i v
+    have hinitX : initCallConfig .modern .default64LE initMem helperId32Env.fns helperId32Env.decls
+        callerWithAdd0Def [.bv 32 v] =
+      .running {
+        frames := [{ defn := callerWithAdd0Def, curBlock := .name "entry",
+                     remainingCode := entryCode callerWithAdd0Def,
+                     terminator := entryTerm callerWithAdd0Def,
+                     registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
+                       (.local_id (.name "x")) (.bv 32 v) }]
+        memory := initMem, config := .modern, dataLayout := .default64LE,
+        functions := helperId32Env.fns, declarations := helperId32Env.decls } := rfl
+    have hinitY : initCallConfig .modern .default64LE initMem helperId32Env.fns helperId32Env.decls
+        callerDirectDef [.bv 32 v] =
+      .running {
+        frames := [{ defn := callerDirectDef, curBlock := .name "entry",
+                     remainingCode := entryCode callerDirectDef,
+                     terminator := entryTerm callerDirectDef,
+                     registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
+                       (.local_id (.name "x")) (.bv 32 v) }]
+        memory := initMem, config := .modern, dataLayout := .default64LE,
+        functions := helperId32Env.fns, declarations := helperId32Env.decls } := rfl
+    change Config.IsRefinedBy initMem.allocIds
+      (initCallConfig .modern .default64LE initMem helperId32Env.fns helperId32Env.decls callerWithAdd0Def [.bv 32 v])
+      (initCallConfig .modern .default64LE initMem helperId32Env.fns helperId32Env.decls callerDirectDef [.bv 32 v])
+    rw [hinitX, hinitY]
+    have haddVal : liftBinaryPure (.int 32) (.bv 32 v) (.bv 32 (.value 0#32))
+        (evalIntBinaryScalarPure (.add false false)) = .ok (.bv 32 v) := by
+      cases v using PoisonOr.casesOn' with
+      | poison => llvm_simp
+      | value bv => llvm_simp
+    have hlookupId : helperId32Env.fns.get? (.name "id32") = some helperId32Def := rfl
+    have hmkCallee : mkEntryFrame .default64LE initMem helperId32Def [.bv 32 v] =
+      .ok { defn := helperId32Def, curBlock := .name "entry", remainingCode := [],
+            terminator := entryTerm helperId32Def,
+            registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
+              (.local_id (.name "v")) (.bv 32 v) } := rfl
+    -- Source execution: `add` → `call @id32` → callee `ret` → caller `ret`
+    have hnoIntr : ∀ o, evalNonAllocIntrinsicExec? .default64LE .modern initMem
+        (AST.RawId.name "id32").ToString (.ret (.int 32)) {} [.bv 32 v] o = none :=
+      fun _ => rfl
+    have hX_term : Terminates (.running {
+        frames := [{ defn := callerWithAdd0Def, curBlock := .name "entry",
+                     remainingCode := entryCode callerWithAdd0Def,
+                     terminator := entryTerm callerWithAdd0Def,
+                     registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
+                       (.local_id (.name "x")) (.bv 32 v) }]
+        memory := initMem, config := .modern, dataLayout := .default64LE,
+        functions := helperId32Env.fns, declarations := helperId32Env.decls })
+        [] (.bv 32 v) initMem :=
+      StarStep.step (ev := none)
+        (Step.instr rfl rfl
+          (StepInstr.intBinaryOp_ok
+            (EvalExp.leaf_ok (by llvm_step))
+            (EvalExp.leaf_ok (by llvm_step))
+            haddVal))
+        (StarStep.step (ev := none)
+          (Step.instr rfl rfl
+            (StepInstr.call_user_ok
+              (EvalCallArgs.cons_ok (EvalExp.leaf_ok (by llvm_step; rfl)) (by llvm_step) EvalCallArgs.nil)
+              EvalCallee.direct rfl hnoIntr hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
+          (StarStep.step (ev := none)
+            (Step.term rfl rfl rfl
+              (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
+                (StepRet.call_ok (rd := { destId := .id (.name "r"), retTy := .ret (.int 32), fmf := {}, retAttrs := [] })
+                  rfl (by llvm_step [helperId32Def]; rfl) rfl (by llvm_step; rfl))))
+            (StarStep.step (ev := none)
+              (Step.term rfl rfl rfl
+                (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
+                  (StepRet.top_ok rfl (by llvm_step [callerWithAdd0Def]))))
+              (StarStep.refl _))))
+    -- Target deterministic 3-step execution: `call @id32` → callee `ret` → caller `ret`
+    have hY3 := det_step_to_halted (st := {
+        frames := [{ defn := callerDirectDef, curBlock := .name "entry", remainingCode := [],
+                     terminator := entryTerm callerDirectDef,
+                     registers := ((∅ : AssocMap AST.Identifier RegisterValue).insert
+                       (.local_id (.name "x")) (.bv 32 v)).insert
+                       (.local_id (.name "r")) (.bv 32 v) }]
+        memory := initMem, config := .modern, dataLayout := .default64LE,
+        functions := helperId32Env.fns, declarations := helperId32Env.decls })
+      (v := .bv 32 v) (m := initMem) fun ev c' => by
+        rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 32 v) (by llvm_step)]
+        llvm_step [callerDirectDef]
+    have hY2 := det_step_chain (st := {
+        frames := [
+          { defn := helperId32Def, curBlock := .name "entry", remainingCode := [],
+            terminator := entryTerm helperId32Def,
+            registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
+              (.local_id (.name "v")) (.bv 32 v) },
+          { defn := callerDirectDef, curBlock := .name "entry", remainingCode := [],
+            terminator := entryTerm callerDirectDef,
+            registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
+              (.local_id (.name "x")) (.bv 32 v),
+            returnDest? := some { destId := .id (.name "r"), retTy := .ret (.int 32), fmf := {}, retAttrs := [] } }]
+        memory := initMem, config := .modern, dataLayout := .default64LE,
+        functions := helperId32Env.fns, declarations := helperId32Env.decls })
+      (fun ev c' => by
+        constructor
+        · intro hs
+          rw [Step.term_iff rfl rfl rfl] at hs
+          obtain ⟨rfl, hs⟩ := hs
+          cases hs with
+          | ret_ok hrt he hsr =>
+            rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
+            injection he with hpair; cases hpair
+            cases hsr with
+            | top_ok hnil => cases hnil
+            | call_ok hcons h1 hrd h2 =>
+              cases hcons
+              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
+              injection h1 with hv1; subst hv1
+              injection hrd with hrd'; subst hrd'
+              simp only [applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
+              injection h2 with hv2; subst hv2
+              exact ⟨rfl, rfl⟩
+            | callee_attr_err h1 =>
+              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
+              cases h1
+            | caller_attr_err hcons h1 hrd h2 =>
+              cases hcons
+              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
+              injection h1 with hv1; subst hv1
+              injection hrd with hrd'; subst hrd'
+              simp only [applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
+              cases h2
+            | missing_dest hcons _ hrd =>
+              cases hcons; cases hrd
+          | ret_exp_err _ he =>
+            rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he; cases he
+          | ret_ty_err hty => exact absurd rfl hty
+        · rintro ⟨rfl, rfl⟩
+          exact Step.term rfl rfl rfl
+            (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
+              (StepRet.call_ok (rd := { destId := .id (.name "r"), retTy := .ret (.int 32), fmf := {}, retAttrs := [] })
+                rfl (by llvm_step [helperId32Def]; rfl) rfl (by llvm_step))))
+      hY3
+    have hY1 := det_step_chain (st := {
+        frames := [{ defn := callerDirectDef, curBlock := .name "entry",
+                     remainingCode := entryCode callerDirectDef,
+                     terminator := entryTerm callerDirectDef,
+                     registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
+                       (.local_id (.name "x")) (.bv 32 v) }]
+        memory := initMem, config := .modern, dataLayout := .default64LE,
+        functions := helperId32Env.fns, declarations := helperId32Env.decls })
+      (fun ev c' => by
+        constructor
+        · intro hs
+          rw [Step.instr_iff rfl rfl] at hs
+          cases hs with
+          | call_args_err hargsEv =>
+            cases hargsEv with
+            | cons_exp_err he => rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he; cases he
+            | cons_attr_err he ha =>
+              rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
+              injection he with hpair; cases hpair
+              simp only [applyValueAttrsPure] at ha; cases ha
+            | cons_tail_err he ha hrest =>
+              rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
+              injection he with hpair; cases hpair
+              cases hrest
+          | call_callee_err _ hcallee =>
+            cases hcallee with
+            | indirect_exp_err hne _ | indirect_poison hne _
+            | indirect_bad_addr hne _ _ | indirect_nonptr hne _ _ =>
+              exact absurd rfl (hne (.name "id32"))
+          | call_alloc_ok _ hcallee halloc _ _ | call_alloc_retattr_err _ hcallee halloc _ _
+          | call_alloc_err _ hcallee halloc _ =>
+            cases hcallee with
+            | direct => cases halloc
+            | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
+          | call_intrinsic_ok hargsEv hcallee _ hintr _ | call_intrinsic_retattr_err hargsEv hcallee _ hintr _ =>
+            cases hcallee with
+            | direct =>
+              cases hargsEv with
+              | cons_ok he ha hrest =>
+                rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
+                injection he with hpair; cases hpair
+                simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                cases hrest
+                obtain ⟨o, _, h⟩ := hintr; rw [hnoIntr o] at h; cases h
+            | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
+          | call_intrinsic_err hargsEv hcallee _ hintr =>
+            cases hcallee with
+            | direct =>
+              cases hargsEv with
+              | cons_ok he ha hrest =>
+                rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
+                injection he with hpair; cases hpair
+                simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                cases hrest
+                obtain ⟨o, h⟩ := hintr; rw [hnoIntr o] at h; cases h
+            | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
+          | call_user_ok hargsEv hcallee _ _ hfn _ hmk =>
+            cases hcallee with
+            | direct =>
+              cases hargsEv with
+              | cons_ok he ha hrest =>
+                rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
+                injection he with hpair; cases hpair
+                simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                cases hrest
+                rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
+                rw [hmkCallee] at hmk; injection hmk with hfr; subst hfr
+                exact ⟨rfl, rfl⟩
+            | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
+          | call_user_entry_err hargsEv hcallee _ _ hfn _ hmk =>
+            cases hcallee with
+            | direct =>
+              cases hargsEv with
+              | cons_ok he ha hrest =>
+                rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
+                injection he with hpair; cases hpair
+                simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                cases hrest
+                rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
+                rw [hmkCallee] at hmk; cases hmk
+            | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
+          | call_user_overflow _ _ _ _ _ _ hge => simp [SemanticsConfig.modern] at hge
+          | call_external_err _ hcallee _ _ hfn =>
+            cases hcallee with
+            | direct => rw [hlookupId] at hfn; cases hfn
+            | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
+        · rintro ⟨rfl, rfl⟩
+          exact Step.instr rfl rfl
+            (StepInstr.call_user_ok
+              (EvalCallArgs.cons_ok (EvalExp.leaf_ok (by llvm_step; rfl)) (by llvm_step) EvalCallArgs.nil)
+              EvalCallee.direct rfl hnoIntr hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
+      hY2
+    exact Config.IsRefinedBy.of_det_halted hY1 hX_term
+      (RegisterValue.IsRefinedBy.refl _)
+      (MemoryState.IsRefinedBy.refl _ _)
+  · llvm_wf [callerWithAdd0Def] at hargs
 
 end LeanNanoLlvm.Refinement

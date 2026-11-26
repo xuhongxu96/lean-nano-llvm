@@ -27,6 +27,11 @@ def ByteArrayIsRefinedBy (inj : MemoryInjection) (bsX bsY : Array MemByte) : Pro
 theorem ByteArrayIsRefinedBy.refl (bs : Array MemByte) : ByteArrayIsRefinedBy .id bs bs :=
   ⟨rfl, fun _ _ => MemByte.IsRefinedBy.refl _⟩
 
+theorem ByteArrayIsRefinedBy.mono {f g : MemoryInjection} {b1 b2 : Array MemByte}
+    (hext : f.Extends g) (h : ByteArrayIsRefinedBy f b1 b2) :
+    ByteArrayIsRefinedBy g b1 b2 :=
+  ⟨h.1, fun i hi => MemByte.IsRefinedBy.mono hext (h.2 i hi)⟩
+
 theorem ByteArrayIsRefinedBy.trans {f g : MemoryInjection} {b1 b2 b3 : Array MemByte}
     (h12 : ByteArrayIsRefinedBy f b1 b2) (h23 : ByteArrayIsRefinedBy g b2 b3) :
     ByteArrayIsRefinedBy (f.comp g) b1 b3 :=
@@ -46,6 +51,18 @@ theorem TraceEvent.IsRefinedBy.refl : ∀ (e : TraceEvent), TraceEvent.IsRefined
   | .volatileLoad _ _ bs => ⟨rfl, rfl, ByteArrayIsRefinedBy.refl bs⟩
   | .volatileStore _ _ bs => ⟨rfl, rfl, ByteArrayIsRefinedBy.refl bs⟩
   | .externalCall _ args => ⟨rfl, RegisterValue.IsRefinedByList.refl args⟩
+
+theorem TraceEvent.IsRefinedBy.mono {f g : MemoryInjection} (hext : f.Extends g) :
+    ∀ {e1 e2 : TraceEvent}, TraceEvent.IsRefinedBy f e1 e2 → TraceEvent.IsRefinedBy g e1 e2
+  | .volatileLoad _ _ _, .volatileLoad _ _ _, h => ⟨h.1, h.2.1, ByteArrayIsRefinedBy.mono hext h.2.2⟩
+  | .volatileStore _ _ _, .volatileStore _ _ _, h => ⟨h.1, h.2.1, ByteArrayIsRefinedBy.mono hext h.2.2⟩
+  | .externalCall _ _, .externalCall _ _, h => ⟨h.1, RegisterValue.IsRefinedByList.mono hext h.2⟩
+  | .volatileLoad .., .volatileStore .., h
+  | .volatileLoad .., .externalCall .., h
+  | .volatileStore .., .volatileLoad .., h
+  | .volatileStore .., .externalCall .., h
+  | .externalCall .., .volatileLoad .., h
+  | .externalCall .., .volatileStore .., h => False.elim h
 
 theorem TraceEvent.IsRefinedBy.trans {f g : MemoryInjection} :
     ∀ {e1 e2 e3 : TraceEvent},
@@ -80,6 +97,20 @@ theorem Trace.IsRefinedBy.refl : ∀ (tr : List TraceEvent), Trace.IsRefinedBy .
   | [] => trivial
   | e :: rest => ⟨TraceEvent.IsRefinedBy.refl e, Trace.IsRefinedBy.refl rest⟩
 
+theorem Trace.IsRefinedBy.mono {f g : MemoryInjection} (hext : f.Extends g) :
+    ∀ {t1 t2 : List TraceEvent}, Trace.IsRefinedBy f t1 t2 → Trace.IsRefinedBy g t1 t2
+  | [], [], _ => trivial
+  | _ :: _, _ :: _, h => ⟨TraceEvent.IsRefinedBy.mono hext h.1, Trace.IsRefinedBy.mono hext h.2⟩
+  | [], _ :: _, h | _ :: _, [], h => False.elim h
+
+theorem Trace.IsRefinedBy.append {inj : MemoryInjection} :
+    ∀ {a1 a2 b1 b2 : List TraceEvent},
+      Trace.IsRefinedBy inj a1 a2 → Trace.IsRefinedBy inj b1 b2 →
+      Trace.IsRefinedBy inj (a1 ++ b1) (a2 ++ b2)
+  | [], [], _, _, _, hb => hb
+  | _ :: _, _ :: _, _, _, ha, hb => ⟨ha.1, Trace.IsRefinedBy.append ha.2 hb⟩
+  | [], _ :: _, _, _, ha, _ | _ :: _, [], _, _, ha, _ => False.elim ha
+
 theorem Trace.IsRefinedBy.trans {f g : MemoryInjection} :
     ∀ {t1 t2 t3 : List TraceEvent},
       Trace.IsRefinedBy f t1 t2 → Trace.IsRefinedBy g t2 t3 → Trace.IsRefinedBy (f.comp g) t1 t3
@@ -112,22 +143,22 @@ structure CallFrame : Type where
 namespace CallFrame
 
 /-- Advance `remainingCode` after executing one instruction and optionally binding a register. -/
-@[simp, simp_llvm]
+@[simp, simp_step]
 def advance : CallFrame → Code → AssocMap Identifier RegisterValue → List AllocId → CallFrame
   | ⟨defn, curBlk, _, term, _, _, retDest?⟩, code', regs', allocas' =>
     ⟨defn, curBlk, code', term, regs', allocas', retDest?⟩
 
-@[simp, simp_llvm]
+@[simp, simp_step]
 def withRegisters : CallFrame → AssocMap Identifier RegisterValue → CallFrame
   | ⟨defn, curBlk, code, term, _, allocas, retDest?⟩, regs' =>
     ⟨defn, curBlk, code, term, regs', allocas, retDest?⟩
 
-@[simp, simp_llvm]
+@[simp, simp_step]
 def withReturnDest : CallFrame → Option ReturnDest → CallFrame
   | ⟨defn, curBlk, code, term, regs, allocas, _⟩, retDest? =>
     ⟨defn, curBlk, code, term, regs, allocas, retDest?⟩
 
-@[simp, simp_llvm]
+@[simp, simp_step]
 def jumpTo : CallFrame → BlockId → Code → (InstructionId × Terminator) →
     AssocMap Identifier RegisterValue → CallFrame
   | ⟨defn, _, _, _, _, allocas, retDest?⟩, nextBlk, code', term', regs' =>
@@ -148,17 +179,17 @@ instance : Inhabited MachineState := ⟨{ frames := [] }⟩
 
 namespace MachineState
 
-@[simp, simp_llvm]
+@[simp, simp_step]
 def withFrames : MachineState → List CallFrame → MachineState
   | ⟨_, mem, cfg, dl, fns, decls⟩, frames' =>
     ⟨frames', mem, cfg, dl, fns, decls⟩
 
-@[simp, simp_llvm]
+@[simp, simp_step]
 def withFramesAndMemory : MachineState → List CallFrame → MemoryState → MachineState
   | ⟨_, _, cfg, dl, fns, decls⟩, frames', mem' =>
     ⟨frames', mem', cfg, dl, fns, decls⟩
 
-@[simp, simp_llvm]
+@[simp, simp_step]
 def withMemory : MachineState → MemoryState → MachineState
   | ⟨frames, _, cfg, dl, fns, decls⟩, mem' =>
     ⟨frames, mem', cfg, dl, fns, decls⟩
@@ -175,7 +206,7 @@ inductive Config : Type where
 
 namespace Config
 
-@[simp]
+@[simp, simp_step]
 def ofError : ExecError → Config
   | .immediateUB msg => .ub msg
   | .staticError msg => .staticError msg
@@ -193,7 +224,7 @@ end Config
 /-! ### Frame & Block Helpers (shared by `Step` and `Exec`) -/
 
 /-- Partition leading `phi` instructions from the remaining body of a basic block. -/
-@[simp_llvm]
+@[simp_step]
 def splitPhis : Code → Code × Code
   | [] => ([], [])
   | (iid, .phi ty fmf inc) :: rest =>
@@ -202,7 +233,7 @@ def splitPhis : Code → Code × Code
   | code => ([], code)
 
 /-- Free all stack `alloca` allocations belonging to a departing call frame. -/
-@[simp_llvm]
+@[simp_step]
 def freeAllocaList (mem : MemoryState) : List AllocId → MemoryState
   | [] => mem
   | aid :: rest => freeAllocaList (mem.freeObject aid) rest
@@ -214,7 +245,7 @@ theorem freeAllocaList_preserves_wf {mem : MemoryState} (hwf : MemoryState.WellF
   | cons a rest ih => exact ih (MemoryState.freeObject_preserves_wf hwf a)
 
 /-- Write an SSA register result for an instruction ID (void IDs are no-ops). -/
-@[simp_llvm]
+@[simp_step]
 def writeFrameReg (regs : AssocMap Identifier RegisterValue) (id : InstructionId)
     (val : RegisterValue) : AssocMap Identifier RegisterValue :=
   match id with
@@ -222,7 +253,7 @@ def writeFrameReg (regs : AssocMap Identifier RegisterValue) (id : InstructionId
   | .void _ => regs
 
 /-- Structural check that a runtime `RegisterValue` matches an `LlvmType` (top-level shape & widths). -/
-@[simp, simp_llvm]
+@[simp, simp_step]
 def RegisterValue.matchesType : LlvmType → RegisterValue → Bool
   | .int wTy, .bv wVal _ => wTy == wVal
   | .float ft1, .float ft2 _ => ft1 == ft2
@@ -233,7 +264,6 @@ def RegisterValue.matchesType : LlvmType → RegisterValue → Bool
   | _, _ => false
 
 /-- Bind formal parameters of a `Definition` to argument values, type-checking and applying callee parameter attributes. -/
-@[simp_llvm]
 def bindFrameArgs (dl : DataLayout) (mem : MemoryState)
     (argTys : List LlvmType) (isVarArg : Bool) (argAttrs : List (List ValueAttr))
     (argNames : List LocalId) (argVals : List RegisterValue) :
@@ -258,7 +288,7 @@ def bindFrameArgs (dl : DataLayout) (mem : MemoryState)
     go 0 argTys argNames argVals ∅
 
 /-- Apply return-site FastMathFlags (non-input output flags) and return `ValueAttr`s. -/
-@[simp_llvm]
+@[simp_step]
 def applyRetFMFAndAttrsPure (dl : DataLayout) (mem : MemoryState)
     (retTy : LlvmRetType) (fmf : FastMathFlags) (retAttrs : List ValueAttr)
     (retVal : RegisterValue) : Except ExecError RegisterValue :=
@@ -275,7 +305,6 @@ def applyRetFMFAndAttrsPure (dl : DataLayout) (mem : MemoryState)
     | .ok v1 => applyValueAttrsPure dl mem rTy v1 retAttrs
 
 /-- Construct an initial `CallFrame` for entering `defn` with `argVals` (validating signature & param attrs). -/
-@[simp_llvm]
 def mkEntryFrame (dl : DataLayout) (mem : MemoryState) (defn : Definition)
     (argVals : List RegisterValue) : Except ExecError CallFrame :=
   match defn.prototype.type with
@@ -303,7 +332,6 @@ def mkEntryFrame (dl : DataLayout) (mem : MemoryState) (defn : Definition)
   | ty => .error (.staticError s!"Expected function type for prototype, found [{ty.print}]")
 
 /-- Construct the initial small-step `Config` for calling `defn` with `argVals` in `(cfg, dl, initMem)`. -/
-@[simp_llvm]
 def initCallConfig (cfg : SemanticsConfig) (dl : DataLayout) (initMem : MemoryState)
     (fns : AssocMap FunctionId Definition := ∅) (decls : AssocMap FunctionId Declaration := ∅)
     (defn : Definition) (argVals : List RegisterValue) : Config :=
@@ -320,10 +348,12 @@ def initCallConfig (cfg : SemanticsConfig) (dl : DataLayout) (initMem : MemorySt
   | .error e => Config.ofError e
 
 /-- Helper: extract the `LlvmRetType` from a `Definition`'s prototype. -/
-@[simp, simp_llvm]
+@[simp, simp_step]
 def _root_.LeanNanoLlvm.AST.Definition.retType? (defn : Definition) : Option LlvmRetType :=
   match defn.prototype.type with
   | .function retTy _ _ => some retTy
   | _ => none
+
+attribute [simp_step] AssocMap.get?_insert AssocMap.get?_empty
 
 end LeanNanoLlvm.Semantics

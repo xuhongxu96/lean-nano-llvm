@@ -21,7 +21,7 @@ open AST
 Deterministic pure leaf expression evaluator (shared by `Step.EvalExp` and `Exec.execExp`).
 Returns `none` only for compound expressions and `.undef`.
 -/
-@[simp, simp_llvm]
+@[simp, simp_step]
 def evalPureLeafExp? (dl : DataLayout) (cfg : SemanticsConfig)
     (regs : AssocMap Identifier RegisterValue) (mem : MemoryState)
     (ty : LlvmType) : Exp → Option (Except ExecError RegisterValue)
@@ -91,12 +91,12 @@ def applyInputFMFExec (fmf : FastMathFlags) (ty : LlvmType) (val : RegisterValue
       | .error err => .error err
     | other => goElem other o
 
-@[simp, simp_llvm]
+@[simp, simp_step]
 theorem applyInputFMFExec_none (ty : LlvmType) (val : RegisterValue) (o : OracleState) :
     applyInputFMFExec {} ty val o = .ok (val, o) := rfl
 
 /-- Finish a value-producing instruction by writing to its local register ID. -/
-@[simp, simp_llvm]
+@[simp, simp_step]
 def finishRegInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (restCode : Code) (instrId : InstructionId) (val : RegisterValue) (mem' : MemoryState)
     (allocas' : List AllocId := frame.frameAllocas) : Config :=
@@ -107,14 +107,14 @@ def finishRegInstr (st : MachineState) (frame : CallFrame) (callers : List CallF
   | .void _ => .staticError "Value-producing instruction requires a local register id"
 
 /-- Finish a void instruction (`store`) without writing a register. -/
-@[simp, simp_llvm]
+@[simp, simp_step]
 def finishVoidInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (restCode : Code) (mem' : MemoryState) : Config :=
   .running (st.withFramesAndMemory
     (frame.advance restCode frame.registers frame.frameAllocas :: callers) mem')
 
 /-- Finish a `call` result (LLVM permits discarding non-void call results when `instrId` is `.void`). -/
-@[simp, simp_llvm]
+@[simp, simp_step]
 def finishCallResult (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (restCode : Code) (instrId : InstructionId) (retTy : LlvmRetType)
     (val : RegisterValue) (mem' : MemoryState) : Config :=
@@ -125,7 +125,7 @@ def finishCallResult (st : MachineState) (frame : CallFrame) (callers : List Cal
     (frame.advance restCode regs' frame.frameAllocas :: callers) mem')
 
 /-- Commit a list of parallel phi register updates simultaneously. -/
-@[simp_llvm]
+@[simp_step]
 def commitPhiUpdates (regs : AssocMap Identifier RegisterValue) :
     List (RawId × RegisterValue) → AssocMap Identifier RegisterValue
   | [] => regs
@@ -1086,6 +1086,19 @@ theorem StarStep.trans {c1 c2 c3 : Config} {tr1 tr2 : List TraceEvent}
     rw [List.append_assoc]
     exact StarStep.step hs (ih h2)
 
+/-- Transitive (one-or-more-step) closure of `Step`. -/
+def PlusStep (c1 : Config) (tr : List TraceEvent) (c2 : Config) : Prop :=
+  ∃ ev cm tr', Step c1 ev cm ∧ StarStep cm tr' c2 ∧ tr = ev.toList ++ tr'
+
+theorem PlusStep.single {c1 c2 : Config} {ev : Option TraceEvent}
+    (h : Step c1 ev c2) : PlusStep c1 ev.toList c2 :=
+  ⟨ev, c2, [], h, StarStep.refl c2, by simp⟩
+
+theorem StarStep.of_plusStep {c1 c2 : Config} {tr : List TraceEvent}
+    (h : PlusStep c1 tr c2) : StarStep c1 tr c2 := by
+  obtain ⟨ev, cm, tr', hs, hstar, rfl⟩ := h
+  exact StarStep.step hs hstar
+
 /-- Configuration well-formedness: any running or halted memory is `MemoryState.WellFormed`. -/
 @[simp]
 def Config.WellFormed : Config → Prop
@@ -1287,6 +1300,44 @@ theorem Diverges.step_inv {c} (hd : Diverges c) : ∃ ev c', Step c ev c' ∧ Di
   obtain ⟨f, evf, h0, hstep⟩ := hd
   have hs0 : Step c (evf 0) (f 1) := h0 ▸ hstep 0
   exact ⟨evf 0, f 1, hs0, ⟨fun n => f (n + 1), fun n => evf (n + 1), rfl, fun n => hstep (n + 1)⟩⟩
+
+theorem CanAbort.of_starStep {c1 tr c2} (hstar : StarStep c1 tr c2) (ha : CanAbort c2) :
+    CanAbort c1 := by
+  rcases ha with ⟨tr', msg, h⟩ | ⟨tr', err, h⟩
+  · exact Or.inl ⟨tr ++ tr', msg, StarStep.trans hstar h⟩
+  · exact Or.inr ⟨tr ++ tr', err, StarStep.trans hstar h⟩
+
+/-- Coinductive construction of `Diverges` from a single-step progress invariant. -/
+theorem Diverges.of_progress {P : Config → Prop}
+    (hprog : ∀ c, P c → ∃ ev c', Step c ev c' ∧ P c')
+    {c0 : Config} (h0 : P c0) : Diverges c0 := by
+  let stepEv : ∀ s : { c : Config // P c }, Option TraceEvent :=
+    fun s => Classical.choose (hprog s.1 s.2)
+  let stepNext : ∀ s : { c : Config // P c }, { c : Config // P c } :=
+    fun s =>
+      let h1 := Classical.choose_spec (hprog s.1 s.2)
+      ⟨Classical.choose h1, (Classical.choose_spec h1).2⟩
+  let stepProof : ∀ s : { c : Config // P c }, Step s.1 (stepEv s) (stepNext s).1 :=
+    fun s =>
+      let h1 := Classical.choose_spec (hprog s.1 s.2)
+      (Classical.choose_spec h1).1
+  let seq : Nat → { c : Config // P c } :=
+    Nat.rec ⟨c0, h0⟩ (fun _ prev => stepNext prev)
+  exact ⟨fun n => (seq n).1, fun n => stepEv (seq n), rfl, fun n => stepProof (seq n)⟩
+
+/-- Coinductive construction of `Diverges` from a `PlusStep` (≥ 1 step) progress invariant. -/
+theorem Diverges.of_plusStep_progress {P : Config → Prop}
+    (hprog : ∀ c, P c → ∃ tr c', PlusStep c tr c' ∧ P c')
+    {c0 : Config} (h0 : P c0) : Diverges c0 := by
+  let Q : Config → Prop := fun c => ∃ tr cEnd, StarStep c tr cEnd ∧ P cEnd
+  refine Diverges.of_progress (P := Q) ?_ ⟨[], c0, StarStep.refl c0, h0⟩
+  rintro c ⟨tr, cEnd, hstar, hp⟩
+  cases hstar with
+  | refl _ =>
+    obtain ⟨tr', cEnd', ⟨ev, cm, tr2, hs, hrest, _⟩, hp'⟩ := hprog c hp
+    exact ⟨ev, cm, hs, tr2, cEnd', hrest, hp'⟩
+  | step hs hrest =>
+    exact ⟨_, _, hs, _, cEnd, hrest, hp⟩
 
 theorem StarStep.of_det_step {st : MachineState} {ev0 : Option TraceEvent} {c1 : Config}
     (hdet : ∀ ev c', Step (.running st) ev c' ↔ ev = ev0 ∧ c' = c1)

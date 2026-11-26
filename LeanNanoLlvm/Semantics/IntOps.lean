@@ -27,10 +27,10 @@ end IntW
 def and? {w : Nat} (x y : BitVec w) : IntW w :=
   .value <| x &&& y
 
-@[simp_llvm_option]
+@[simp_llvm]
 theorem and?_eq : and? a b = .value (a &&& b) := rfl
 
-@[simp_llvm_option]
+@[simp_llvm]
 def and {w : Nat} (x y : IntW w) : IntW w := do
   let x ← x
   let y ← y
@@ -40,14 +40,14 @@ def and {w : Nat} (x y : IntW w) : IntW w := do
 def or? {w : Nat} (x y : BitVec w) : IntW w :=
   .value <| x ||| y
 
-@[simp_llvm_option]
+@[simp_llvm]
 theorem or?_eq : or? a b = .value (a ||| b) := rfl
 
 structure DisjointFlag where
   disjoint : Bool := false
 deriving Repr, DecidableEq, Lean.ToExpr
 
-@[simp_llvm_option]
+@[simp_llvm]
 def or {w : Nat} (x y : IntW w) (flag : DisjointFlag := {disjoint := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -60,10 +60,10 @@ def or {w : Nat} (x y : IntW w) (flag : DisjointFlag := {disjoint := false}) : I
 def xor? {w : Nat} (x y : BitVec w) : IntW w :=
   .value <| x ^^^ y
 
-@[simp_llvm_option]
+@[simp_llvm]
 theorem xor?_eq : xor? a b  = .value (a ^^^ b) := rfl
 
-@[simp_llvm_option]
+@[simp_llvm]
 def xor {w : Nat} (x y : IntW w) : IntW w := do
   let x ← x
   let y ← y
@@ -73,7 +73,7 @@ def xor {w : Nat} (x y : IntW w) : IntW w := do
 def add? {w : Nat} (x y : BitVec w) : IntW w :=
   .value <| x + y
 
-@[simp_llvm_option]
+@[simp_llvm]
 theorem add?_eq : add? a b  = .value (a + b) := rfl
 
 structure NoWrapFlags where
@@ -81,7 +81,7 @@ structure NoWrapFlags where
   nsw : Bool := false
 deriving Repr, DecidableEq, Lean.ToExpr
 
-@[simp_llvm_option]
+@[simp_llvm]
 def add {w : Nat} (x y : IntW w) (flags : NoWrapFlags := {nsw := false , nuw := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -96,10 +96,10 @@ def add {w : Nat} (x y : IntW w) (flags : NoWrapFlags := {nsw := false , nuw := 
 def sub? {w : Nat} (x y : BitVec w) : IntW w :=
   .value <| x - y
 
-@[simp_llvm_option]
+@[simp_llvm]
 theorem sub?_eq : sub? a b  = .value (a - b) := rfl
 
-@[simp_llvm_option]
+@[simp_llvm]
 def sub {w : Nat} (x y : IntW w) (flags : NoWrapFlags := {nsw := false , nuw := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -114,10 +114,10 @@ def sub {w : Nat} (x y : IntW w) (flags : NoWrapFlags := {nsw := false , nuw := 
 def mul? {w : Nat} (x y : BitVec w) : IntW w :=
   .value <| x * y
 
-@[simp_llvm_option]
+@[simp_llvm]
 theorem mul?_eq : mul? a b  = .value (a * b) := rfl
 
-@[simp_llvm_option]
+@[simp_llvm]
 def mul {w : Nat} (x y : IntW w) (flags : NoWrapFlags := {nsw := false , nuw := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -139,7 +139,7 @@ structure ExactFlag where
   exact : Bool := false
 deriving Repr, DecidableEq, Lean.ToExpr
 
-@[simp_llvm_option]
+@[simp_llvm]
 def udiv {w : Nat} (x y : IntW w) (flag : ExactFlag := {exact := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -165,7 +165,7 @@ theorem sdiv?_eq_value_of_neq_allOnes {x y : BitVec w} (hy : y ≠ 0)
   intro h
   simp_all
 
-@[simp_llvm_option]
+@[simp_llvm]
 def sdiv {w : Nat} (x y : IntW w) (flag : ExactFlag := {exact := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -193,7 +193,7 @@ def urem? {w : Nat} (x y : BitVec w) : IntW w :=
   else
     .value <| x % y
 
-@[simp_llvm_option]
+@[simp_llvm]
 def urem {w : Nat} (x y : IntW w) : IntW w := do
   let x ← x
   let y ← y
@@ -239,7 +239,7 @@ def srem? {w : Nat} (x y : BitVec w) : IntW w :=
   else
     .value <| BitVec.srem x y
 
-@[simp_llvm_option]
+@[simp_llvm]
 def srem {w : Nat} (x y : IntW w) : IntW w := do
   let x ← x
   let y ← y
@@ -290,7 +290,7 @@ def shl? {n} (op1 : BitVec n) (op2 : BitVec n) : IntW n :=
   then .poison
   else .value (op1 <<< op2)
 
-@[simp_llvm_option]
+@[simp_llvm]
 def shl {w : Nat} (x y : IntW w) (flags : NoWrapFlags := {nsw := false , nuw := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -309,7 +309,7 @@ def lshr? {n} (op1 : BitVec n) (op2 : BitVec n) : IntW n :=
   then .poison
   else .value (op1 >>> op2)
 
-@[simp_llvm_option]
+@[simp_llvm]
 def lshr {w : Nat} (x y : IntW w) (flag : ExactFlag := {exact := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -326,7 +326,7 @@ def ashr? {n} (op1 : BitVec n) (op2 : BitVec n) : IntW n :=
   then .poison
   else .value (op1.sshiftRight' op2)
 
-@[simp_llvm_option]
+@[simp_llvm]
 def ashr {w : Nat} (x y : IntW w) (flag : ExactFlag := {exact := false}) : IntW w := do
   let x ← x
   let y ← y
@@ -341,7 +341,7 @@ def ashr {w : Nat} (x y : IntW w) (flag : ExactFlag := {exact := false}) : IntW 
 def trunc? {w : Nat} (w' : Nat) (x : BitVec w) : IntW w' := do
   .value <| (BitVec.truncate w' x)
 
-@[simp_llvm_option]
+@[simp_llvm]
 def trunc {w : Nat} (w' : Nat) (x : IntW w) (noWrapFlags : NoWrapFlags := {nsw := false , nuw := false}) : IntW w' := do
   let x <- x
   if noWrapFlags.nsw ∧ ((x.truncate w').signExtend w ≠ x) then
@@ -359,7 +359,7 @@ deriving Repr, DecidableEq, Lean.ToExpr
 def zext? {w : Nat} (w' : Nat) (x : BitVec w) : IntW w' := do
   .value <| (BitVec.zeroExtend w' x)
 
-@[simp_llvm_option]
+@[simp_llvm]
 def zext {w : Nat} (w' : Nat) (x : IntW w) (flag : NonNegFlag := {nneg := false}) : IntW w' := do
   let x <- x
   if flag.nneg ∧ x.msb then
@@ -371,12 +371,12 @@ def zext {w : Nat} (w' : Nat) (x : IntW w) (flag : NonNegFlag := {nneg := false}
 def sext? {w : Nat} (w' : Nat) (x : BitVec w) : IntW w' := do
   .value <| (BitVec.signExtend w' x)
 
-@[simp_llvm_option]
+@[simp_llvm]
 def sext {w : Nat} (w' : Nat) (x : IntW w) : IntW w' := do
   let x <- x
   sext? w' x
 
-@[simp_llvm_option]
+@[simp_llvm]
 def freeze (x : IntW w) : IntW w := do
   match x with
   | poison => value (0)
@@ -398,7 +398,7 @@ def evalICmpPred {w : Nat} (pred : AST.ICmpPred) (x y : BitVec w) : Bool :=
   | .slt => BitVec.slt x y
   | .sle => BitVec.sle x y
 
-@[simp_llvm_option]
+@[simp_llvm]
 def icmp {w : Nat} (samesign : Bool) (pred : AST.ICmpPred) (x y : IntW w) : IntW 1 := do
   let x ← x
   let y ← y
