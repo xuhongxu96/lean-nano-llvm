@@ -1344,7 +1344,7 @@ def computePtrAddStep (mem : MemoryState) (flags : GEPFlags)
             | some mo =>
               if mo.inBounds ptr.addr.toNat && mo.inBounds newAddr.toNat then
                 let prov' := match ptr.prov with
-                  | .wildcard g none => Provenance.wildcard g (some mo.allocId)
+                  | .wildcard g none wid => Provenance.wildcard g (some mo.allocId) wid
                   | p => p
                 (true, prov')
               else (false, ptr.prov)
@@ -1561,11 +1561,14 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
         if ok then .ok (.bv w (.value bv)) else .ok (.bv w .poison)
       | other => .ok other
   | .nofpclass mask =>
-    liftUnaryPure ty.scalarType val fun
+    let rec go : RegisterValue → RegisterValue
       | .float ft (.value flt) =>
-        if (flt.fpClassBit &&& mask) != 0 then .ok (.float ft .poison)
-        else .ok (.float ft (.value flt))
-      | other => .ok other
+        if (flt.fpClassBit &&& mask) != 0 then .float ft .poison else .float ft (.value flt)
+      | .vector elemTy elems => .vector elemTy (elems.map go)
+      | .struct packed fieldTys fields => .struct packed fieldTys (fields.map go)
+      | .array elemTy elems => .array elemTy (elems.map go)
+      | other => other
+    .ok (go val)
   | .dereferenceable bytes =>
     match val with
     | .ptr _ .poison =>
@@ -1962,7 +1965,8 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
     match toTy.scalarType with
     | .ptr as =>
       let pw := dl.getPointerSizeInBits as
-      let prov := mem.getWildcardProvenance
+      let (wid, o1) := o.freshId
+      let prov := mem.getWildcardProvenance wid
       do
         let v ← liftUnaryPure (.ptr as) val fun
           | .bv _ .poison => .ok (.ptr as .poison)
@@ -1970,7 +1974,7 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
             let addr := if pw ≥ w then bv.zeroExtend pw else bv.truncate pw
             .ok (.ptr as (.value { prov := prov, addrWidth := pw, addr := addr }))
           | other => .error (.staticError s!"Expected integer in inttoptr, got {other}")
-        .ok (v, o)
+        .ok (v, o1)
     | _ => .error (.staticError s!"Expected pointer target type in inttoptr, got {toTy.print}")
   | .addrspacecast =>
     match toTy.scalarType with

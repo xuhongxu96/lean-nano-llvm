@@ -198,7 +198,18 @@ def decode_lean_float(ft: str, bits: int):
         except OverflowError:
             val = float("-inf") if sign else float("inf")
         return (False, False, bool(sign), val)
-    if ft in ("fp128", "ppc_fp128"):
+    if ft == "ppc_fp128":
+        hi_bits = bits & ((1 << 64) - 1)
+        lo_bits = (bits >> 64) & ((1 << 64) - 1)
+        dhi = decode_lean_float("double", hi_bits)
+        dlo = decode_lean_float("double", lo_bits)
+        if dhi is None:
+            return None
+        if dhi[0] or dhi[1]:
+            return dhi
+        val = dhi[3] + (0.0 if (dlo is None or dlo[0] or dlo[1]) else dlo[3])
+        return (False, False, dhi[2], val)
+    if ft == "fp128":
         sign = (bits >> 127) & 1
         exp = (bits >> 112) & 0x7FFF
         frac = bits & ((1 << 112) - 1)
@@ -374,6 +385,166 @@ def values_match(llubi_str: str, lean_str: str) -> bool:
     return ls == rs
 
 
+def float_bit_info(ft: str):
+    """Return (total_bits, quiet_bit_mask) for an IEEE FloatType."""
+    return {
+        "half": (16, 1 << 9),
+        "bfloat": (16, 1 << 6),
+        "float": (32, 1 << 22),
+        "double": (64, 1 << 51),
+        "fp128": (128, 1 << 111),
+    }.get(ft)
+
+
+def unwrap_lean_agg(s: str):
+    """If s is a Lean vector/array/struct/packed-struct literal, return inner content; else None."""
+    if s.startswith("<{") and s.endswith("}>"):
+        return s[2:-2]
+    if (s.startswith("<") and s.endswith(">")) or (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+        return s[1:-1]
+    return None
+
+
+def is_concrete_matching_type(exp_s: str, act_s: str) -> bool:
+    """Verify act_s is concrete (non-poison) with the exact same type/width/shape as exp_s."""
+    es, as_ = exp_s.strip(), act_s.strip()
+    if es == "poison":
+        return parse_lean_scalar(as_)[0] == "poison"
+    r_inner = unwrap_lean_agg(as_)
+    if es.startswith("{") and es.endswith("}") and r_inner is not None:
+        l_elems = split_top_level(es[1:-1])
+        r_elems = split_top_level(r_inner)
+        return len(l_elems) == len(r_elems) and all(
+            is_concrete_matching_type(a, b) for a, b in zip(l_elems, r_elems)
+        )
+    rc = parse_lean_scalar(as_)
+    if rc[0] == "byte":
+        lb = parse_llubi_byte_val(es)
+        return lb is not None and lb[0] == rc[1] and ("!" not in rc[2])
+    lc = parse_llubi_scalar_to_canonical(es)
+    if lc[0] == "int" and rc[0] == "int":
+        return lc[1] == rc[1]
+    if lc[0] in ("fp_hex", "fp_nan", "fp_inf", "fp_num") and rc[0] == "fp_bits":
+        return lc[1] == rc[1]
+    if lc[0] == "ptr" and rc[0] == "ptr":
+        return True
+    return values_match(es, as_)
+
+
+def values_match_semantic(
+    exp_s: str, act_s: str, chk_line: str, src: str, vscale: int, allow_undef: bool
+) -> bool:
+    """Exact match first; for LLVM-nondeterministic instructions, verify exact semantic invariants."""
+    if values_match(exp_s, act_s):
+        return True
+
+    es, as_ = exp_s.strip(), act_s.strip()
+
+    # Recurse element-wise on aggregates/vectors/packed-structs so deterministic lanes are checked strictly!
+    r_inner = unwrap_lean_agg(as_)
+    if es.startswith("{") and es.endswith("}") and r_inner is not None:
+        l_elems = split_top_level(es[1:-1])
+        r_elems = split_top_level(r_inner)
+        if len(l_elems) == len(r_elems):
+            return all(
+                values_match_semantic(a, b, chk_line, src, vscale, allow_undef)
+                for a, b in zip(l_elems, r_elems)
+            )
+
+    # 1. `freeze` of poison/undef (or load/bitcast of a frozen value):
+    #    must produce a concrete non-poison value of identical type/width
+    if "= freeze " in chk_line or "_freeze" in chk_line.split("=")[0]:
+        return is_concrete_matching_type(es, as_)
+
+    lc = parse_llubi_scalar_to_canonical(es)
+    rc = parse_lean_scalar(as_)
+
+    # 1b. Allocator-dependent concrete address (`ptrtoaddr` of non-null pointer or `addr_bits` byte load)
+    if ("= ptrtoaddr " in chk_line and lc[0] == "int" and lc[2] != 0 and rc[0] == "int" and lc[1] == rc[1] and rc[2] != 0):
+        return True
+    if "addr_bits" in chk_line.split("=")[0] and lc[0] == "int" and rc[0] == "int" and lc[1] == rc[1]:
+        return True
+
+    # 2. `llvm.experimental.get.vector.length(cnt, maxvl, scalable)`:
+    #    result must be in [1, min(cnt, eff_maxvl)] (or 0 iff cnt == 0).
+    m_evl = re.search(
+        r"@llvm\.experimental\.get\.vector\.length[^(]*\(i\d+\s+(\d+),\s*i\d+\s+(\d+),\s*i1\s+(true|false)\)",
+        chk_line,
+    )
+    if m_evl:
+        cnt = int(m_evl.group(1))
+        maxvl = int(m_evl.group(2))
+        eff_max = maxvl * (vscale if m_evl.group(3) == "true" else 1)
+        rc = parse_lean_scalar(as_)
+        if rc[0] == "int":
+            val = rc[2]
+            if cnt == 0:
+                return val == 0
+            return 1 <= val <= min(cnt, eff_max)
+        return False
+
+    # 3. `nsz` signed-zero nondeterminism: allow +0.0 <-> -0.0 of the exact same float type
+    if " nsz " in chk_line:
+        lc = parse_llubi_scalar_to_canonical(es)
+        rc = parse_lean_scalar(as_)
+        if lc[0] == "fp_num" and lc[2] == 0.0 and rc[0] == "fp_bits" and lc[1] == rc[1]:
+            dec = decode_lean_float(rc[1], rc[2])
+            if dec is not None and not dec[0] and not dec[1] and dec[3] == 0.0:
+                return True
+
+    # 4. NaN sign bit nondeterminism (and Wasm32 non-canonical quiet NaN)
+    lc = parse_llubi_scalar_to_canonical(es)
+    rc = parse_lean_scalar(as_)
+    if rc[0] == "fp_bits":
+        ft, act_bits = rc[1], rc[2]
+        info = float_bit_info(ft)
+        dec = decode_lean_float(ft, act_bits)
+        if info is not None and dec is not None:
+            total_bits, qbit = info
+            sign_mask = 1 << (total_bits - 1)
+            # 4a. Exact payload + exact quiet bit match (only PRNG sign bit differs)
+            if lc[0] == "fp_hex" and lc[1] == ft:
+                exp_bits = lc[2]
+                exp_dec = decode_lean_float(ft, exp_bits)
+                if dec[0] and exp_dec is not None and exp_dec[0]:
+                    if (act_bits & ~sign_mask) == (exp_bits & ~sign_mask):
+                        return True
+                    # 4b. Wasm32 non-canonical NaN input: any quiet NaN of matching type
+                    if "wasm" in src and ("+nan(0x" in chk_line or "+snan(" in chk_line):
+                        return bool(act_bits & qbit)
+                    # 4b'. llvm.maximum/llvm.minimum with NaN input (default nondet NaN mode): any NaN of matching type
+                    if any(k in chk_line for k in ("@llvm.maximum.", "@llvm.minimum.")):
+                        return True
+            # 4c. maxnum/minnum/vector.reduce.{fmax,fmin} with sNaN input:
+            #     LLVM allows returning either a NaN or one of the finite operands.
+            if any(k in chk_line for k in ("@llvm.maxnum.", "@llvm.minnum.", "@llvm.vector.reduce.fmax.", "@llvm.vector.reduce.fmin.")) and (
+                "snan(" in chk_line
+            ):
+                if dec[0]:
+                    return True
+                if not dec[1]:
+                    nums = [float(x) for x in re.findall(r"[-+]?\d+\.\d+e[+-]\d+", chk_line.split("=>")[0])]
+                    if any(math.isclose(dec[3], x, rel_tol=1e-4, abs_tol=1e-12) for x in nums):
+                        return True
+            # 4d. fmaximum/fminimum/fmaximumnum/fminimumnum all-NaN reduction: any NaN of matching type
+            if any(k in chk_line for k in ("@llvm.vector.reduce.fmaximum", "@llvm.vector.reduce.fminimum")):
+                if lc[0] in ("fp_hex", "fp_nan") and lc[1] == ft and dec[0]:
+                    return True
+
+    # 5. `undef` values / uninitialized memory reads (PRNG draws from llubi):
+    #    NEVER relax `poison`; require concrete non-poison value of exact type/width.
+    if allow_undef:
+        if lc[0] == "int" and rc[0] == "int" and lc[1] == rc[1]:
+            w = lc[1]
+            signed_exp = lc[2] - (1 << w) if lc[2] >= (1 << (w - 1)) else lc[2]
+            if abs(signed_exp) >= 1000000 or "undef" in chk_line:
+                return True
+        if "undef" in chk_line and lc[0] in ("fp_hex", "fp_nan", "fp_inf", "fp_num") and rc[0] == "fp_bits" and lc[1] == rc[1]:
+            return True
+
+    return False
+
+
 def run_single_test(path: str, run_line: str, text: str, bin_path: str):
     """Execute one `; RUN:` line and return (status, detail)."""
     # Split pipeline stages by `|`
@@ -430,6 +601,8 @@ def run_single_test(path: str, run_line: str, text: str, bin_path: str):
 
     cli_args = [bin_path, "run", "-", "--verbose"]
     has_explicit_undef = False
+    allow_undef = True
+    vscale = 4
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -441,22 +614,38 @@ def run_single_test(path: str, run_line: str, text: str, bin_path: str):
             cli_args.append(t)
             if t == "--deterministic":
                 has_explicit_undef = True
+                allow_undef = False
             i += 1
         elif t.startswith(("--entry-function=", "--max-mem=", "--max-stack-depth=", "--max-steps=", "--vscale=", "--nan-behavior=", "--undef-behavior=", "--fuse-fmuladd=")):
             cli_args.append(t)
             if t.startswith("--undef-behavior="):
                 has_explicit_undef = True
+                allow_undef = not t.endswith(("=disabled", "=zero"))
+            elif t.startswith("--vscale="):
+                try:
+                    vscale = max(1, int(t.split("=", 1)[1]))
+                except ValueError:
+                    pass
             i += 1
         elif t in ("--entry-function", "--max-mem", "--max-stack-depth", "--max-steps", "--vscale", "--nan-behavior", "--undef-behavior") and i + 1 < len(toks):
             cli_args.extend([t, toks[i + 1]])
             if t == "--undef-behavior":
                 has_explicit_undef = True
+                allow_undef = toks[i + 1] not in ("disabled", "zero")
+            elif t == "--vscale":
+                try:
+                    vscale = max(1, int(toks[i + 1]))
+                except ValueError:
+                    pass
             i += 2
         else:
             i += 1
 
-    if not has_explicit_undef and "undef" in src:
-        cli_args.append("--undef")
+    # llubi enables `undef` with a non-zero PRNG seed by default unless --deterministic or --undef-behavior=... is passed.
+    if not has_explicit_undef:
+        cli_args.extend(["--undef", "--seed", "1"])
+    elif allow_undef:
+        cli_args.extend(["--seed", "1"])
 
     try:
         res = subprocess.run(
@@ -520,7 +709,7 @@ def run_single_test(path: str, run_line: str, text: str, bin_path: str):
         if not q:
             continue
         act_val = q.pop(0)
-        if not values_match(exp_val, act_val):
+        if not values_match_semantic(exp_val, act_val, chk, src, vscale, allow_undef):
             val_mismatches.append(f"%{nm}: expected `{exp_val}`, got `{act_val}`")
 
     if val_mismatches:

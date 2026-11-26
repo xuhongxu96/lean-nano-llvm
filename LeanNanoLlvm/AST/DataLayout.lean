@@ -27,6 +27,7 @@ structure DataLayout : Type where
   allocaAddrSpace   : Nat := 0
   globalsAddrSpace  : Nat := 0
   intAligns         : List (Nat × Nat) := []
+  targetTriple      : String := ""
 deriving Repr, DecidableEq, Inhabited
 
 namespace DataLayout

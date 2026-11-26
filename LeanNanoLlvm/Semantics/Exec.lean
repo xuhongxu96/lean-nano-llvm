@@ -62,6 +62,10 @@ def execExp (dl : DataLayout) (cfg : SemanticsConfig)
         else
           IEEEFloat.ofNatBits bits
       .ok (.float .float (.value flt), mem, o)
+    | .float .ppc_fp128 =>
+      let hi := bits >>> 64
+      let lo := bits &&& ((1 <<< 64) - 1)
+      .ok (.float .ppc_fp128 (.value (IEEEFloat.ofNatBits ((lo <<< 64) ||| hi))), mem, o)
     | .float ft => .ok (.float ft (.value (IEEEFloat.ofNatBits bits)), mem, o)
     | _ => .error (.staticError s!"invalid type for float bit literal: found {ty.print}")
   | .floatDec neg m e10 =>
@@ -854,7 +858,7 @@ def execRet (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
         if frame.defn.prototype.isNoReturn || rd.isNoReturn then
           .ub "Return from a noreturn function/callsite"
         else
-          match applyRetFMFAndAttrsPure st.dataLayout m2 rd.retTy rd.fmf rd.retAttrs retVal1 with
+          match finishCallerReturn st.dataLayout st.config m2 rd retVal1 with
           | .error err => Config.ofError err
           | .ok retVal2 =>
             let regs' := match rd.retTy, rd.destId with
@@ -883,8 +887,8 @@ theorem execRet_sound (st : MachineState) (frame : CallFrame) (callers : List Ca
         · rw [if_pos hnr]; exact StepRet.noreturn_ub rfl h1 hrd hnr
         · have hnrF : (frame.defn.prototype.isNoReturn || rd.isNoReturn) = false := Bool.eq_false_iff.mpr hnr
           rw [if_neg hnr]
-          cases h2 : applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-              rd.retTy rd.fmf rd.retAttrs retVal1 with
+          cases h2 : finishCallerReturn st.dataLayout st.config (freeAllocaList m1 frame.frameAllocas)
+              rd retVal1 with
           | error err => exact StepRet.caller_attr_err rfl h1 hrd hnrF h2
           | ok retVal2 => exact StepRet.call_ok rfl h1 hrd hnrF h2
 
@@ -922,7 +926,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       match execExp dl cfg regs m1 ty e2 o1 with
       | .error err => (none, Config.ofError err, o1)
       | .ok (v2, m2, o2) =>
-        match evalFloatBinaryExec cfg op ty v1 v2 o2 with
+        match evalFloatBinaryExec (frameDenormalCfg st frame) op ty v1 v2 o2 with
         | .ok (res, o3) => (none, finishRegInstr st frame callers rest iid res m2, o3)
         | .error err => (none, Config.ofError err, o2)
   | .icmp ss pred ty e1 e2 =>
@@ -942,7 +946,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       match execExp dl cfg regs m1 ty e2 o1 with
       | .error err => (none, Config.ofError err, o1)
       | .ok (v2, m2, o2) =>
-        match evalFCmpExec cfg fmf pred v1 v2 o2 with
+        match evalFCmpExec (frameDenormalCfg st frame) fmf pred v1 v2 o2 with
         | .ok (res, o3) => (none, finishRegInstr st frame callers rest iid res m2, o3)
         | .error err => (none, Config.ofError err, o2)
   | .conversionOp op fromTy e toTy =>
@@ -988,7 +992,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       let totalSize := dl.typeAllocSize allocTy * count
       let effAlign := align?.getD (dl.typePrefAlign allocTy)
       let name := match iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}"
-      match m1.allocate dl cfg totalSize effAlign name addrSpace .uninitialized .stack false with
+      match m1.allocate dl cfg totalSize effAlign name addrSpace (allocaInitKind frame.defn iid) .stack false with
       | .ok (obj, mem') =>
         (none, finishRegInstr st frame callers rest iid
           (.ptr addrSpace (.value (MemoryState.derivePointer dl obj)))
@@ -1016,7 +1020,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
               if noundef && (hasUndef || val.containsPoison) then
                 (ev, .ub "Loaded value violates !noundef (contains poison or undef bits)", o2)
               else
-                (ev, finishRegInstr st frame callers rest iid val m1, o2)
+                (ev, finishRegInstr st frame callers rest iid val (m1.bindWildcard p.prov mo.allocId), o2)
       | _ => (none, .staticError s!"Expected pointer in load, got {ptrVal}", o1)
   | .store valTy valExp ptrTy ptrExp align? isVol =>
     match execExp dl cfg regs st.memory valTy valExp o with
@@ -1035,7 +1039,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           | .ok (mo, offset) =>
             let rawBytes := valueToBytes dl cfg val valTy
             let ev := if isVol then some (.volatileStore mo.addrSpace p.addr.toNat rawBytes) else none
-            (ev, finishVoidInstr st frame callers rest (m2.writeObjectBytes mo.allocId offset rawBytes), o2)
+            (ev, finishVoidInstr st frame callers rest ((m2.bindWildcard p.prov mo.allocId).writeObjectBytes mo.allocId offset rawBytes), o2)
         | _ => (none, .staticError s!"Expected pointer in store, got {ptrVal}", o2)
   | .getelementptr flags baseTy ptrTy ptrExp idxs =>
     match execExp dl cfg regs st.memory ptrTy ptrExp o with
@@ -1144,6 +1148,18 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           | some (.error err) => (none, Config.ofError err, o2)
           | none => (none, .staticError s!"Internal error: alloc libcall {fname}", o2)
         else
+          match specLoadOracleCall? st m2 fname argVals with
+          | some (oracleDef, ptrVal, revVal, oracleArgs) =>
+            if cfg.maxStackDepth != 0 && st.frames.length ≥ cfg.maxStackDepth then
+              (none, .resourceError .stackOverflow, o2)
+            else
+              match mkCallEntryFrameWithMem dl cfg m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs with
+              | .error err => (none, Config.ofError err, o2)
+              | .ok (calleeFrame, m3) =>
+                let caller' := (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
+                  (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet, specLoad? := some (ptrVal, revVal) })
+                (none, .running (st.withFramesAndMemory (calleeFrame :: caller' :: callers) m3), o2)
+          | none =>
           match evalNonAllocIntrinsicExec? dl cfg m2 fname retTy fmf argVals o2 allowLib (args.map (fun a => a.2.2)) with
           | some (.ok (rawRet, m3, o3)) =>
             let effBundles := if fname == "llvm.assume" then bundles else []
@@ -1304,7 +1320,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       | error err => rw [h2] at ih2 h; cases h; exact StepInstr.floatBinaryOp_e2_err ih1 ih2
       | ok p2 =>
         rw [h2] at ih2 h; obtain ⟨v2, m2, o2⟩ := p2; dsimp only at ih2 h
-        cases hf : evalFloatBinaryExec st.config op ty v1 v2 o2 with
+        cases hf : evalFloatBinaryExec (frameDenormalCfg st frame) op ty v1 v2 o2 with
         | ok p3 => rw [hf] at h; obtain ⟨res, o3⟩ := p3; cases h; exact StepInstr.floatBinaryOp_ok ih1 ih2 ⟨_, _, hf⟩
         | error err => rw [hf] at h; cases h; exact StepInstr.floatBinaryOp_eval_err ih1 ih2 ⟨_, hf⟩
   | icmp ss pred ty e1 e2 =>
@@ -1334,7 +1350,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       | error err => rw [h2] at ih2 h; cases h; exact StepInstr.fcmp_e2_err ih1 ih2
       | ok p2 =>
         rw [h2] at ih2 h; obtain ⟨v2, m2, o2⟩ := p2; dsimp only at ih2 h
-        cases hf : evalFCmpExec st.config fmf pred v1 v2 o2 with
+        cases hf : evalFCmpExec (frameDenormalCfg st frame) fmf pred v1 v2 o2 with
         | ok p3 => rw [hf] at h; obtain ⟨res, o3⟩ := p3; cases h; exact StepInstr.fcmp_ok ih1 ih2 ⟨_, _, hf⟩
         | error err => rw [hf] at h; cases h; exact StepInstr.fcmp_eval_err ih1 ih2 ⟨_, hf⟩
   | conversionOp op fromTy e toTy =>
@@ -1386,7 +1402,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
         (match m1.allocate st.dataLayout st.config (st.dataLayout.typeAllocSize allocTy * count)
             (align?.getD (st.dataLayout.typePrefAlign allocTy))
             (match (generalizing := false) iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}")
-            addrSpace .uninitialized .stack false with
+            addrSpace (allocaInitKind frame.defn iid) .stack false with
           | .ok (obj, mem') =>
             (none, finishRegInstr st frame callers rest iid
               (.ptr addrSpace (.value (MemoryState.derivePointer st.dataLayout obj)))
@@ -1397,7 +1413,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       cases halloc : m1.allocate st.dataLayout st.config (st.dataLayout.typeAllocSize allocTy * count)
           (align?.getD (st.dataLayout.typePrefAlign allocTy))
           (match (generalizing := false) iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}")
-          addrSpace .uninitialized .stack false with
+          addrSpace (allocaInitKind frame.defn iid) .stack false with
       | ok p =>
         rw [halloc] at ha; obtain ⟨obj, mem'⟩ := p; cases ha
         cases numEl? with
@@ -1664,6 +1680,27 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
             | ok finalRet => rw [hattr] at h; cases h; exact StepInstr.call_alloc_ok iha ihc halloc hspec hattr
         · have hallocF : (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false := Bool.eq_false_iff.mpr halloc
           rw [if_neg halloc] at h
+          cases hspec : specLoadOracleCall? st m2 fid.ToString argVals with
+          | some pspec =>
+            rw [hspec] at h
+            obtain ⟨oracleDef, ptrVal, revVal, oracleArgs⟩ := pspec; dsimp only at h
+            by_cases hov : (st.config.maxStackDepth != 0 && decide (st.frames.length ≥ st.config.maxStackDepth)) = true
+            · rw [if_pos hov] at h; cases h
+              simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq] at hov
+              exact StepInstr.call_spec_oracle_overflow iha ihc hallocF hspec hov.1 hov.2
+            · rw [if_neg hov] at h
+              have hdepth : st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth := by
+                by_cases hz : st.config.maxStackDepth = 0
+                · exact Or.inl (beq_iff_eq.mpr hz)
+                · simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq, not_and] at hov
+                  exact Or.inr (Nat.lt_of_not_ge (hov hz))
+              cases hmk : mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs with
+              | error err => rw [hmk] at h; cases h; exact StepInstr.call_spec_oracle_entry_err iha ihc hallocF hspec hdepth hmk
+              | ok pm =>
+                rw [hmk] at h; obtain ⟨calleeFrame, m3⟩ := pm; cases h
+                exact StepInstr.call_spec_oracle_ok iha ihc hallocF hspec hdepth hmk
+          | none =>
+          rw [hspec] at h; dsimp only at h
           cases hint : evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o2 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) with
           | some r =>
             rw [hint] at h

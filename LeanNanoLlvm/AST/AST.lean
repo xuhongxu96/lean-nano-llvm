@@ -1,4 +1,5 @@
 import LeanNanoLlvm.Util.IEEEFloat
+import LeanNanoLlvm.Util.Config
 
 namespace LeanNanoLlvm.AST
 
@@ -507,8 +508,9 @@ structure Declaration where
   type       : LlvmType
   argAttrs   : List (List ValueAttr) := []
   retAttrs   : List ValueAttr := []
-  isNoReturn  : Bool := false
-  isNoBuiltin : Bool := false
+  isNoReturn   : Bool := false
+  isNoBuiltin  : Bool := false
+  denormalMode : Option DenormalMode := none
 deriving Repr
 
 abbrev Code := List (InstructionId × Instruction)

@@ -656,16 +656,8 @@ private def decodeHexFloatForType (tag : Char) (val : Nat) : Exp :=
     let frac := val &&& ((1 <<< 63) - 1)
     .floatBits ((sign <<< 78) ||| (exp <<< 63) ||| frac)
   else if tag == 'M' then
-    -- LLVM `0xM<hi64><lo64>`: IBM double-double pair of two IEEE binary64 values
-    let mask64 : Nat := (1 <<< 64) - 1
-    let hi64 := val >>> 64
-    let lo64 := val &&& mask64
-    let hiF : IEEEFloat .double := ⟨BitVec.ofNat 64 hi64⟩
-    let loF : IEEEFloat .double := ⟨BitVec.ofNat 64 lo64⟩
-    let hiQ := IEEEFloat.convert .fp128 .RNE hiF
-    let loQ := IEEEFloat.convert .fp128 .RNE loF
-    let sumQ := if lo64 == 0 then hiQ else IEEEFloat.add .RNE hiQ loQ
-    .floatBits sumQ.bits.toNat
+    -- LLVM `0xM<hi64><lo64>`: preserve raw 128-bit IBM double-double pair
+    .floatBits val
   else
     .floatBits val
 
@@ -1850,9 +1842,16 @@ private def skipLinkageAndCC : ParseM Unit := do
 
 /-- Parse/skip optional function-level attributes (`#0`, `nounwind`, `noreturn`, `nobuiltin`, etc.),
     returning `(isNoReturn, isNoBuiltin)`. -/
-private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool) := do
+private def parseDenormKind : String → Option DenormalModeKind
+  | "positivezero" | "positive-zero" => some .positiveZero
+  | "preservesign" | "preserve-sign" => some .preserveSign
+  | "ieee" => some .ieee
+  | _ => none
+
+private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMode) := do
   let mut isNoRet := false
   let mut isNoBuiltin := false
+  let mut denorm? : Option DenormalMode := none
   let mut guard := 32
   while guard > 0 do
     guard := guard - 1
@@ -1867,12 +1866,32 @@ private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool) := do
     | .ident "nobuiltin" =>
       let _ ← bump
       isNoBuiltin := true
+    | .ident "denormal_fpenv" =>
+      let _ ← bump
+      if ← tryEat .lparen then
+        let mut kinds : List DenormalModeKind := []
+        let mut depth : Nat := 1
+        let mut g := fuel
+        while depth > 0 && g > 0 do
+          g := g - 1
+          match ← bump with
+          | .lparen => depth := depth + 1
+          | .rparen => depth := depth - 1
+          | .ident s =>
+            if let some k := parseDenormKind s then
+              kinds := kinds ++ [k]
+          | .eof => depth := 0
+          | _ => pure ()
+        match kinds with
+        | [m] => denorm? := some { input := m, output := m }
+        | [outM, inM] => denorm? := some { input := inM, output := outM }
+        | _ => pure ()
     | .ident "unnamed_addr" | .ident "local_unnamed_addr" | .ident "nounwind"
     | .ident "readonly" | .ident "readnone" | .ident "willreturn"
     | .ident "alwaysinline" | .ident "noinline" | .ident "optnone" | .ident "optsize"
     | .ident "memory" | .ident "convergent" | .ident "cold" | .ident "hot"
     | .ident "nofree" | .ident "nosync" | .ident "uwtable" | .ident "ssp"
-    | .ident "denormal_fpenv" | .ident "speculatable" | .ident "mustprogress"
+    | .ident "speculatable" | .ident "mustprogress"
     | .ident "argmemonly" | .ident "inaccessiblememonly" | .ident "presplitcoroutine" =>
       let _ ← bump
       skipParenGroup fuel
@@ -1893,7 +1912,7 @@ private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool) := do
       let _ ← bump
       if ← tryEat .eq then let _ ← bump
     | _ => guard := 0
-  return (isNoRet, isNoBuiltin)
+  return (isNoRet, isNoBuiltin, denorm?)
 
 /-- Parse a `declare` or `define` header returning `(Declaration, paramNames)`. -/
 private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) := do
@@ -1931,7 +1950,7 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
         argNames := nm :: argNames
         if ← tryEat .comma then go := true
         else expect .rparen "function params"; go := false
-  let (isNoRet, isNoBuiltin) ← skipFnAttrs fuel
+  let (isNoRet, isNoBuiltin, denorm?) ← skipFnAttrs fuel
   let decl : Declaration := {
     name := fnName
     type := .function retTy argTys.reverse isVarArg
@@ -1939,6 +1958,7 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
     retAttrs := retAttrs
     isNoReturn := isNoRet
     isNoBuiltin := isNoBuiltin
+    denormalMode := denorm?
   }
   return (decl, argNames.reverse)
 
@@ -2028,11 +2048,15 @@ def parseLlvmModule (input : String) (vscale : Nat := 4) : Except String ParsedM
         | .ident "datalayout" =>
           expect .eq "target datalayout"
           match ← bump with
-          | .strLit s => dl := parseDataLayoutString s
+          | .strLit s =>
+            let prevTriple := dl.targetTriple
+            dl := { parseDataLayoutString s with targetTriple := prevTriple }
           | t => throw s!"parse error: expected datalayout string, got {repr t}"
         | .ident "triple" =>
           expect .eq "target triple"
-          let _ ← bump
+          match ← bump with
+          | .strLit s => dl := { dl with targetTriple := s }
+          | _ => pure ()
         | t => throw s!"parse error: unexpected target directive {repr t}"
       | .ident "source_filename" | .ident "module" =>
         let _ ← bump

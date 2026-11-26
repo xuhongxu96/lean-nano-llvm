@@ -129,7 +129,7 @@ structure ReturnDest : Type where
   fmf        : FastMathFlags := {}
   retAttrs   : List ValueAttr := []
   isNoReturn : Bool := false
-deriving Repr
+  specLoad?  : Option (RegisterValue × RegisterValue) := none
 
 /-- Explicit activation record on the small-step call stack (mirrors `llubi::Frame`). -/
 structure CallFrame : Type where

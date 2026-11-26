@@ -41,12 +41,13 @@ private def formatRegisterValue : RegisterValue → String
     if packed then s!"<\{ {body} }>" else s!"\{ {body} }"
 
 private structure RunOpts where
-  file          : String := ""
-  entry         : String := "main"
-  cfg           : SemanticsConfig := SemanticsConfig.modern
-  seed?         : Option Nat := none
-  verbose       : Bool := false
-  disableVerify : Bool := false
+  file              : String := ""
+  entry             : String := "main"
+  cfg               : SemanticsConfig := SemanticsConfig.modern
+  seed?             : Option Nat := none
+  verbose           : Bool := false
+  disableVerify     : Bool := false
+  nanTargetSpecific : Bool := false
 deriving Inhabited
 
 private def parseKeyVal (arg : String) : Option (String × String) :=
@@ -55,13 +56,13 @@ private def parseKeyVal (arg : String) : Option (String × String) :=
   | k :: rest => if rest.isEmpty then none else some (k, String.intercalate "=" rest)
   | [] => none
 
-private def applyNanBehavior (cfg : SemanticsConfig) (v : String) : Except String SemanticsConfig :=
+private def applyNanBehavior (opts : RunOpts) (v : String) : Except String RunOpts :=
   match v with
-  | "preferred" => .ok { cfg with nanMode := .preferred }
-  | "quieting" => .ok { cfg with nanMode := .quieting }
-  | "unchanged" => .ok { cfg with nanMode := .quieting }
-  | "target-specific" => .ok { cfg with nanMode := .preferred }
-  | "nondet" => .ok { cfg with nanMode := .nondet }
+  | "preferred" => .ok { opts with cfg := { opts.cfg with nanMode := .preferred }, nanTargetSpecific := false }
+  | "quieting" => .ok { opts with cfg := { opts.cfg with nanMode := .quieting }, nanTargetSpecific := false }
+  | "unchanged" => .ok { opts with cfg := { opts.cfg with nanMode := .unchanged }, nanTargetSpecific := false }
+  | "target-specific" => .ok { opts with cfg := { opts.cfg with nanMode := .preferred }, nanTargetSpecific := true }
+  | "nondet" => .ok { opts with cfg := { opts.cfg with nanMode := .nondet }, nanTargetSpecific := false }
   | _ => .error s!"invalid --nan-behavior value: {v}"
 
 private def applyUndefBehavior (cfg : SemanticsConfig) (v : String) : Except String SemanticsConfig :=
@@ -104,8 +105,8 @@ private def parseRunArgs (args : List String) : Except String RunOpts :=
       | some n => go { opts with cfg := { opts.cfg with vscale := if n == 0 then 1 else n } } rest
       | none => .error s!"invalid --vscale value: {s}"
     | "--nan-behavior" :: v :: rest =>
-      match applyNanBehavior opts.cfg v with
-      | .ok c => go { opts with cfg := c } rest
+      match applyNanBehavior opts v with
+      | .ok o' => go o' rest
       | .error e => .error e
     | "--undef-behavior" :: v :: rest =>
       match applyUndefBehavior opts.cfg v with
@@ -132,8 +133,8 @@ private def parseRunArgs (args : List String) : Except String RunOpts :=
           | some n => go { opts with cfg := { opts.cfg with vscale := if n == 0 then 1 else n } } rest
           | none => .error s!"invalid --vscale value: {s}"
         | some ("--nan-behavior", v) =>
-          match applyNanBehavior opts.cfg v with
-          | .ok c => go { opts with cfg := c } rest
+          match applyNanBehavior opts v with
+          | .ok o' => go o' rest
           | .error e => .error e
         | some ("--undef-behavior", v) =>
           match applyUndefBehavior opts.cfg v with
@@ -261,10 +262,19 @@ def main (args : List String) : IO UInt32 := do
           if hasBadPhi then
             IO.eprintln "STATIC_ERROR: PHINode should have one entry for each predecessor (input module is broken!)"
             return 2
+        let effCfg : SemanticsConfig :=
+          if opts.nanTargetSpecific then
+            let tr := parsed.dataLayout.targetTriple
+            let nm :=
+              if tr.startsWith "sparc" then NaNPropagationMode.sparcPreferred
+              else if tr.startsWith "wasm" then NaNPropagationMode.wasm
+              else NaNPropagationMode.preferred
+            { opts.cfg with nanMode := nm }
+          else opts.cfg
         let oracle : OracleState := match opts.seed? with
           | none => default
           | some s => ⟨fun i => (s * 6364136223846793005 + i * 1442695040888963407 + 1) % (2 ^ 64), 0⟩
-        match initModuleExec parsed.topLevel opts.cfg parsed.dataLayout oracle with
+        match initModuleExec parsed.topLevel effCfg parsed.dataLayout oracle with
         | .error (.immediateUB msg) =>
           IO.eprintln s!"UB: {msg}"
           return 1
@@ -291,14 +301,14 @@ def main (args : List String) : IO UInt32 := do
               | .function _ [.int w, .ptr as] _ =>
                 let ptrSz := (parsed.dataLayout.getPointerSizeInBits as + 7) / 8
                 let ptrAlign := parsed.dataLayout.getPointerABIAlign as
-                match mem.allocate parsed.dataLayout opts.cfg (ptrSz * 2) ptrAlign "argv" as .zeroed .global false with
+                match mem.allocate parsed.dataLayout effCfg (ptrSz * 2) ptrAlign "argv" as .zeroed .global false with
                 | .ok (argvObj, m1) =>
                   (m1, [.bv w (.value (BitVec.ofNat w 1)), .ptr as (.value (MemoryState.derivePointer parsed.dataLayout argvObj))])
                 | .error _ =>
                   (mem, [.bv w (.value (BitVec.ofNat w 1)), .ptr as (.value (Pointer.null parsed.dataLayout as))])
               | _ => (mem, [])
-            let initCfg := initCallConfig opts.cfg parsed.dataLayout mem' fns decls defn entryArgs
-            let finalCfg ← runStepsVerbose opts.cfg.maxSteps opts.verbose o1 initCfg
+            let initCfg := initCallConfig effCfg parsed.dataLayout mem' fns decls defn entryArgs
+            let finalCfg ← runStepsVerbose effCfg.maxSteps opts.verbose o1 initCfg
             match finalCfg.toExcept with
             | .ok val =>
               if opts.entry == "main" && val.containsPoison then

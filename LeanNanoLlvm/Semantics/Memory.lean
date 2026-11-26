@@ -21,7 +21,7 @@ Pointer provenance tracking (aligned with LLVM's provenance model and `llubi::Pr
 inductive Provenance : Type where
   | nullary
   | concrete (allocId : AllocId)
-  | wildcard (generation : Nat) (knownAlloc? : Option AllocId := none)
+  | wildcard (generation : Nat) (knownAlloc? : Option AllocId := none) (wildcardId : Nat := 0)
 deriving Repr, DecidableEq, Inhabited
 
 /-- Runtime pointer value: provenance + address bitvector of width `addrWidth`. -/
@@ -51,8 +51,8 @@ def toString (p : Pointer) : String :=
   let provStr := match p.prov with
     | .nullary => "nullary"
     | .concrete id => s!"alloc#{id}"
-    | .wildcard g none => s!"wildcard@{g}"
-    | .wildcard g (some id) => s!"wildcard@{g}(alloc#{id})"
+    | .wildcard g none _ => s!"wildcard@{g}"
+    | .wildcard g (some id) _ => s!"wildcard@{g}(alloc#{id})"
   s!"ptr 0x{hex} [{provStr}]"
 
 instance : ToString Pointer := ⟨Pointer.toString⟩
@@ -249,6 +249,8 @@ structure MemoryState : Type where
   globalAddrs        : AssocMap AST.GlobalId Pointer := ∅
   funcAddrs          : AssocMap AST.FunctionId Pointer := ∅
   addrToFunc         : AssocMap Nat AST.FunctionId := ∅
+  /-- Shared resolution table for wildcard provenances once dereferenced (matches `llubi::WildcardProvenance`). -/
+  wildcardResolved   : AssocMap Nat AllocId := ∅
 
 instance : Inhabited MemoryState := ⟨{}⟩
 
@@ -266,16 +268,32 @@ def exceedsMaxObjectSize (dl : DataLayout) (size addrSpace : Nat) : Bool :=
 
 /-- Pattern-matching updaters (avoid struct-with projection duplication in Lean's kernel). -/
 def withObjects : MemoryState → AssocMap AllocId MemoryObject → MemoryState
-  | ⟨nextAllocId, nextAddr, usedMem, _, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, objs =>
-    ⟨nextAllocId, nextAddr, usedMem, objs, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+  | ⟨nextAllocId, nextAddr, usedMem, _, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩, objs =>
+    ⟨nextAllocId, nextAddr, usedMem, objs, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
 
 def insertGlobalAddr : MemoryState → AST.GlobalId → Pointer → MemoryState
-  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, name, ptr =>
-    ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs.insert name ptr, funcAddrs, addrToFunc⟩
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩, name, ptr =>
+    ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs.insert name ptr, funcAddrs, addrToFunc, wildcardResolved⟩
 
 def insertFuncAddr : MemoryState → AST.FunctionId → Nat → Pointer → MemoryState
-  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, name, baseAddr, ptr =>
-    ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs.insert name ptr, addrToFunc.insert baseAddr name⟩
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩, name, baseAddr, ptr =>
+    ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs.insert name ptr, addrToFunc.insert baseAddr name, wildcardResolved⟩
+
+/-- Bind a wildcard provenance ID to the resolved `AllocId` on first side-effecting memory access. -/
+def bindWildcard : MemoryState → Provenance → AllocId → MemoryState
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩, prov, aid =>
+    match prov with
+    | .wildcard _ _ wid =>
+      if wid == 0 then
+        ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
+      else
+        match wildcardResolved.get? wid with
+        | some _ =>
+          ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
+        | none =>
+          ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved.insert wid aid⟩
+    | _ =>
+      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
 
 private def moWithBytes : MemoryObject → Array MemByte → MemoryObject
   | ⟨allocId, baseAddr, size, align, addrSpace, name, state, allocKind, isConstant, _⟩, bs =>
@@ -337,7 +355,7 @@ structure AllocSpec (mem : MemoryState) (dl : DataLayout) (cfg : SemanticsConfig
     (initKind : MemInitKind) (allocKind : MemAllocKind) (isConstant : Bool)
     (obj : MemoryObject) (mem' : MemoryState) : Prop where
   size_ok : exceedsMaxObjectSize dl size addrSpace = false
-  mem_budget : cfg.maxMem = 0 ∨ mem.usedMem + max 1 size ≤ cfg.maxMem
+  mem_budget : cfg.maxMem = 0 ∨ mem.usedMem + max 1 size < cfg.maxMem
   id_eq : obj.allocId = mem.nextAllocId
   size_eq : obj.size = size
   align_eq : obj.align = max 1 align
@@ -359,7 +377,7 @@ structure AllocSpec (mem : MemoryState) (dl : DataLayout) (cfg : SemanticsConfig
     ⟨mem.nextAllocId + 1, max mem.nextAddr (obj.baseAddr + max 1 size + 1),
      mem.usedMem + max 1 size, mem.objects.insert obj.allocId obj,
      mem.exposedGeneration, mem.exposedProvenances,
-     mem.globalAddrs, mem.funcAddrs, mem.addrToFunc⟩
+     mem.globalAddrs, mem.funcAddrs, mem.addrToFunc, mem.wildcardResolved⟩
 
 /-- `AllocSpec` preserves `MemoryState.WellFormed`. -/
 theorem AllocSpec.preserves_wf {mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem'}
@@ -388,14 +406,14 @@ theorem AllocSpec.preserves_wf {mem dl cfg size align name addrSpace initKind al
 def allocate : MemoryState → DataLayout → SemanticsConfig →
     Nat → Nat → String → Nat → MemInitKind → MemAllocKind → (isConstant : Bool := false) →
     Except ExecError (MemoryObject × MemoryState)
-  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩,
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩,
     dl, cfg, size, align, name, addrSpace, initKind, allocKind, isConstant =>
   if exceedsMaxObjectSize dl size addrSpace then
     .error (.immediateUB s!"Allocation size {size} exceeds maximum object size")
   else
     let effAlign := max 1 align
     let allocSpace := max 1 size
-    if cfg.maxMem != 0 && usedMem + allocSpace > cfg.maxMem then
+    if cfg.maxMem != 0 && usedMem + allocSpace ≥ cfg.maxMem then
       .error .outOfMemory
     else
       let alignedAddr := DataLayout.alignTo nextAddr effAlign
@@ -425,7 +443,7 @@ def allocate : MemoryState → DataLayout → SemanticsConfig →
         let mem' : MemoryState :=
           ⟨nextAllocId + 1, alignedAddr + allocSpace + 1, usedMem + allocSpace,
            objects.insert obj.allocId obj, exposedGeneration, exposedProvenances,
-           globalAddrs, funcAddrs, addrToFunc⟩
+           globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
         .ok (obj, mem')
 
 /-- Soundness of deterministic bump `allocate` w.r.t. relational `AllocSpec`. -/
@@ -434,7 +452,7 @@ theorem allocate_satisfies_AllocSpec {mem dl cfg size align name addrSpace initK
     (h : allocate mem dl cfg size align name addrSpace initKind allocKind isConstant = .ok (obj, mem')) :
     AllocSpec mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem' := by
   cases mem with
-  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc =>
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc wildcardResolved =>
     simp only [allocate] at h
     split at h
     · simp at h
@@ -451,7 +469,7 @@ theorem allocate_satisfies_AllocSpec {mem dl cfg size align name addrSpace initK
           have hAlignGe : nextAddr ≤ DataLayout.alignTo nextAddr (max 1 align) :=
             alignTo_ge nextAddr (max 1 align)
           have hNextGe : 8 ≤ nextAddr := hwf.nextAddr_ge
-          have hBudget : cfg.maxMem = 0 ∨ usedMem + max 1 size ≤ cfg.maxMem := by
+          have hBudget : cfg.maxMem = 0 ∨ usedMem + max 1 size < cfg.maxMem := by
             simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq, not_and] at hMemOk
             by_cases h0 : cfg.maxMem = 0
             · exact Or.inl h0
@@ -499,11 +517,11 @@ theorem allocate_error_cases {mem : MemoryState} {dl : DataLayout} {cfg : Semant
     {allocKind : MemAllocKind} {isConstant : Bool} {e : ExecError}
     (h : allocate mem dl cfg size align name addrSpace initKind allocKind isConstant = .error e) :
     (e = .outOfMemory ∧
-      ((cfg.maxMem ≠ 0 ∧ mem.usedMem + max 1 size > cfg.maxMem) ∨
+      ((cfg.maxMem ≠ 0 ∧ mem.usedMem + max 1 size ≥ cfg.maxMem) ∨
        DataLayout.alignTo mem.nextAddr (max 1 align) + max 1 size ≥ 1 <<< dl.getAddressSizeInBits addrSpace)) ∨
     (∃ msg, e = .immediateUB msg ∧ exceedsMaxObjectSize dl size addrSpace = true) := by
   cases mem with
-  | mk nextAllocId nextAddr usedMem objects exposedGen exposedProvs globalAddrs funcAddrs addrToFunc =>
+  | mk nextAllocId nextAddr usedMem objects exposedGen exposedProvs globalAddrs funcAddrs addrToFunc wildcardResolved =>
     unfold allocate at h
     dsimp only at h
     by_cases hsz : exceedsMaxObjectSize dl size addrSpace = true
@@ -527,24 +545,24 @@ def derivePointer (dl : DataLayout) (obj : MemoryObject) : Pointer :=
 
 /-- Free an allocated memory object (marks `state := .freed`, clears bytes, removes exposed entries). -/
 def freeObject : MemoryState → AllocId → MemoryState
-  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, allocId =>
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩, allocId =>
     match objects.get? allocId with
     | none =>
-      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
     | some obj =>
       if obj.state == .freed then
-        ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+        ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
       else
         let allocSpace := max 1 obj.size
         let freedObj := moWithStateBytes obj .freed #[]
         ⟨nextAllocId, nextAddr, usedMem - allocSpace, objects.insert allocId freedObj,
          exposedGeneration, exposedProvenances.filter (fun (id, _) => id != allocId),
-         globalAddrs, funcAddrs, addrToFunc⟩
+         globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
 
 theorem freeObject_preserves_wf {mem : MemoryState} (hwf : WellFormed mem) (allocId : AllocId) :
     WellFormed (freeObject mem allocId) := by
   cases mem with
-  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc =>
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc wildcardResolved =>
     simp only [freeObject]
     cases hget : objects.get? allocId with
     | none => exact hwf
@@ -571,7 +589,7 @@ theorem freeObject_preserves_wf {mem : MemoryState} (hwf : WellFormed mem) (allo
 
 /-- Expose provenance on `ptrtoint` (matches `llubi::Context::exposeProvenance`). -/
 def exposeProvenance : MemoryState → Provenance → MemoryState
-  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩, prov =>
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩, prov =>
     match prov with
     | .concrete allocId =>
       match objects.get? allocId with
@@ -579,22 +597,22 @@ def exposeProvenance : MemoryState → Provenance → MemoryState
         if obj.state == .alive then
           let nextGen := exposedGeneration + 1
           ⟨nextAllocId, nextAddr, usedMem, objects, nextGen,
-           exposedProvenances ++ [(allocId, nextGen)], globalAddrs, funcAddrs, addrToFunc⟩
+           exposedProvenances ++ [(allocId, nextGen)], globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
         else
-          ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+          ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
       | none =>
-        ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+        ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
     | _ =>
-      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
 
 theorem exposeProvenance_preserves_wf {mem : MemoryState} (hwf : WellFormed mem) (prov : Provenance) :
     WellFormed (exposeProvenance mem prov) := by
   cases mem with
-  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc =>
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc wildcardResolved =>
     simp only [exposeProvenance]
     cases prov with
     | nullary => exact hwf
-    | wildcard _ _ => exact hwf
+    | wildcard _ _ _ => exact hwf
     | concrete allocId =>
       dsimp only
       cases hget : objects.get? allocId with
@@ -606,36 +624,64 @@ theorem exposeProvenance_preserves_wf {mem : MemoryState} (hwf : WellFormed mem)
           exact ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, hwf.objects_wf⟩
         · simp only [if_neg ha]; exact hwf
 
+theorem bindWildcard_preserves_wf {mem : MemoryState} (hwf : WellFormed mem)
+    (prov : Provenance) (aid : AllocId) :
+    WellFormed (bindWildcard mem prov aid) := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc wildcardResolved =>
+    simp only [bindWildcard]
+    cases prov with
+    | nullary => exact hwf
+    | concrete _ => exact hwf
+    | wildcard _ _ wid =>
+      dsimp only
+      split
+      · exact hwf
+      · cases wildcardResolved.get? wid with
+        | some _ => exact hwf
+        | none => exact ⟨hwf.nextAllocId_pos, hwf.nextAddr_ge, hwf.objects_wf⟩
+
 /-- Create a wildcard provenance snapshot on `inttoptr` (matches `llubi::Context::getWildcardProvenance`). -/
-def getWildcardProvenance (mem : MemoryState) : Provenance :=
+def getWildcardProvenance (mem : MemoryState) (wildcardId : Nat := 0) : Provenance :=
   if mem.exposedGeneration == 0 then .nullary
-  else .wildcard mem.exposedGeneration none
+  else .wildcard mem.exposedGeneration none wildcardId
 
 /--
 Resolve the underlying `MemoryObject` for a pointer `ptr` (for concrete or wildcard provenance).
 Matches `llubi::Context::checkProvenance`:
 - `nullary` → `none`
 - `concrete id` → `objects.get? id`
-- `wildcard gen known?` → find an exposed allocation `(id, expGen)` with `expGen ≤ gen` whose
-  address range contains `ptr.addr` (and matches `known?` if already fixed).
+- `wildcard gen known? wid` → if `wid` was already resolved to `fixedId` by a previous memory
+  access, require `fixedId` (and agreement with `known?`); otherwise find an exposed allocation
+  `(id, expGen)` with `expGen ≤ gen` whose address range contains `ptr.addr`.
 -/
 def resolveObject? (mem : MemoryState) (ptr : Pointer) : Option MemoryObject :=
   match ptr.prov with
   | .nullary => none
   | .concrete id => mem.objects.get? id
-  | .wildcard gen known? =>
+  | .wildcard gen known? wid =>
     let addr := ptr.addr.toNat
-    let rec findExposed : List (AllocId × Nat) → Option MemoryObject
-      | [] => none
-      | (id, expGen) :: rest =>
-        if expGen ≤ gen && (known?.map (· == id)).getD true then
-          match mem.objects.get? id with
-          | some mo =>
-            if mo.state != .freed && mo.inBounds addr then some mo
-            else findExposed rest
-          | none => findExposed rest
-        else findExposed rest
-    findExposed mem.exposedProvenances
+    let fixed? := if wid == 0 then none else mem.wildcardResolved.get? wid
+    match fixed? with
+    | some fixedId =>
+      if (known?.map (· == fixedId)).getD true then
+        match mem.objects.get? fixedId with
+        | some mo =>
+          if mo.state != .freed && mo.inBounds addr then some mo else none
+        | none => none
+      else none
+    | none =>
+      let rec findExposed : List (AllocId × Nat) → Option MemoryObject
+        | [] => none
+        | (id, expGen) :: rest =>
+          if expGen ≤ gen && (known?.map (· == id)).getD true then
+            match mem.objects.get? id with
+            | some mo =>
+              if mo.state != .freed && mo.inBounds addr then some mo
+              else findExposed rest
+            | none => findExposed rest
+          else findExposed rest
+      findExposed mem.exposedProvenances
 
 /--
 Verify whether a memory access of `accessSize` bytes with required `alignment` via `ptr` is valid.
@@ -677,11 +723,11 @@ def readObjectBytes (mo : MemoryObject) (offset len : Nat) : Array MemByte :=
 
 /-- Write `newBytes` into object `allocId` starting at `offset`. -/
 def writeObjectBytes : MemoryState → AllocId → Nat → Array MemByte → MemoryState
-  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩,
+  | ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩,
     allocId, offset, newBytes =>
     match objects.get? allocId with
     | none =>
-      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+      ⟨nextAllocId, nextAddr, usedMem, objects, exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
     | some mo =>
       let rec go (i : Nat) : Nat → Array MemByte → Array MemByte
         | 0, arr => arr
@@ -691,13 +737,13 @@ def writeObjectBytes : MemoryState → AllocId → Nat → Array MemByte → Mem
           go (i + 1) rem arr'
       let updated := go 0 newBytes.size mo.bytes
       ⟨nextAllocId, nextAddr, usedMem, objects.insert allocId (moWithBytes mo updated),
-       exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc⟩
+       exposedGeneration, exposedProvenances, globalAddrs, funcAddrs, addrToFunc, wildcardResolved⟩
 
 theorem writeObjectBytes_preserves_wf {mem : MemoryState} (hwf : WellFormed mem)
     (allocId offset : Nat) (newBytes : Array MemByte) :
     WellFormed (writeObjectBytes mem allocId offset newBytes) := by
   cases mem with
-  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc =>
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc wildcardResolved =>
     simp only [writeObjectBytes]
     cases hget : objects.get? allocId with
     | none => exact hwf
@@ -763,9 +809,25 @@ private theorem resolveObject?_in_objects {mem : MemoryState} {ptr : Pointer} {m
   cases hp : ptr.prov with
   | nullary => simp [hp] at h
   | concrete id => rw [hp] at h; exact ⟨id, h⟩
-  | wildcard gen known? =>
+  | wildcard gen known? wid =>
     rw [hp] at h
-    exact findExposed_in_objects mem.exposedProvenances h
+    dsimp only at h
+    cases hf : (if wid == 0 then none else mem.wildcardResolved.get? wid) with
+    | some fixedId =>
+      rw [hf] at h
+      dsimp only at h
+      split at h
+      · cases hget : mem.objects.get? fixedId with
+        | none => rw [hget] at h; cases h
+        | some m =>
+          rw [hget] at h; dsimp only at h
+          split at h
+          · cases h; exact ⟨fixedId, hget⟩
+          · cases h
+      · cases h
+    | none =>
+      rw [hf] at h
+      exact findExposed_in_objects mem.exposedProvenances h
 
 theorem lifetimeStart_preserves_wf {mem : MemoryState} (hwf : WellFormed mem)
     (cfg : SemanticsConfig) (ptr : Pointer) :
@@ -918,48 +980,80 @@ theorem resolveObject?_writeObjectBytes_same {mem : MemoryState}
     simp only [resolveObject?, hp] at hres ⊢
     have hid := (hwf.objects_wf aid mo hres).1
     rw [hgetWrite aid, hid, beq_self_eq_true]; rfl
-  | wildcard gen known? =>
+  | wildcard gen known? wid =>
     simp only [resolveObject?, hp] at hres ⊢
     have hexp : (mem.writeObjectBytes mo.allocId offset bs).exposedProvenances = mem.exposedProvenances := by
       cases mem; dsimp only [writeObjectBytes] at hgetSame ⊢; rw [hgetSame]
-    rw [hexp]
-    have hgo : ∀ l, resolveObject?.findExposed mem gen known? ptr.addr.toNat l = some mo →
-        resolveObject?.findExposed (mem.writeObjectBytes mo.allocId offset bs) gen known? ptr.addr.toNat l = some mo' := by
-      intro l
-      induction l with
-      | nil => intro h; simp [resolveObject?.findExposed] at h
-      | cons hd rest ih =>
-        obtain ⟨id, expGen⟩ := hd
-        intro h
-        unfold resolveObject?.findExposed at h ⊢
-        by_cases hcond : (decide (expGen ≤ gen) && (known?.map (fun x => x == id)).getD true) = true
-        · rw [if_pos hcond] at h ⊢
-          rw [hgetWrite id]
-          by_cases hid : (mo.allocId == id) = true
-          · rw [if_pos hid]
-            have hidEq : mo.allocId = id := eq_of_beq hid
-            rw [← hidEq, hgetSame] at h
-            dsimp only at h ⊢
-            by_cases hok : (mo.state != MemoryObjectState.freed && mo.inBounds ptr.addr.toNat) = true
-            · have hok' : (mo'.state != MemoryObjectState.freed && mo'.inBounds ptr.addr.toNat) = true := hok
-              rw [if_pos hok']
-            · have hok' : ¬ (mo'.state != MemoryObjectState.freed && mo'.inBounds ptr.addr.toNat) = true := hok
-              rw [if_neg hok] at h
-              rw [if_neg hok']
-              exact ih h
-          · rw [if_neg hid]
-            cases hobj : mem.objects.get? id with
-            | none => rw [hobj] at h; exact ih h
-            | some m =>
-              rw [hobj] at h; dsimp only at h ⊢
-              by_cases hok : (m.state != MemoryObjectState.freed && m.inBounds ptr.addr.toNat) = true
-              · rw [if_pos hok] at h ⊢
-                cases h
-                have hcontra := (hwf.objects_wf id mo hobj).1
-                exact False.elim (hid (by simp [hcontra]))
-              · rw [if_neg hok] at h ⊢; exact ih h
-        · rw [if_neg hcond] at h ⊢; exact ih h
-    exact hgo mem.exposedProvenances hres
+    have hwr : (mem.writeObjectBytes mo.allocId offset bs).wildcardResolved = mem.wildcardResolved := by
+      cases mem; dsimp only [writeObjectBytes] at hgetSame ⊢; rw [hgetSame]
+    rw [hexp, hwr]
+    cases hf : (if wid == 0 then none else mem.wildcardResolved.get? wid) with
+    | some fixedId =>
+      rw [hf] at hres
+      dsimp only at hres ⊢
+      by_cases hkn : (known?.map (fun x => x == fixedId)).getD true = true
+      · rw [if_pos hkn] at hres ⊢
+        rw [hgetWrite fixedId]
+        by_cases hid : (mo.allocId == fixedId) = true
+        · rw [if_pos hid]
+          have hidEq : mo.allocId = fixedId := eq_of_beq hid
+          rw [← hidEq, hgetSame] at hres
+          dsimp only at hres ⊢
+          by_cases hok : (mo.state != MemoryObjectState.freed && mo.inBounds ptr.addr.toNat) = true
+          · have hok' : (mo'.state != MemoryObjectState.freed && mo'.inBounds ptr.addr.toNat) = true := hok
+            rw [if_pos hok']
+          · rw [if_neg hok] at hres; cases hres
+        · rw [if_neg hid]
+          cases hobj : mem.objects.get? fixedId with
+          | none => rw [hobj] at hres; cases hres
+          | some m =>
+            rw [hobj] at hres; dsimp only at hres ⊢
+            by_cases hok : (m.state != MemoryObjectState.freed && m.inBounds ptr.addr.toNat) = true
+            · rw [if_pos hok] at hres; cases hres
+              have hcontra := (hwf.objects_wf fixedId mo hobj).1
+              exact False.elim (hid (by simp [hcontra]))
+            · rw [if_neg hok] at hres; cases hres
+      · rw [if_neg hkn] at hres; cases hres
+    | none =>
+      rw [hf] at hres
+      dsimp only at hres ⊢
+      have hgo : ∀ l, resolveObject?.findExposed mem gen known? ptr.addr.toNat l = some mo →
+          resolveObject?.findExposed (mem.writeObjectBytes mo.allocId offset bs) gen known? ptr.addr.toNat l = some mo' := by
+        intro l
+        induction l with
+        | nil => intro h; simp [resolveObject?.findExposed] at h
+        | cons hd rest ih =>
+          obtain ⟨id, expGen⟩ := hd
+          intro h
+          unfold resolveObject?.findExposed at h ⊢
+          by_cases hcond : (decide (expGen ≤ gen) && (known?.map (fun x => x == id)).getD true) = true
+          · rw [if_pos hcond] at h ⊢
+            rw [hgetWrite id]
+            by_cases hid : (mo.allocId == id) = true
+            · rw [if_pos hid]
+              have hidEq : mo.allocId = id := eq_of_beq hid
+              rw [← hidEq, hgetSame] at h
+              dsimp only at h ⊢
+              by_cases hok : (mo.state != MemoryObjectState.freed && mo.inBounds ptr.addr.toNat) = true
+              · have hok' : (mo'.state != MemoryObjectState.freed && mo'.inBounds ptr.addr.toNat) = true := hok
+                rw [if_pos hok']
+              · have hok' : ¬ (mo'.state != MemoryObjectState.freed && mo'.inBounds ptr.addr.toNat) = true := hok
+                rw [if_neg hok] at h
+                rw [if_neg hok']
+                exact ih h
+            · rw [if_neg hid]
+              cases hobj : mem.objects.get? id with
+              | none => rw [hobj] at h; exact ih h
+              | some m =>
+                rw [hobj] at h; dsimp only at h ⊢
+                by_cases hok : (m.state != MemoryObjectState.freed && m.inBounds ptr.addr.toNat) = true
+                · rw [if_pos hok] at h ⊢
+                  cases h
+                  have hcontra := (hwf.objects_wf id mo hobj).1
+                  exact False.elim (hid (by simp [hcontra]))
+                · rw [if_neg hok] at h ⊢; exact ih h
+          · rw [if_neg hcond] at h ⊢; exact ih h
+      exact hgo mem.exposedProvenances hres
 
 theorem verifyMemAccess_writeObjectBytes_same {mem : MemoryState}
     (hwf : WellFormed mem) {ptr : Pointer} {accessSize alignment : Nat}
@@ -992,6 +1086,130 @@ theorem verifyMemAccess_writeObjectBytes_same {mem : MemoryState}
               cases hver
               have hres1 := resolveObject?_writeObjectBytes_same hwf hres wOff bs
               rw [hres1]; dsimp only
+              rw [if_neg h1, if_neg h2, if_neg h3, if_neg h4, if_neg h5]
+
+@[simp]
+theorem bindWildcard_concrete (mem : MemoryState) (a b : AllocId) :
+    mem.bindWildcard (.concrete a) b = mem := by
+  cases mem; rfl
+
+theorem bindWildcard_idemp (mem : MemoryState) (p : Provenance) (a : AllocId) :
+    (mem.bindWildcard p a).bindWildcard p a = mem.bindWildcard p a := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc wildcardResolved =>
+    cases p with
+    | nullary | concrete _ => rfl
+    | wildcard _ _ wid =>
+      dsimp only [bindWildcard]
+      by_cases h0 : (wid == 0) = true
+      · simp [h0]
+      · simp only [h0, Bool.false_eq_true, ↓reduceIte]
+        cases hget : wildcardResolved.get? wid with
+        | some _ => simp [hget]
+        | none => simp [AssocMap.get?_insert]
+
+theorem bindWildcard_writeObjectBytes_comm (mem : MemoryState) (aid off : Nat) (bs : Array MemByte)
+    (p : Provenance) (a : AllocId) :
+    (mem.writeObjectBytes aid off bs).bindWildcard p a =
+    (mem.bindWildcard p a).writeObjectBytes aid off bs := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc wildcardResolved =>
+    cases p with
+    | nullary | concrete _ => rfl
+    | wildcard _ _ wid =>
+      dsimp only [writeObjectBytes]
+      cases hobj : objects.get? aid with
+      | none =>
+        dsimp only [bindWildcard]
+        by_cases h0 : (wid == 0) = true
+        · simp [h0, hobj]
+        · simp only [h0, Bool.false_eq_true, ↓reduceIte]
+          cases wildcardResolved.get? wid <;> simp [hobj]
+      | some mo =>
+        dsimp only [bindWildcard]
+        by_cases h0 : (wid == 0) = true
+        · simp [h0, hobj]
+        · simp only [h0, Bool.false_eq_true, ↓reduceIte]
+          cases wildcardResolved.get? wid <;> simp [hobj]
+
+private theorem findExposed_props {mem : MemoryState} {gen : Nat} {known? : Option AllocId}
+    {addr : Nat} {mo : MemoryObject} (hwf : WellFormed mem) :
+    ∀ l, resolveObject?.findExposed mem gen known? addr l = some mo →
+      (known?.map (· == mo.allocId)).getD true = true ∧
+      mem.objects.get? mo.allocId = some mo ∧
+      (mo.state != MemoryObjectState.freed && mo.inBounds addr) = true
+  | [], h => by simp [resolveObject?.findExposed] at h
+  | (id, expGen) :: rest, h => by
+    unfold resolveObject?.findExposed at h
+    split at h
+    · rename_i hcond
+      cases hobj : mem.objects.get? id with
+      | none => rw [hobj] at h; exact findExposed_props hwf rest h
+      | some m =>
+        rw [hobj] at h; dsimp only at h
+        split at h
+        · rename_i hok
+          cases h
+          have hid := (hwf.objects_wf id mo hobj).1
+          rw [hid]
+          simp only [Bool.and_eq_true] at hcond
+          exact ⟨hcond.2, hobj, hok⟩
+        · exact findExposed_props hwf rest h
+    · exact findExposed_props hwf rest h
+
+theorem resolveObject?_bindWildcard_same {mem : MemoryState} (hwf : WellFormed mem)
+    {ptr : Pointer} {mo : MemoryObject}
+    (hres : mem.resolveObject? ptr = some mo) :
+    (mem.bindWildcard ptr.prov mo.allocId).resolveObject? ptr = some mo := by
+  cases mem with
+  | mk nextAllocId nextAddr usedMem objects exposedGeneration exposedProvenances globalAddrs funcAddrs addrToFunc wildcardResolved =>
+    unfold resolveObject? at hres ⊢
+    cases hp : ptr.prov with
+    | nullary => simp [hp] at hres
+    | concrete id => simp [hp, bindWildcard] at hres ⊢; exact hres
+    | wildcard gen known? wid =>
+      simp only [hp, bindWildcard] at hres ⊢
+      by_cases h0 : (wid == 0) = true
+      · simp only [h0, ↓reduceIte] at hres ⊢; exact hres
+      · simp only [h0, Bool.false_eq_true, ↓reduceIte] at hres ⊢
+        cases hget : wildcardResolved.get? wid with
+        | some fixedId =>
+          rw [hget] at hres; dsimp only at hres ⊢
+          rw [hget]; exact hres
+        | none =>
+          rw [hget] at hres; dsimp only at hres
+          rw [AssocMap.get?_insert, beq_self_eq_true]
+          simp only [↓reduceIte]
+          obtain ⟨hkn, hobj, hok⟩ := findExposed_props hwf exposedProvenances hres
+          dsimp only at hobj
+          rw [if_pos hkn, hobj]; dsimp only; rw [if_pos hok]
+
+theorem verifyMemAccess_bindWildcard_same {mem : MemoryState} (hwf : WellFormed mem)
+    {ptr : Pointer} {accessSize alignment : Nat} {isStore : Bool} {mo : MemoryObject} {offset : Nat}
+    (hver : mem.verifyMemAccess ptr accessSize alignment isStore = .ok (mo, offset)) :
+    (mem.bindWildcard ptr.prov mo.allocId).verifyMemAccess ptr accessSize alignment isStore = .ok (mo, offset) := by
+  unfold verifyMemAccess at hver ⊢
+  cases hres : mem.resolveObject? ptr with
+  | none => rw [hres] at hver; cases hver
+  | some mo0 =>
+    rw [hres] at hver; dsimp only at hver
+    by_cases h1 : (if isStore = true then mo0.state != MemoryObjectState.alive else mo0.state == MemoryObjectState.freed) = true
+    · rw [if_pos h1] at hver; cases hver
+    · rw [if_neg h1] at hver
+      by_cases h2 : (isStore && mo0.isConstant) = true
+      · rw [if_pos h2] at hver; cases hver
+      · rw [if_neg h2] at hver
+        by_cases h3 : (ptr.addr.toNat % max 1 alignment != 0) = true
+        · rw [if_pos h3] at hver; cases hver
+        · rw [if_neg h3] at hver
+          by_cases h4 : (decide (accessSize > mo0.size) || decide (ptr.addr.toNat < mo0.baseAddr)) = true
+          · rw [if_pos h4] at hver; cases hver
+          · rw [if_neg h4] at hver
+            by_cases h5 : ptr.addr.toNat - mo0.baseAddr > mo0.size - accessSize
+            · rw [if_pos h5] at hver; cases hver
+            · rw [if_neg h5] at hver
+              cases hver
+              rw [resolveObject?_bindWildcard_same hwf hres]; dsimp only
               rw [if_neg h1, if_neg h2, if_neg h3, if_neg h4, if_neg h5]
 
 theorem writeObjectBytes_overwrite_singleton (mem : MemoryState) (aid offset : Nat)
@@ -1092,7 +1310,7 @@ end MemoryInjection
 def Provenance.IsRefinedBy (inj : MemoryInjection) : Provenance → Provenance → Prop
   | .nullary, .nullary => True
   | .concrete aS, .concrete aT => inj.map aS = some aT
-  | .wildcard _ ks, .wildcard _ kt =>
+  | .wildcard _ ks _, .wildcard _ kt _ =>
     match ks, kt with
     | some aS, some aT => inj.map aS = some aT
     | none, some _ => True
@@ -1104,7 +1322,7 @@ theorem Provenance.IsRefinedBy.refl (p : Provenance) : Provenance.IsRefinedBy .i
   cases p with
   | nullary => trivial
   | concrete _ => rfl
-  | wildcard _ k => cases k <;> trivial
+  | wildcard _ k _ => cases k <;> trivial
 
 theorem Provenance.IsRefinedBy.mono {f g : MemoryInjection} {p1 p2 : Provenance}
     (hext : f.Extends g) (h : Provenance.IsRefinedBy f p1 p2) :
@@ -1113,7 +1331,7 @@ theorem Provenance.IsRefinedBy.mono {f g : MemoryInjection} {p1 p2 : Provenance}
   all_goals simp only [Provenance.IsRefinedBy] at h ⊢
   all_goals try exact h
   · exact hext _ _ h
-  · rename_i k1 _ k2
+  · rename_i k1 _ _ k2 _
     cases k1 <;> cases k2
     all_goals dsimp only at h ⊢
     all_goals try exact h
@@ -1128,7 +1346,7 @@ theorem Provenance.IsRefinedBy.trans {f g : MemoryInjection} {p1 p2 p3 : Provena
   all_goals try exact False.elim h12
   all_goals try exact False.elim h23
   · simp [MemoryInjection.comp, h12, h23]
-  · rename_i k1 _ k2 _ k3
+  · rename_i k1 _ _ k2 _ _ k3 _
     cases k1 <;> cases k2 <;> cases k3 <;> simp_all [MemoryInjection.comp]
 
 /-- Pointer refinement under a `MemoryInjection` (matching address bitvector and refined provenance). -/

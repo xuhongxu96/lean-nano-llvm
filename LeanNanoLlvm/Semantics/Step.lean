@@ -61,6 +61,10 @@ def evalPureLeafExp? (dl : DataLayout) (cfg : SemanticsConfig)
           else
             IEEEFloat.ofNatBits bits
         .ok (.float .float (.value flt))
+      | .float .ppc_fp128 =>
+        let hi := bits >>> 64
+        let lo := bits &&& ((1 <<< 64) - 1)
+        .ok (.float .ppc_fp128 (.value (IEEEFloat.ofNatBits ((lo <<< 64) ||| hi))))
       | .float ft => .ok (.float ft (.value (IEEEFloat.ofNatBits bits)))
       | _ => .error (.staticError s!"invalid type for float bit literal: found {ty.print}")
   | .floatDec neg m e =>
@@ -598,6 +602,50 @@ theorem EvalAssumeBundles.preserves_wf {dl cfg regs mem bundles mem'}
   | cons_skip _ hrest => exact EvalAssumeBundles.preserves_wf hwf hrest
   | cons_ok _ he _ hrest => exact EvalAssumeBundles.preserves_wf (EvalExpList.preserves_wf hwf he) hrest
 
+/-- Complete a caller's return continuation: if awaiting a `llvm.speculative.load` oracle callback,
+    perform the speculative load with the returned byte bound; otherwise apply callsite FMF & attrs. -/
+def finishCallerReturn (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (rd : ReturnDest) (retVal : RegisterValue) : Except ExecError RegisterValue :=
+  match rd.specLoad? with
+  | some (ptrVal, revVal) =>
+    match evalVecMemRead? dl cfg mem "llvm.speculative.load" rd.retTy [ptrVal, revVal, retVal] default [] with
+    | some (.ok (v, _)) => applyRetFMFAndAttrsPure dl mem rd.retTy rd.fmf rd.retAttrs v
+    | some (.error e) => .error e
+    | none => .error (.staticError "Internal error: llvm.speculative.load oracle completion")
+  | none => applyRetFMFAndAttrsPure dl mem rd.retTy rd.fmf rd.retAttrs retVal
+
+/-- Return `.poisoned` (dead initial state) if `defn` contains an `llvm.lifetime.start` referencing `iid`. -/
+def allocaInitKind (defn : Definition) (iid : InstructionId) : MemInitKind :=
+  match iid with
+  | .void _ => .uninitialized
+  | .id rid =>
+    let hasStart := defn.blocks.any fun blk =>
+      blk.code.any fun (_, instr) =>
+        match instr with
+        | .call _ _ (.identifier (.global_id fid)) args _ _ _ =>
+          strHasPrefix fid.ToString "llvm.lifetime.start" &&
+          args.any fun
+            | (_, .identifier (.local_id r), _) => r == rid
+            | _ => false
+        | _ => false
+    if hasStart then .poisoned else .uninitialized
+
+/-- Detect an oracle-callback `llvm.speculative.load(ptr, i1, ptr @oracle, ...)` call. -/
+def specLoadOracleCall? (st : MachineState) (m : MemoryState) (fname : String)
+    (argVals : List RegisterValue) :
+    Option (Definition × RegisterValue × RegisterValue × List RegisterValue) :=
+  if strHasPrefix fname "llvm.speculative.load" then
+    match argVals with
+    | ptrVal :: revVal :: (.ptr _ (.value fnPtr)) :: oracleArgs =>
+      match m.addrToFunc.get? fnPtr.addr.toNat with
+      | some oracleFid =>
+        match st.functions.get? oracleFid with
+        | some oracleDef => some (oracleDef, ptrVal, revVal, oracleArgs)
+        | none => none
+      | none => none
+    | _ => none
+  else none
+
 /-- Relational return-value completion (frees frame allocas, applies callee & caller return attrs, pops frame). -/
 inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (retTy : LlvmRetType) (retVal : RegisterValue) (m1 : MemoryState) : Config → Prop where
@@ -612,8 +660,7 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
         retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
       caller.returnDest? = some rd →
       (frame.defn.prototype.isNoReturn || rd.isNoReturn) = false →
-      applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-        rd.retTy rd.fmf rd.retAttrs retVal1 = .ok retVal2 →
+      finishCallerReturn st.dataLayout st.config (freeAllocaList m1 frame.frameAllocas) rd retVal1 = .ok retVal2 →
       StepRet st frame callers retTy retVal m1
         (.running (st.withFramesAndMemory
           (((caller.withRegisters (match rd.retTy, rd.destId with
@@ -637,8 +684,7 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
         retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
       caller.returnDest? = some rd →
       (frame.defn.prototype.isNoReturn || rd.isNoReturn) = false →
-      applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-        rd.retTy rd.fmf rd.retAttrs retVal1 = .error err →
+      finishCallerReturn st.dataLayout st.config (freeAllocaList m1 frame.frameAllocas) rd retVal1 = .error err →
       StepRet st frame callers retTy retVal m1 (Config.ofError err)
   | missing_dest {caller restCallers retVal1 msg} :
       callers = caller :: restCallers →
@@ -648,6 +694,12 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
       StepRet st frame callers retTy retVal m1 (.staticError msg)
 
 /-! ### Instruction-Indexed and Terminator-Indexed Small-Step Relations -/
+
+/-- Effective `SemanticsConfig` for FP ops inside `frame`, applying per-function `denormal_fpenv`. -/
+def frameDenormalCfg (st : MachineState) (frame : CallFrame) : SemanticsConfig :=
+  match frame.defn.prototype.denormalMode with
+  | some dm => { st.config with denormalMode := dm }
+  | none => st.config
 
 /--
 Relational small-step execution of a single instruction `instr` (indexed by `Instruction`
@@ -693,7 +745,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
   | floatBinaryOp_ok {op ty e1 e2 v1 m1 v2 m2 res} :
       EvalExp st.dataLayout st.config frame.registers st.memory ty e1 (.ok (v1, m1)) →
       EvalExp st.dataLayout st.config frame.registers m1 ty e2 (.ok (v2, m2)) →
-      (∃ o o', evalFloatBinaryExec st.config op ty v1 v2 o = .ok (res, o')) →
+      (∃ o o', evalFloatBinaryExec (frameDenormalCfg st frame) op ty v1 v2 o = .ok (res, o')) →
       StepInstr st frame callers iid rest (.floatBinaryOp op ty e1 e2) none
         (finishRegInstr st frame callers rest iid res m2)
   | floatBinaryOp_e1_err {op ty e1 e2 err} :
@@ -706,7 +758,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
   | floatBinaryOp_eval_err {op ty e1 e2 v1 m1 v2 m2 err} :
       EvalExp st.dataLayout st.config frame.registers st.memory ty e1 (.ok (v1, m1)) →
       EvalExp st.dataLayout st.config frame.registers m1 ty e2 (.ok (v2, m2)) →
-      (∃ o, evalFloatBinaryExec st.config op ty v1 v2 o = .error err) →
+      (∃ o, evalFloatBinaryExec (frameDenormalCfg st frame) op ty v1 v2 o = .error err) →
       StepInstr st frame callers iid rest (.floatBinaryOp op ty e1 e2) none (Config.ofError err)
 
   /- ICmp -/
@@ -733,7 +785,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
   | fcmp_ok {fmf pred ty e1 e2 v1 m1 v2 m2 res} :
       EvalExp st.dataLayout st.config frame.registers st.memory ty e1 (.ok (v1, m1)) →
       EvalExp st.dataLayout st.config frame.registers m1 ty e2 (.ok (v2, m2)) →
-      (∃ o o', evalFCmpExec st.config fmf pred v1 v2 o = .ok (res, o')) →
+      (∃ o o', evalFCmpExec (frameDenormalCfg st frame) fmf pred v1 v2 o = .ok (res, o')) →
       StepInstr st frame callers iid rest (.fcmp fmf pred ty e1 e2) none
         (finishRegInstr st frame callers rest iid res m2)
   | fcmp_e1_err {fmf pred ty e1 e2 err} :
@@ -746,7 +798,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
   | fcmp_eval_err {fmf pred ty e1 e2 v1 m1 v2 m2 err} :
       EvalExp st.dataLayout st.config frame.registers st.memory ty e1 (.ok (v1, m1)) →
       EvalExp st.dataLayout st.config frame.registers m1 ty e2 (.ok (v2, m2)) →
-      (∃ o, evalFCmpExec st.config fmf pred v1 v2 o = .error err) →
+      (∃ o, evalFCmpExec (frameDenormalCfg st frame) fmf pred v1 v2 o = .error err) →
       StepInstr st frame callers iid rest (.fcmp fmf pred ty e1 e2) none (Config.ofError err)
 
   /- ConversionOp -/
@@ -813,7 +865,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
         (st.dataLayout.typeAllocSize allocTy * count)
         (align?.getD (st.dataLayout.typePrefAlign allocTy))
         (match iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}")
-        addrSpace .uninitialized .stack false obj mem' →
+        addrSpace (allocaInitKind frame.defn iid) .stack false obj mem' →
       StepInstr st frame callers iid rest (.alloca allocTy numEl? align? addrSpace) none
         (finishRegInstr st frame callers rest iid
           (.ptr addrSpace (.value (MemoryState.derivePointer st.dataLayout obj)))
@@ -832,7 +884,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
         | some (nTy, nExp) => ∃ (w : Nat) (bv : BitVec w),
             EvalExp st.dataLayout st.config frame.registers st.memory nTy nExp (.ok (.bv w (.value bv), m1)) ∧
             count = bv.toNat) →
-      ((st.config.maxMem ≠ 0 ∧ m1.usedMem + max 1 (st.dataLayout.typeAllocSize allocTy * count) > st.config.maxMem) ∨
+      ((st.config.maxMem ≠ 0 ∧ m1.usedMem + max 1 (st.dataLayout.typeAllocSize allocTy * count) ≥ st.config.maxMem) ∨
        DataLayout.alignTo m1.nextAddr (max 1 (align?.getD (st.dataLayout.typePrefAlign allocTy))) +
          max 1 (st.dataLayout.typeAllocSize allocTy * count) ≥ 1 <<< st.dataLayout.getAddressSizeInBits addrSpace) →
       StepInstr st frame callers iid rest (.alloca allocTy numEl? align? addrSpace) none (.resourceError .outOfMemory)
@@ -858,7 +910,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md)
         (if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat
           (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty))) else none)
-        (finishRegInstr st frame callers rest iid val m1)
+        (finishRegInstr st frame callers rest iid val (m1.bindWildcard p.prov mo.allocId))
   | load_md_err {ty ptrTy ptrExp align? isVol noundef md as p m1 mo offset rawVal hasUndef err} :
       EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.ok (.ptr as (.value p), m1)) →
       m1.verifyMemAccess p (st.dataLayout.typeStoreSize ty) (align?.getD (st.dataLayout.typeABIAlign ty)) false = .ok (mo, offset) →
@@ -904,7 +956,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
         (if isVol then some (.volatileStore mo.addrSpace p.addr.toNat
           (valueToBytes st.dataLayout st.config val valTy)) else none)
         (finishVoidInstr st frame callers rest
-          (m2.writeObjectBytes mo.allocId offset (valueToBytes st.dataLayout st.config val valTy)))
+          ((m2.bindWildcard p.prov mo.allocId).writeObjectBytes mo.allocId offset (valueToBytes st.dataLayout st.config val valTy)))
   | store_val_err {valTy valExp ptrTy ptrExp align? isVol err} :
       EvalExp st.dataLayout st.config frame.registers st.memory valTy valExp (.error err) →
       StepInstr st frame callers iid rest (.store valTy valExp ptrTy ptrExp align? isVol) none (Config.ofError err)
@@ -1191,6 +1243,36 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       st.config.maxStackDepth ≠ 0 →
       st.frames.length ≥ st.config.maxStackDepth →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (.resourceError .stackOverflow)
+  | call_spec_oracle_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs calleeFrame m3} :
+      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
+      (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
+      specLoadOracleCall? st m2 fid.ToString argVals = some (oracleDef, ptrVal, revVal, oracleArgs) →
+      (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs = .ok (calleeFrame, m3) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
+        (.running (st.withFramesAndMemory
+          (calleeFrame ::
+            (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
+              (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet, specLoad? := some (ptrVal, revVal) }) ::
+            callers)
+          m3))
+  | call_spec_oracle_entry_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs err} :
+      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
+      (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
+      specLoadOracleCall? st m2 fid.ToString argVals = some (oracleDef, ptrVal, revVal, oracleArgs) →
+      (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs = .error err →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
+  | call_spec_oracle_overflow {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs} :
+      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
+      (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
+      specLoadOracleCall? st m2 fid.ToString argVals = some (oracleDef, ptrVal, revVal, oracleArgs) →
+      st.config.maxStackDepth ≠ 0 →
+      st.frames.length ≥ st.config.maxStackDepth →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (.resourceError .stackOverflow)
   | call_external_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 msg} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
@@ -1397,9 +1479,9 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
       | none => rw [hcnt.2]; exact hwf
       | some p => obtain ⟨_, _, he, _⟩ := hcnt; exact EvalExp.preserves_wf hwf he
     exact finishRegInstr_wf (hspec.preserves_wf hm1)
-  | load_ok h1 _ _ _ _ => exact finishRegInstr_wf (EvalExp.preserves_wf hwf h1)
+  | load_ok h1 _ _ _ _ => exact finishRegInstr_wf (MemoryState.bindWildcard_preserves_wf (EvalExp.preserves_wf hwf h1) _ _)
   | store_ok h1 h2 _ =>
-    exact MemoryState.writeObjectBytes_preserves_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2) _ _ _
+    exact MemoryState.writeObjectBytes_preserves_wf (MemoryState.bindWildcard_preserves_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2) _ _) _ _ _
   | gep_ok h1 h2 _ => exact finishRegInstr_wf (EvalExpList.preserves_wf (EvalExp.preserves_wf hwf h1) h2)
   | extractvalue_ok h1 _ => exact finishRegInstr_wf (EvalExp.preserves_wf hwf h1)
   | insertvalue_ok h1 h2 _ => exact finishRegInstr_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2)
@@ -1418,6 +1500,8 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
     obtain ⟨o, o', hev⟩ := hint
     exact finishCallResult_wf (EvalAssumeBundles.preserves_wf (evalNonAllocIntrinsicExec?_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hev) hb)
   | call_user_ok ha hc _ _ _ _ hmk =>
+    exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hmk
+  | call_spec_oracle_ok ha hc _ _ _ hmk =>
     exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hmk
   | _ => first | exact configOfError_wf _ | trivial
 
@@ -1818,7 +1902,7 @@ theorem Step.store_leaf_iff {st frame callers iid valTy valExp ptrTy ptrExp alig
         ev = (if isVol then some (.volatileStore mo.addrSpace p.addr.toNat
                 (valueToBytes st.dataLayout st.config val valTy)) else none) ∧
         c' = finishVoidInstr st frame callers rest
-               (st.memory.writeObjectBytes mo.allocId offset (valueToBytes st.dataLayout st.config val valTy))
+               ((st.memory.bindWildcard p.prov mo.allocId).writeObjectBytes mo.allocId offset (valueToBytes st.dataLayout st.config val valTy))
       | .error err =>
         ev = none ∧ c' = Config.ofError err := by
   rw [Step.instr_iff hf hc]

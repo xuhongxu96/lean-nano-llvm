@@ -1184,11 +1184,16 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
             | .float ft1 (.value a), .float ft2 (.value b) =>
               if h : ft1 = ft2 then
                 let a' : IEEEFloat ft2.format := h ▸ a
-                let raw := combine a' b
-                let (nanSign, o1) := o0.nextBool
-                let (nanPick, o2) := o1.nextNat
-                let final := applyNaNPropagation cfg.nanMode raw [a', b] nanSign nanPick
-                goRed (.float ft2 (handleFMF fmf false false final)) tl o2
+                let (flipL, o1) := o0.nextBool
+                let (flipR, o2) := o1.nextBool
+                match handleFMF fmf true flipL a', handleFMF fmf true flipR b with
+                | .value fa, .value fb =>
+                  let raw := combine fa fb
+                  let (nanSign, o3) := o2.nextBool
+                  let (nanPick, o4) := o3.nextNat
+                  let final := applyNaNPropagation cfg.nanMode raw [fa, fb] nanSign nanPick
+                  goRed (.float ft2 (handleFMF fmf false false final)) tl o4
+                | _, _ => goRed (.float ft2 .poison) tl o2
               else .error (.staticError s!"Mismatched float types in {name}")
             | .float ft _, .float _ _ => goRed (.float ft .poison) tl o0
             | _, _ => .error (.staticError s!"Expected float elements in {name}")
@@ -1653,48 +1658,71 @@ private theorem execStoreList_preserves_wf {dl cfg elemTy align mem writes mem'}
     | error e => rw [hs] at h; cases h
     | ok m1 => rw [hs] at h; exact ih (storeElemToPtr_preserves_wf hwf hs) h
 
-/-- Sequentially execute active lanes of `llvm.experimental.vector.histogram.{add,uadd.sat,umax,umin}`. -/
-private def execHistogramLoop (dl : DataLayout) (cfg : SemanticsConfig) (op : String)
-    (w : Nat) (incVal : PoisonOr (BitVec w)) (mem : MemoryState) :
-    List Pointer → Except ExecError MemoryState
-  | [] => .ok mem
+/-- Helper: group pointers by `(prov, addr)` preserving first-seen order and counting multiplicities. -/
+private def groupHistogramPtrs : List Pointer → List (Pointer × Nat)
+  | [] => []
   | p :: rest =>
+    let rec insertOne : List (Pointer × Nat) → List (Pointer × Nat)
+      | [] => [(p, 1)]
+      | (q, cnt) :: xs =>
+        if q.addr.toNat == p.addr.toNat && q.prov == p.prov then (q, cnt + 1) :: xs
+        else (q, cnt) :: insertOne xs
+    let rec go (acc : List (Pointer × Nat)) : List Pointer → List (Pointer × Nat)
+      | [] => acc
+      | r :: rs =>
+        let rec bump : List (Pointer × Nat) → List (Pointer × Nat)
+          | [] => [(r, 1)]
+          | (q, cnt) :: xs =>
+            if q.addr.toNat == r.addr.toNat && q.prov == r.prov then (q, cnt + 1) :: xs
+            else (q, cnt) :: bump xs
+        go (bump acc) rs
+    go [(p, 1)] rest
+
+/-- Load all grouped histogram lanes from `mem` and compute their updated values before any stores. -/
+private def prepareHistogramWrites (dl : DataLayout) (cfg : SemanticsConfig) (op : String)
+    (w : Nat) (incVal : PoisonOr (BitVec w)) (mem : MemoryState) :
+    List (Pointer × Nat) → Except ExecError (List (Pointer × RegisterValue))
+  | [] => .ok []
+  | (p, cnt) :: rest => do
     let elemTy := LlvmType.int w
-    match loadElemFromPtr dl cfg mem p elemTy 1 default with
-    | .error e => .error e
-    | .ok (curVal, _) =>
-      let newVal : RegisterValue :=
-        match curVal, incVal with
-        | .bv w1 (.value x), .value inc =>
-          if h : w1 = w then
-            let x' : BitVec w := h ▸ x
-            let r : BitVec w :=
-              if op == "add" then x' + inc
-              else if op == "uadd.sat" then bvUAddSat x' inc
-              else if op == "umax" then if x'.toNat ≥ inc.toNat then x' else inc
-              else if x'.toNat ≤ inc.toNat then x' else inc
-            .bv w (.value r)
-          else .bv w .poison
-        | _, _ => .bv w .poison
-      match storeElemToPtr dl cfg mem p elemTy newVal 1 with
-      | .error e => .error e
-      | .ok mem' => execHistogramLoop dl cfg op w incVal mem' rest
+    let (curVal, _) ← loadElemFromPtr dl cfg mem p elemTy 1 default
+    let newVal : RegisterValue :=
+      match curVal, incVal with
+      | .bv w1 (.value x), .value inc =>
+        if h : w1 = w then
+          let x' : BitVec w := h ▸ x
+          let r : BitVec w :=
+            if op == "add" then x' + inc * BitVec.ofNat w cnt
+            else if op == "uadd.sat" then
+              let rec satLoop : Nat → BitVec w → BitVec w
+                | 0, acc => acc
+                | k + 1, acc => satLoop k (bvUAddSat acc inc)
+              satLoop cnt x'
+            else if op == "umax" then if x'.toNat ≥ inc.toNat then x' else inc
+            else if x'.toNat ≤ inc.toNat then x' else inc
+          .bv w (.value r)
+        else .bv w .poison
+      | _, _ => .bv w .poison
+    let restWrites ← prepareHistogramWrites dl cfg op w incVal mem rest
+    .ok ((p, newVal) :: restWrites)
+
+/-- Execute active lanes of `llvm.experimental.vector.histogram.{add,uadd.sat,umax,umin}`:
+    loads all unique lanes first, computes updates with lane multiplicities, then stores in order. -/
+private def execHistogramLoop (dl : DataLayout) (cfg : SemanticsConfig) (op : String)
+    (w : Nat) (incVal : PoisonOr (BitVec w)) (mem : MemoryState)
+    (ptrs : List Pointer) : Except ExecError MemoryState :=
+  match prepareHistogramWrites dl cfg op w incVal mem (groupHistogramPtrs ptrs) with
+  | .error e => .error e
+  | .ok writes => execStoreList dl cfg (.int w) 1 mem writes
 
 private theorem execHistogramLoop_preserves_wf {dl cfg op w incVal mem ptrs mem'}
     (hwf : MemoryState.WellFormed mem)
     (h : execHistogramLoop dl cfg op w incVal mem ptrs = .ok mem') :
     MemoryState.WellFormed mem' := by
-  induction ptrs generalizing mem with
-  | nil => unfold execHistogramLoop at h; cases h; exact hwf
-  | cons p rest ih =>
-    unfold execHistogramLoop at h; dsimp only at h
-    cases hl : loadElemFromPtr dl cfg mem p (.int w) 1 default with
-    | error e => rw [hl] at h; cases h
-    | ok pair =>
-      rw [hl] at h; dsimp only at h
-      cases hs : storeElemToPtr dl cfg mem p (.int w) _ 1 with
-      | error e => rw [hs] at h; cases h
-      | ok m1 => rw [hs] at h; exact ih (storeElemToPtr_preserves_wf hwf hs) h
+  unfold execHistogramLoop at h
+  cases hp : prepareHistogramWrites dl cfg op w incVal mem (groupHistogramPtrs ptrs) with
+  | error e => rw [hp] at h; cases h
+  | ok writes => rw [hp] at h; exact execStoreList_preserves_wf hwf h
 
 /-- Read-only vector/masked/VP/speculative memory load intrinsics (never modify `mem`). -/
 def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
@@ -2065,11 +2093,13 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
             if overflowed then
               .error (.immediateUB "Invalid memory access with a poison pointer in llvm.matrix.column.major.store")
             else
-              let ws := (List.range cols).flatMap fun c =>
-                (List.range rows).map fun r =>
-                  (ptrAddBytes dl p (Int.ofNat ((c * strideIdx + r) * elemSz)),
-                   vals.getD (c * rows + r) (poisonOf elemTy))
-              execStoreList dl cfg elemTy 1 mem ws
+              let colTy := LlvmType.vector rows elemTy
+              let ws := (List.range cols).map fun c =>
+                let colVals := (List.range rows).map fun r =>
+                  vals.getD (c * rows + r) (poisonOf elemTy)
+                (ptrAddBytes dl p (Int.ofNat (c * strideIdx * elemSz)),
+                 RegisterValue.vector elemTy colVals)
+              execStoreList dl cfg colTy 1 mem ws
           | _ => .error (.immediateUB "poison/invalid pointer in llvm.matrix.column.major.store")
       | [_, _, .bv _ .poison, _, _, _] | [_, _, _, .bv 1 .poison, _, _] =>
         .error (.immediateUB "poison stride/volatile in llvm.matrix.column.major.store")

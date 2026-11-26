@@ -710,7 +710,8 @@ def elabNanoLlvmDeclaration : Syntax → TermElabM Expr
     let attrListT ← mkAppM ``List #[mkConst ``ValueAttr]
     let argAttrsList ← mkListLit attrListT argAttrs.toList
     let fnTy ← mkAppM ``LlvmType.function #[retTyE, argList, toExpr isVarArg]
-    mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false]
+    let noneDenorm ← mkAppOptM ``Option.none #[some (mkConst ``DenormalMode)]
+    mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false, noneDenorm]
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-declaration|" p:nanollvm_declaration "]" : term => elabNanoLlvmDeclaration p
@@ -807,7 +808,8 @@ def elabNanoLlvmDefinition : Syntax → TermElabM Expr
       curLine := curLine + nLines
       blockExprs := blockExprs.push bE
     let blockList ← mkListLit (mkConst ``Block) blockExprs.toList
-    let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false]
+    let noneDenorm ← mkAppOptM ``Option.none #[some (mkConst ``DenormalMode)]
+    let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false, noneDenorm]
     mkAppM ``Definition.mk #[decl, argNameList, blockList]
   | _ => throwUnsupportedSyntax
 

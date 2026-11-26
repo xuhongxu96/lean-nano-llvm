@@ -59,4 +59,9 @@ def nextBool : OracleState → Bool × OracleState
 def nextBitVec (w : Nat) : OracleState → BitVec w × OracleState
   | ⟨oracle, index⟩ => (BitVec.ofNat w (oracle index), ⟨oracle, index + 1⟩)
 
+/-- Allocate a strictly unique positive identifier (monotonic counter for wildcard provenance). -/
+@[simp]
+def freshId : OracleState → Nat × OracleState
+  | ⟨oracle, index⟩ => (index + 1, ⟨oracle, index + 1⟩)
+
 end OracleState

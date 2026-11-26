@@ -28,6 +28,10 @@ inductive NaNPropagationMode : Type where
   | unchanged
   /-- Nondeterministically pick among valid IEEE-754 / LLVM NaN propagation results via oracle. -/
   | nondet
+  /-- SPARC target-specific preferred NaN (all-ones significand payload). -/
+  | sparcPreferred
+  /-- WebAssembly target-specific NaN (canonical qNaN if all inputs canonical, else any qNaN). -/
+  | wasm
 deriving Repr, DecidableEq, Inhabited
 
 /-- Denormal flushing behavior for FP inputs/outputs (mirrors `llvm::DenormalMode`). -/

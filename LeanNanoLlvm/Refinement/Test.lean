@@ -823,12 +823,14 @@ theorem fadd_refines_fadd_nnan : faddNnanDef ⊒ faddDef := by
         rw [EvalExp.leaf_iff haLeaf] at he1; cases he1
         rw [EvalExp.leaf_iff hbLeaf] at he2; cases he2
         obtain ⟨o, ho⟩ := hf
+        dsimp only [frameDenormalCfg, faddDef] at ho
         obtain ⟨rt, rs, o1, o2, hok, _, _⟩ := evalFloatBinary_fadd_refines_nnan va vb o
         rw [hok] at ho; cases ho
       | floatBinaryOp_ok he1 he2 hf =>
         rw [EvalExp.leaf_iff haLeaf] at he1; cases he1
         rw [EvalExp.leaf_iff hbLeaf] at he2; cases he2
         obtain ⟨o, o1', ho⟩ := hf
+        dsimp only [frameDenormalCfg, faddDef] at ho
         obtain ⟨rt, rs, o1, o2, hok, hokS, href⟩ := evalFloatBinary_fadd_refines_nnan va vb o
         rw [hok] at ho; cases ho
         exact ⟨rfl, o, rt, rs, o2, hokS, href, rfl⟩
@@ -1167,6 +1169,10 @@ theorem ret_x_refines_alloca_store_load_i8 :
         cases initMem.objects.get? id with
         | none => trivial
         | some mo => exact ⟨rfl, rfl, fun _ i _ => MemByte.IsRefinedBy.refl _⟩
+      have hbw1 : mem1.bindWildcard (MemoryState.derivePointer .default64LE obj).prov obj.allocId = mem1 :=
+        MemoryState.bindWildcard_concrete _ _ _
+      have hbw2 : mem2.bindWildcard (MemoryState.derivePointer .default64LE obj).prov obj.allocId = mem2 :=
+        MemoryState.bindWildcard_concrete _ _ _
       refine Config.IsRefinedBy.of_det_halted
         (det_step_to_halted fun ev c' => by
           rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 v)
@@ -1176,18 +1182,18 @@ theorem ret_x_refines_alloca_store_load_i8 :
         (StarStep.step (ev := none)
           (Step.instr rfl rfl
             (StepInstr.alloca_ok (count := 1) ⟨rfl, rfl⟩
-              (by simpa [typeAllocSize_i8, AST.RawId.ToString] using hspec)))
+              (by simpa [typeAllocSize_i8, AST.RawId.ToString, allocaInitKind, allocaStoreLoadI8Def] using hspec)))
           (StarStep.step (ev := none)
             (Step.instr rfl rfl
               (StepInstr.store_ok
-                (EvalExp.leaf_ok (by llvm_step [hpx]))
+                (EvalExp.leaf_ok (by llvm_step [hpx]; rfl))
                 (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
                 (by simpa [typeStoreSize_i8] using hverStore)))
             (StarStep.step (ev := none)
               (Step.instr rfl rfl
                 (StepInstr.load_ok
                   (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
-                  (by simpa [typeStoreSize_i8, hb] using hverLoad)
+                  (by simpa [typeStoreSize_i8, hb, hbw1] using hverLoad)
                   (by simpa [typeStoreSize_i8] using hbtv)
                   rfl
                   (by intro h; cases h)))
@@ -1198,7 +1204,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
                     (StepRet.top_ok rfl (by llvm_step [allocaStoreLoadI8Def]))))
                 (StarStep.refl _)))))
         (RegisterValue.IsRefinedBy.refl _)
-        hmemRef
+        (by simpa [hbw1, mem2, hbw2, memFinal] using hmemRef)
   · llvm_wf [allocaStoreLoadI8Def] at hargs
 
 open scoped LeanNanoLlvm.AST.Syntax in
@@ -1262,11 +1268,11 @@ theorem dead_alloca_store_elim_i8 :
         (StarStep.step (ev := none)
           (Step.instr rfl rfl
             (StepInstr.alloca_ok (count := 1) ⟨rfl, rfl⟩
-              (by simpa [typeAllocSize_i8, AST.RawId.ToString] using hspec)))
+              (by simpa [typeAllocSize_i8, AST.RawId.ToString, allocaInitKind, deadAllocaStoreI8Def] using hspec)))
           (StarStep.step (ev := none)
             (Step.instr rfl rfl
               (StepInstr.store_ok
-                (EvalExp.leaf_ok (by simp [evalPureLeafExp?]))
+                (EvalExp.leaf_ok (by simp [evalPureLeafExp?]; rfl))
                 (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
                 (by simpa [typeStoreSize_i8] using hverStore)))
             (StarStep.step (ev := none)
@@ -1276,7 +1282,7 @@ theorem dead_alloca_store_elim_i8 :
                   (StepRet.top_ok rfl (by llvm_step [deadAllocaStoreI8Def]))))
               (StarStep.refl _))))
         (RegisterValue.IsRefinedBy.refl _)
-        hmemRef
+        (by simpa [MemoryState.derivePointer] using hmemRef)
   · llvm_wf [deadAllocaStoreI8Def] at hargs
 
 /-! ### 9. Caller-Visible Memory Refinement (Positive & Negative Tests) -/
@@ -1344,15 +1350,18 @@ theorem dead_store_elim_caller_mem_i8 :
         obtain ⟨mo, offset⟩ := pair
         obtain ⟨b1, hb1⟩ := valueToBytes_i8_singleton (.value (1#8))
         obtain ⟨b2, hb2⟩ := valueToBytes_i8_singleton vv
-        have hver2 := MemoryState.verifyMemAccess_writeObjectBytes_same hwfMem hver offset #[b1]
+        have hver1 := MemoryState.verifyMemAccess_bindWildcard_same hwfMem hver
+        have hwfB := MemoryState.bindWildcard_preserves_wf hwfMem ptr.prov mo.allocId
+        have hver2 := MemoryState.verifyMemAccess_writeObjectBytes_same hwfB hver1 offset #[b1]
         have hmemEq :
-            (initMem.writeObjectBytes mo.allocId offset
-                (valueToBytes .default64LE .modern (.bv 8 (.value (1#8))) (.int 8))).writeObjectBytes
-              mo.allocId offset (valueToBytes .default64LE .modern (.bv 8 vv) (.int 8)) =
-            initMem.writeObjectBytes mo.allocId offset
+            ((((initMem.bindWildcard ptr.prov mo.allocId).writeObjectBytes mo.allocId offset
+                (valueToBytes .default64LE .modern (.bv 8 (.value (1#8))) (.int 8))).bindWildcard
+              ptr.prov mo.allocId).writeObjectBytes
+              mo.allocId offset (valueToBytes .default64LE .modern (.bv 8 vv) (.int 8))) =
+            (initMem.bindWildcard ptr.prov mo.allocId).writeObjectBytes mo.allocId offset
               (valueToBytes .default64LE .modern (.bv 8 vv) (.int 8)) := by
-          rw [hb1, hb2]
-          exact MemoryState.writeObjectBytes_overwrite_singleton initMem mo.allocId offset b1 b2
+          rw [MemoryState.bindWildcard_writeObjectBytes_comm, MemoryState.bindWildcard_idemp, hb1, hb2]
+          exact MemoryState.writeObjectBytes_overwrite_singleton (initMem.bindWildcard ptr.prov mo.allocId) mo.allocId offset b1 b2
         refine Config.IsRefinedBy.of_det_halted
           (det_step_chain
             (fun ev c' => by
@@ -1864,7 +1873,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
               simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
               injection h1 with hv1; subst hv1
               injection hrd with hrd'; subst hrd'
-              simp only [applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
+              simp only [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
               injection h2 with hv2; subst hv2
               exact ⟨rfl, rfl⟩
             | noreturn_ub hcons _ hrd hnr =>
@@ -1878,7 +1887,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
               simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
               injection h1 with hv1; subst hv1
               injection hrd with hrd'; subst hrd'
-              simp only [applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
+              simp only [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
               cases h2
             | missing_dest hcons _ hrd =>
               cases hcons; cases hrd
@@ -1889,7 +1898,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
           exact Step.term rfl rfl rfl
             (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
               (StepRet.call_ok (rd := { destId := .id (.name "r"), retTy := .ret (.int 32), fmf := {}, retAttrs := [] })
-                rfl (by llvm_step [helperId32Def]; rfl) rfl rfl (by llvm_step))))
+                rfl (by llvm_step [helperId32Def]; rfl) rfl rfl (by simp [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure]))))
       hY3
     have hY1 := det_step_chain (st := {
         frames := [{ defn := callerDirectDef, curBlock := .name "entry",
@@ -1924,6 +1933,13 @@ theorem caller_add0_is_refined_by_direct_in_module :
           | call_alloc_err _ hcallee halloc _ =>
             cases hcallee with
             | direct => cases halloc
+            | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
+          | call_spec_oracle_ok _ hcallee _ hspec _ _ | call_spec_oracle_entry_err _ hcallee _ hspec _ _
+          | call_spec_oracle_overflow _ hcallee _ hspec _ _ =>
+            cases hcallee with
+            | direct =>
+              have hf : strHasPrefix "id32" "llvm.speculative.load" = false := rfl
+              simp [specLoadOracleCall?, AST.RawId.ToString, hf] at hspec
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_intrinsic_ok hargsEv hcallee _ hintr _ _ | call_intrinsic_bundle_err hargsEv hcallee _ hintr _
           | call_intrinsic_retattr_err hargsEv hcallee _ hintr _ _ =>
