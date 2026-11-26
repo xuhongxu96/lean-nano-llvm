@@ -12,3 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: leanprover/lean-action@v1
+      - name: Run CLI smoke test
+        run: lake exe lean-nano-llvm
+      - name: Run standalone .ll regression suite
+        run: bash scripts/run_ll_tests.sh
+      - name: Verify transitive axioms
+        run: lake env lean scripts/audit_axioms.lean
