@@ -446,6 +446,8 @@ inductive Exp : Type where
   | binConst        (op : IntBinaryOp) (ty : LlvmType) (v1 v2 : Exp)
   | insertElemConst (vecTy : LlvmType) (vec : Exp) (elemTy : LlvmType) (elem : Exp)
                     (idxTy : LlvmType) (idx : Exp)
+  | extractElemConst (vecTy : LlvmType) (vec : Exp) (idxTy : LlvmType) (idx : Exp)
+  | shuffleVecConst (vecTy : LlvmType) (v1 v2 : Exp) (mask : List (Option Nat))
 deriving Repr
 
 abbrev TypedExp := LlvmType × Exp
@@ -617,6 +619,12 @@ private def resolveExp (defs : List (LocalId × LlvmType)) (fuel : Nat) :
     .ok (.insertElemConst (← resolveType defs fuel vecTy) (← resolveExp defs fuel vec)
       (← resolveType defs fuel elemTy) (← resolveExp defs fuel elem)
       (← resolveType defs fuel idxTy) (← resolveExp defs fuel idx))
+  | .extractElemConst vecTy vec idxTy idx => do
+    .ok (.extractElemConst (← resolveType defs fuel vecTy) (← resolveExp defs fuel vec)
+      (← resolveType defs fuel idxTy) (← resolveExp defs fuel idx))
+  | .shuffleVecConst vecTy v1 v2 mask => do
+    .ok (.shuffleVecConst (← resolveType defs fuel vecTy) (← resolveExp defs fuel v1)
+      (← resolveExp defs fuel v2) mask)
   | e => .ok e
 
 private def resolveTypedExpList (defs : List (LocalId × LlvmType)) (fuel : Nat) :

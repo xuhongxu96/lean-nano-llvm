@@ -41,11 +41,12 @@ private def formatRegisterValue : RegisterValue → String
     if packed then s!"<\{ {body} }>" else s!"\{ {body} }"
 
 private structure RunOpts where
-  file    : String := ""
-  entry   : String := "main"
-  cfg     : SemanticsConfig := SemanticsConfig.modern
-  seed?   : Option Nat := none
-  verbose : Bool := false
+  file          : String := ""
+  entry         : String := "main"
+  cfg           : SemanticsConfig := SemanticsConfig.modern
+  seed?         : Option Nat := none
+  verbose       : Bool := false
+  disableVerify : Bool := false
 deriving Inhabited
 
 private def parseKeyVal (arg : String) : Option (String × String) :=
@@ -78,7 +79,7 @@ private def parseRunArgs (args : List String) : Except String RunOpts :=
       go { opts with cfg := { opts.cfg with undefMode := .zero, freezeMode := .zero, nanMode := .preferred } } rest
     | "--undef" :: rest => go { opts with cfg := { opts.cfg with undefMode := .nondet } } rest
     | "--zero-undef" :: rest => go { opts with cfg := { opts.cfg with undefMode := .zero } } rest
-    | "--disable-verify" :: rest => go opts rest
+    | "--disable-verify" :: rest => go { opts with disableVerify := true } rest
     | "--fuse-fmuladd" :: rest => go { opts with cfg := { opts.cfg with fuseFMulAdd := true } } rest
     | "--entry" :: name :: rest | "--entry-function" :: name :: rest =>
       go { opts with entry := name } rest
@@ -245,6 +246,21 @@ def main (args : List String) : IO UInt32 := do
         IO.eprintln s!"PARSE_ERROR: {msg}"
         return 4
       | .ok parsed =>
+        if !opts.disableVerify then
+          let hasBadPhi := parsed.topLevel.entities.any fun
+            | .definition defn =>
+              defn.blocks.any fun blk =>
+                blk.code.any fun (_, instr) =>
+                  match instr with
+                  | .phi _ _ inc _ =>
+                    -- Check for duplicate predecessor blocks with different incoming expressions
+                    inc.any fun (e1, b1) =>
+                      inc.any fun (e2, b2) => b1 == b2 && e1.print != e2.print
+                  | _ => false
+            | _ => false
+          if hasBadPhi then
+            IO.eprintln "STATIC_ERROR: PHINode should have one entry for each predecessor (input module is broken!)"
+            return 2
         let oracle : OracleState := match opts.seed? with
           | none => default
           | some s => ⟨fun i => (s * 6364136223846793005 + i * 1442695040888963407 + 1) % (2 ^ 64), 0⟩

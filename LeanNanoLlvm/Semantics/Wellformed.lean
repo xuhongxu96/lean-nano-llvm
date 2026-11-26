@@ -39,6 +39,8 @@ def Exp.WellFormedFor (cfg : SemanticsConfig := .modern) (ty : LlvmType) : Exp �
   | .convConst _ _ _ toTy => ty = toTy
   | .binConst _ cTy _ _ => ty = cTy
   | .insertElemConst vecTy _ _ _ _ _ => ty = vecTy
+  | .extractElemConst vecTy _ _ _ => ty = vecTy.scalarType
+  | .shuffleVecConst vecTy _ _ mask => ty = .vector mask.length vecTy.scalarType
 
 mutual
 @[simp_wellform]
@@ -54,6 +56,10 @@ def Exp.WellScopedTo (locals : List LocalId) : Exp → Prop
   | .binConst _ _ v1 v2 => v1.WellScopedTo locals ∧ v2.WellScopedTo locals
   | .insertElemConst _ v _ e _ idx =>
       v.WellScopedTo locals ∧ e.WellScopedTo locals ∧ idx.WellScopedTo locals
+  | .extractElemConst _ v _ idx =>
+      v.WellScopedTo locals ∧ idx.WellScopedTo locals
+  | .shuffleVecConst _ v1 v2 _ =>
+      v1.WellScopedTo locals ∧ v2.WellScopedTo locals
   | _ => True
 
 @[simp_wellform]

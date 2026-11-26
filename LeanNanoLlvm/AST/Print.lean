@@ -166,6 +166,11 @@ def Exp.print : Exp → String
       s!"{name}{formatFlags flags} ({ty.print} {v1.print}, {ty.print} {v2.print})"
   | .insertElemConst vecTy vec elemTy elem idxTy idx =>
       s!"insertelement ({vecTy.print} {vec.print}, {elemTy.print} {elem.print}, {idxTy.print} {idx.print})"
+  | .extractElemConst vecTy vec idxTy idx =>
+      s!"extractelement ({vecTy.print} {vec.print}, {idxTy.print} {idx.print})"
+  | .shuffleVecConst vecTy v1 v2 mask =>
+      let ms := String.intercalate ", " (mask.map fun | some i => s!"i32 {i}" | none => "i32 poison")
+      s!"shufflevector ({vecTy.print} {v1.print}, {vecTy.print} {v2.print}, <{mask.length} x i32> <{ms}>)"
 
 def Exp.printTypedList : List (LlvmType × Exp) → List String
   | [] => []

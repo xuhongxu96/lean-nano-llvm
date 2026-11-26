@@ -54,6 +54,13 @@ def evalPureLeafExp? (dl : DataLayout) (cfg : SemanticsConfig)
       | _ => .error (.staticError s!"invalid type for int literal: found {ty.print}")
   | .floatBits bits =>
     some <| match ty with
+      | .float .float =>
+        let flt : IEEEFloat .single :=
+          if bits ≥ (1 <<< 32) then
+            IEEEFloat.convert .single .RNE (IEEEFloat.ofNatBits (fmt := .double) bits)
+          else
+            IEEEFloat.ofNatBits bits
+        .ok (.float .float (.value flt))
       | .float ft => .ok (.float ft (.value (IEEEFloat.ofNatBits bits)))
       | _ => .error (.staticError s!"invalid type for float bit literal: found {ty.print}")
   | .floatDec neg m e =>
@@ -323,6 +330,40 @@ inductive EvalExp (dl : DataLayout) (cfg : SemanticsConfig)
       EvalExp dl cfg regs m2 idxTy idxE (.ok (idxV, m3)) →
       evalInsertElementPure vecV elemV idxV = .error err →
       EvalExp dl cfg regs mem ty (.insertElemConst vecTy vecE elemTy elemE idxTy idxE) (.error err)
+  | extractElemConst_ok {mem ty vecTy vecE idxTy idxE vecV m1 idxV m2 res} :
+      EvalExp dl cfg regs mem vecTy vecE (.ok (vecV, m1)) →
+      EvalExp dl cfg regs m1 idxTy idxE (.ok (idxV, m2)) →
+      evalExtractElementPure vecV idxV = .ok res →
+      EvalExp dl cfg regs mem ty (.extractElemConst vecTy vecE idxTy idxE) (.ok (res, m2))
+  | extractElemConst_vec_err {mem ty vecTy vecE idxTy idxE err} :
+      EvalExp dl cfg regs mem vecTy vecE (.error err) →
+      EvalExp dl cfg regs mem ty (.extractElemConst vecTy vecE idxTy idxE) (.error err)
+  | extractElemConst_idx_err {mem ty vecTy vecE idxTy idxE vecV m1 err} :
+      EvalExp dl cfg regs mem vecTy vecE (.ok (vecV, m1)) →
+      EvalExp dl cfg regs m1 idxTy idxE (.error err) →
+      EvalExp dl cfg regs mem ty (.extractElemConst vecTy vecE idxTy idxE) (.error err)
+  | extractElemConst_eval_err {mem ty vecTy vecE idxTy idxE vecV m1 idxV m2 err} :
+      EvalExp dl cfg regs mem vecTy vecE (.ok (vecV, m1)) →
+      EvalExp dl cfg regs m1 idxTy idxE (.ok (idxV, m2)) →
+      evalExtractElementPure vecV idxV = .error err →
+      EvalExp dl cfg regs mem ty (.extractElemConst vecTy vecE idxTy idxE) (.error err)
+  | shuffleVecConst_ok {mem ty vecTy e1 e2 mask v1 m1 v2 m2 res} :
+      EvalExp dl cfg regs mem vecTy e1 (.ok (v1, m1)) →
+      EvalExp dl cfg regs m1 vecTy e2 (.ok (v2, m2)) →
+      evalShuffleVectorPure v1 v2 mask = .ok res →
+      EvalExp dl cfg regs mem ty (.shuffleVecConst vecTy e1 e2 mask) (.ok (res, m2))
+  | shuffleVecConst_e1_err {mem ty vecTy e1 e2 mask err} :
+      EvalExp dl cfg regs mem vecTy e1 (.error err) →
+      EvalExp dl cfg regs mem ty (.shuffleVecConst vecTy e1 e2 mask) (.error err)
+  | shuffleVecConst_e2_err {mem ty vecTy e1 e2 mask v1 m1 err} :
+      EvalExp dl cfg regs mem vecTy e1 (.ok (v1, m1)) →
+      EvalExp dl cfg regs m1 vecTy e2 (.error err) →
+      EvalExp dl cfg regs mem ty (.shuffleVecConst vecTy e1 e2 mask) (.error err)
+  | shuffleVecConst_eval_err {mem ty vecTy e1 e2 mask v1 m1 v2 m2 err} :
+      EvalExp dl cfg regs mem vecTy e1 (.ok (v1, m1)) →
+      EvalExp dl cfg regs m1 vecTy e2 (.ok (v2, m2)) →
+      evalShuffleVectorPure v1 v2 mask = .error err →
+      EvalExp dl cfg regs mem ty (.shuffleVecConst vecTy e1 e2 mask) (.error err)
 
 inductive EvalExpList (dl : DataLayout) (cfg : SemanticsConfig)
     (regs : AssocMap Identifier RegisterValue) :
@@ -361,6 +402,10 @@ theorem EvalExp.preserves_wf {dl cfg regs mem ty e v mem'}
   | binConst_ok h1 h2 _ => exact EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2
   | insertElemConst_ok h1 h2 h3 _ =>
     exact EvalExp.preserves_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2) h3
+  | extractElemConst_ok h1 h2 _ =>
+    exact EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2
+  | shuffleVecConst_ok h1 h2 _ =>
+    exact EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2
 
 theorem EvalExpList.preserves_wf {dl cfg regs mem es vs mem'}
     (hwf : MemoryState.WellFormed mem)
@@ -766,7 +811,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
             count = bv.toNat) →
       MemoryState.AllocSpec m1 st.dataLayout st.config
         (st.dataLayout.typeAllocSize allocTy * count)
-        (align?.getD (st.dataLayout.typeABIAlign allocTy))
+        (align?.getD (st.dataLayout.typePrefAlign allocTy))
         (match iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}")
         addrSpace .uninitialized .stack false obj mem' →
       StepInstr st frame callers iid rest (.alloca allocTy numEl? align? addrSpace) none
@@ -788,7 +833,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
             EvalExp st.dataLayout st.config frame.registers st.memory nTy nExp (.ok (.bv w (.value bv), m1)) ∧
             count = bv.toNat) →
       ((st.config.maxMem ≠ 0 ∧ m1.usedMem + max 1 (st.dataLayout.typeAllocSize allocTy * count) > st.config.maxMem) ∨
-       DataLayout.alignTo m1.nextAddr (max 1 (align?.getD (st.dataLayout.typeABIAlign allocTy))) +
+       DataLayout.alignTo m1.nextAddr (max 1 (align?.getD (st.dataLayout.typePrefAlign allocTy))) +
          max 1 (st.dataLayout.typeAllocSize allocTy * count) ≥ 1 <<< st.dataLayout.getAddressSizeInBits addrSpace) →
       StepInstr st frame callers iid rest (.alloca allocTy numEl? align? addrSpace) none (.resourceError .outOfMemory)
   | alloca_count_err {allocTy nTy nExp align? addrSpace err} :
@@ -1087,7 +1132,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) = some (.ok (rawRet, m3, o'))) →
+      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
       EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.ok m4) →
       applyRetFMFAndAttrsPure st.dataLayout m4 retTy fmf retAttrs rawRet = .ok finalRet →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
@@ -1096,14 +1141,14 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) = some (.ok (rawRet, m3, o'))) →
+      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
       EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.error err) →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
   | call_intrinsic_retattr_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 m4 err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) = some (.ok (rawRet, m3, o'))) →
+      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
       EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.ok m4) →
       applyRetFMFAndAttrsPure st.dataLayout m4 retTy fmf retAttrs rawRet = .error err →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
@@ -1111,13 +1156,13 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∃ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) = some (.error err)) →
+      (∃ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.error err)) →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
   | call_user_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 calleeDef calleeFrame m3} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) = none) →
+      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
       mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals = .ok (calleeFrame, m3) →
@@ -1132,7 +1177,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) = none) →
+      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
       mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals = .error err →
@@ -1141,7 +1186,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) = none) →
+      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = some calleeDef →
       st.config.maxStackDepth ≠ 0 →
       st.frames.length ≥ st.config.maxStackDepth →
@@ -1150,7 +1195,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) = none) →
+      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = none →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (.staticError msg)
 

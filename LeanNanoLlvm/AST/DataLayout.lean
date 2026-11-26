@@ -161,6 +161,12 @@ end
 def typeABIAlign (dl : DataLayout) (ty : LlvmType) : Nat :=
   (dl.typeLayout ty).2
 
+/-- Compute the preferred alignment in bytes for an `LlvmType` (used by `alloca` without explicit align). -/
+def typePrefAlign (dl : DataLayout) (ty : LlvmType) : Nat :=
+  match ty with
+  | .struct _ _ => max 8 (dl.typeABIAlign ty)
+  | _ => dl.typeABIAlign ty
+
 def structFieldsMaxAlign (dl : DataLayout) (fields : List LlvmType) : Nat :=
   (dl.structLayoutAux false 0 1 fields).2.2
 

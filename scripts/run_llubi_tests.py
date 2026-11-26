@@ -435,9 +435,9 @@ def run_single_test(path: str, run_line: str, text: str, bin_path: str):
         t = toks[i]
         if t in ("not", "llubi", "%s"):
             i += 1
-        elif t in ("--verbose", "--disable-verify", "--use-constant-int-for-fixed-length-splat"):
+        elif t in ("--verbose", "--use-constant-int-for-fixed-length-splat"):
             i += 1
-        elif t in ("--deterministic", "--fuse-fmuladd"):
+        elif t in ("--deterministic", "--fuse-fmuladd", "--disable-verify"):
             cli_args.append(t)
             if t == "--deterministic":
                 has_explicit_undef = True

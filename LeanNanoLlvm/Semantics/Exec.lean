@@ -55,6 +55,13 @@ def execExp (dl : DataLayout) (cfg : SemanticsConfig)
     | _ => .error (.staticError s!"invalid type for int literal: found {ty.print}")
   | .floatBits bits =>
     match ty with
+    | .float .float =>
+      let flt : IEEEFloat .single :=
+        if bits ≥ (1 <<< 32) then
+          IEEEFloat.convert .single .RNE (IEEEFloat.ofNatBits (fmt := .double) bits)
+        else
+          IEEEFloat.ofNatBits bits
+      .ok (.float .float (.value flt), mem, o)
     | .float ft => .ok (.float ft (.value (IEEEFloat.ofNatBits bits)), mem, o)
     | _ => .error (.staticError s!"invalid type for float bit literal: found {ty.print}")
   | .floatDec neg m e10 =>
@@ -161,6 +168,26 @@ def execExp (dl : DataLayout) (cfg : SemanticsConfig)
           match evalInsertElementPure vecV elemV idxV with
           | .ok res => .ok (res, m3, o3)
           | .error err => .error err
+  | .extractElemConst vecTy vecE idxTy idxE =>
+    match execExp dl cfg regs mem vecTy vecE o with
+    | .error err => .error err
+    | .ok (vecV, m1, o1) =>
+      match execExp dl cfg regs m1 idxTy idxE o1 with
+      | .error err => .error err
+      | .ok (idxV, m2, o2) =>
+        match evalExtractElementPure vecV idxV with
+        | .ok res => .ok (res, m2, o2)
+        | .error err => .error err
+  | .shuffleVecConst vecTy e1 e2 mask =>
+    match execExp dl cfg regs mem vecTy e1 o with
+    | .error err => .error err
+    | .ok (v1, m1, o1) =>
+      match execExp dl cfg regs m1 vecTy e2 o1 with
+      | .error err => .error err
+      | .ok (v2, m2, o2) =>
+        match evalShuffleVectorPure v1 v2 mask with
+        | .ok res => .ok (res, m2, o2)
+        | .error err => .error err
 
 /-- Kernel-reducible list expression evaluator (mirroring `EvalExpList`). -/
 def execExpList (dl : DataLayout) (cfg : SemanticsConfig)
@@ -351,7 +378,8 @@ theorem execExp_sound (dl : DataLayout) (cfg : SemanticsConfig)
   | mem, ty, .floatBits bits, o => by
     unfold execExp
     cases ty with
-    | float ft => exact EvalExp.leaf_ok (by simp [evalPureLeafExp?])
+    | float ft =>
+      cases ft <;> exact EvalExp.leaf_ok (by simp [evalPureLeafExp?])
     | _ => exact EvalExp.leaf_err (by simp [evalPureLeafExp?])
   | mem, ty, .floatDec neg m e10, o => by
     unfold execExp
@@ -523,6 +551,36 @@ theorem execExp_sound (dl : DataLayout) (cfg : SemanticsConfig)
           cases hins : evalInsertElementPure vecV elemV idxV with
           | ok res => exact EvalExp.insertElemConst_ok ih1 ih2 ih3 hins
           | error err => exact EvalExp.insertElemConst_eval_err ih1 ih2 ih3 hins
+  | mem, ty, .extractElemConst vecTy vecE idxTy idxE, o => by
+    unfold execExp
+    have ih1 := execExp_sound dl cfg regs mem vecTy vecE o
+    cases h1 : execExp dl cfg regs mem vecTy vecE o with
+    | error err => rw [h1] at ih1; exact EvalExp.extractElemConst_vec_err ih1
+    | ok p1 =>
+      rw [h1] at ih1; obtain ⟨vecV, m1, o1⟩ := p1; dsimp only at ih1 ⊢
+      have ih2 := execExp_sound dl cfg regs m1 idxTy idxE o1
+      cases h2 : execExp dl cfg regs m1 idxTy idxE o1 with
+      | error err => rw [h2] at ih2; exact EvalExp.extractElemConst_idx_err ih1 ih2
+      | ok p2 =>
+        rw [h2] at ih2; obtain ⟨idxV, m2, o2⟩ := p2; dsimp only at ih2 ⊢
+        cases hev : evalExtractElementPure vecV idxV with
+        | ok res => exact EvalExp.extractElemConst_ok ih1 ih2 hev
+        | error err => exact EvalExp.extractElemConst_eval_err ih1 ih2 hev
+  | mem, ty, .shuffleVecConst vecTy e1 e2 mask, o => by
+    unfold execExp
+    have ih1 := execExp_sound dl cfg regs mem vecTy e1 o
+    cases h1 : execExp dl cfg regs mem vecTy e1 o with
+    | error err => rw [h1] at ih1; exact EvalExp.shuffleVecConst_e1_err ih1
+    | ok p1 =>
+      rw [h1] at ih1; obtain ⟨v1, m1, o1⟩ := p1; dsimp only at ih1 ⊢
+      have ih2 := execExp_sound dl cfg regs m1 vecTy e2 o1
+      cases h2 : execExp dl cfg regs m1 vecTy e2 o1 with
+      | error err => rw [h2] at ih2; exact EvalExp.shuffleVecConst_e2_err ih1 ih2
+      | ok p2 =>
+        rw [h2] at ih2; obtain ⟨v2, m2, o2⟩ := p2; dsimp only at ih2 ⊢
+        cases hev : evalShuffleVectorPure v1 v2 mask with
+        | ok res => exact EvalExp.shuffleVecConst_ok ih1 ih2 hev
+        | error err => exact EvalExp.shuffleVecConst_eval_err ih1 ih2 hev
 
 /-- Soundness of executable `execExpList` with respect to relational `EvalExpList`. -/
 theorem execExpList_sound (dl : DataLayout) (cfg : SemanticsConfig)
@@ -928,7 +986,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     | .error err => (none, Config.ofError err, o)
     | .ok (count, m1, o1) =>
       let totalSize := dl.typeAllocSize allocTy * count
-      let effAlign := align?.getD (dl.typeABIAlign allocTy)
+      let effAlign := align?.getD (dl.typePrefAlign allocTy)
       let name := match iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}"
       match m1.allocate dl cfg totalSize effAlign name addrSpace .uninitialized .stack false with
       | .ok (obj, mem') =>
@@ -1086,7 +1144,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           | some (.error err) => (none, Config.ofError err, o2)
           | none => (none, .staticError s!"Internal error: alloc libcall {fname}", o2)
         else
-          match evalNonAllocIntrinsicExec? dl cfg m2 fname retTy fmf argVals o2 allowLib with
+          match evalNonAllocIntrinsicExec? dl cfg m2 fname retTy fmf argVals o2 allowLib (args.map (fun a => a.2.2)) with
           | some (.ok (rawRet, m3, o3)) =>
             let effBundles := if fname == "llvm.assume" then bundles else []
             match execAssumeBundles dl cfg regs m3 effBundles o3 with
@@ -1326,7 +1384,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
               EvalExp st.dataLayout st.config frame.registers st.memory nTy nExp (.ok (.bv w (.value bv), m1)) ∧
               count = bv.toNat) →
         (match m1.allocate st.dataLayout st.config (st.dataLayout.typeAllocSize allocTy * count)
-            (align?.getD (st.dataLayout.typeABIAlign allocTy))
+            (align?.getD (st.dataLayout.typePrefAlign allocTy))
             (match (generalizing := false) iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}")
             addrSpace .uninitialized .stack false with
           | .ok (obj, mem') =>
@@ -1337,7 +1395,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
         StepInstr st frame callers iid rest (.alloca allocTy numEl? align? addrSpace) ev c' := by
       intro count m1 o1 hwf1 hcnt ha
       cases halloc : m1.allocate st.dataLayout st.config (st.dataLayout.typeAllocSize allocTy * count)
-          (align?.getD (st.dataLayout.typeABIAlign allocTy))
+          (align?.getD (st.dataLayout.typePrefAlign allocTy))
           (match (generalizing := false) iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}")
           addrSpace .uninitialized .stack false with
       | ok p =>
@@ -1606,7 +1664,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
             | ok finalRet => rw [hattr] at h; cases h; exact StepInstr.call_alloc_ok iha ihc halloc hspec hattr
         · have hallocF : (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false := Bool.eq_false_iff.mpr halloc
           rw [if_neg halloc] at h
-          cases hint : evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o2 (st.allowLibcallsFor fid) with
+          cases hint : evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o2 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) with
           | some r =>
             rw [hint] at h
             cases r with
@@ -1630,7 +1688,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                   exact StepInstr.call_intrinsic_ok iha ihc hallocF ⟨_, _, hint⟩ ihb hattr
           | none =>
             rw [hint] at h; dsimp only at h
-            have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o0 (st.allowLibcallsFor fid) = none :=
+            have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o0 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none :=
               fun o0 => evalNonAllocIntrinsicExec?_none_indep hint
             cases hfn : st.functions.get? fid with
             | none => rw [hfn] at h; cases h; exact StepInstr.call_external_err iha ihc hallocF hnoneAll hfn
@@ -1860,65 +1918,168 @@ theorem runSteps_sound (fuel : Nat) (o : OracleState) (c : Config)
 
 /-! ### Module Initialization & Top-Level Runners -/
 
-private def registerBlockAddrs (dl : DataLayout) (cfg : SemanticsConfig) (fnName : FunctionId) :
+mutual
+private def collectAddrTakenExp : Exp → List GlobalId × List GlobalId
+  | .identifier (.global_id gid) => ([gid], [])
+  | .blockAddress fn blk => ([], [blockAddrKey fn blk])
+  | .array es | .struct _ es | .vector es => collectAddrTakenTypedList es
+  | .splat (_, e) => collectAddrTakenExp e
+  | .gepConst _ _ (_, p) idxs =>
+    let (f1, b1) := collectAddrTakenExp p
+    let (f2, b2) := collectAddrTakenTypedList idxs
+    (f1 ++ f2, b1 ++ b2)
+  | .convConst _ _ e _ => collectAddrTakenExp e
+  | .binConst _ _ e1 e2 =>
+    let (f1, b1) := collectAddrTakenExp e1
+    let (f2, b2) := collectAddrTakenExp e2
+    (f1 ++ f2, b1 ++ b2)
+  | .insertElemConst _ v _ e _ idx =>
+    let (f1, b1) := collectAddrTakenExp v
+    let (f2, b2) := collectAddrTakenExp e
+    let (f3, b3) := collectAddrTakenExp idx
+    (f1 ++ f2 ++ f3, b1 ++ b2 ++ b3)
+  | .extractElemConst _ v _ idx =>
+    let (f1, b1) := collectAddrTakenExp v
+    let (f2, b2) := collectAddrTakenExp idx
+    (f1 ++ f2, b1 ++ b2)
+  | .shuffleVecConst _ v1 v2 _ =>
+    let (f1, b1) := collectAddrTakenExp v1
+    let (f2, b2) := collectAddrTakenExp v2
+    (f1 ++ f2, b1 ++ b2)
+  | _ => ([], [])
+
+private def collectAddrTakenTypedList : List (LlvmType × Exp) → List GlobalId × List GlobalId
+  | [] => ([], [])
+  | (_, e) :: rest =>
+    let (f1, b1) := collectAddrTakenExp e
+    let (f2, b2) := collectAddrTakenTypedList rest
+    (f1 ++ f2, b1 ++ b2)
+end
+
+private def collectAddrTakenInstr : Instruction → List GlobalId × List GlobalId
+  | .intBinaryOp _ _ e1 e2 | .floatBinaryOp _ _ e1 e2 | .icmp _ _ _ e1 e2 | .fcmp _ _ _ e1 e2 =>
+    let (f1, b1) := collectAddrTakenExp e1; let (f2, b2) := collectAddrTakenExp e2; (f1 ++ f2, b1 ++ b2)
+  | .floatUnaryOp _ _ e | .conversionOp _ _ e _ | .load _ _ e _ _ _ _ | .extractvalue _ e _ | .freeze (_, e) =>
+    collectAddrTakenExp e
+  | .select _ _ c _ tv fv =>
+    let (f1, b1) := collectAddrTakenExp c; let (f2, b2) := collectAddrTakenExp tv; let (f3, b3) := collectAddrTakenExp fv
+    (f1 ++ f2 ++ f3, b1 ++ b2 ++ b3)
+  | .phi _ _ inc _ =>
+    inc.foldl (init := ([], [])) fun (fs, bs) (e, _) =>
+      let (f1, b1) := collectAddrTakenExp e; (fs ++ f1, bs ++ b1)
+  | .alloca _ (some (_, e)) _ _ => collectAddrTakenExp e
+  | .alloca _ none _ _ => ([], [])
+  | .store _ v _ p _ _ | .insertvalue _ v _ p _ | .extractelement _ v _ p | .shufflevector _ v p _ | .bitextract _ _ v _ p =>
+    let (f1, b1) := collectAddrTakenExp v; let (f2, b2) := collectAddrTakenExp p; (f1 ++ f2, b1 ++ b2)
+  | .getelementptr _ _ _ p idxs =>
+    let (f1, b1) := collectAddrTakenExp p; let (f2, b2) := collectAddrTakenTypedList idxs; (f1 ++ f2, b1 ++ b2)
+  | .insertelement _ v _ e _ idx | .bitinsert _ v _ e _ idx =>
+    let (f1, b1) := collectAddrTakenExp v; let (f2, b2) := collectAddrTakenExp e; let (f3, b3) := collectAddrTakenExp idx
+    (f1 ++ f2 ++ f3, b1 ++ b2 ++ b3)
+  | .call _ _ callee args _ bundles _ =>
+    -- Direct call `@f(...)` does NOT take the address of `@f`; only non-direct callees and arguments do.
+    let (fc, bc) := match callee with
+      | .identifier (.global_id _) => ([], [])
+      | other => collectAddrTakenExp other
+    let (fa, ba) := args.foldl (init := (fc, bc)) fun (fs, bs) (_, e, _) =>
+      let (f1, b1) := collectAddrTakenExp e; (fs ++ f1, bs ++ b1)
+    bundles.foldl (init := (fa, ba)) fun (fs, bs) (_, bes) =>
+      let (f1, b1) := collectAddrTakenTypedList bes; (fs ++ f1, bs ++ b1)
+
+private def collectAddrTakenTerm : Terminator → List GlobalId × List GlobalId
+  | .ret (_, e) | .condBr e _ _ | .switch _ e _ _ | .indirectBr e _ => collectAddrTakenExp e
+  | _ => ([], [])
+
+private def collectAddrTaken (ents : List TopLevelEntity) : List GlobalId × List GlobalId :=
+  ents.foldl (init := ([], [])) fun (fs, bs) ent =>
+    match ent with
+    | .global gv =>
+      match gv.initializer with
+      | some e => let (f1, b1) := collectAddrTakenExp e; (fs ++ f1, bs ++ b1)
+      | none => (fs, bs)
+    | .definition defn =>
+      defn.blocks.foldl (init := (fs, bs)) fun (fs1, bs1) blk =>
+        let (fs2, bs2) := blk.code.foldl (init := (fs1, bs1)) fun (fa, ba) (_, ins) =>
+          let (f1, b1) := collectAddrTakenInstr ins; (fa ++ f1, ba ++ b1)
+        let (ft, bt) := collectAddrTakenTerm blk.terminator.2
+        (fs2 ++ ft, bs2 ++ bt)
+    | _ => (fs, bs)
+
+private def registerBlockAddrs (dl : DataLayout) (cfg : SemanticsConfig)
+    (takenBlks : List GlobalId) (fnName : FunctionId) :
     List Block → MemoryState → Except ExecError MemoryState
   | [], mem => .ok mem
   | blk :: rest, mem =>
     let key := blockAddrKey fnName blk.id
-    match mem.allocate dl cfg 7 8 key.ToString dl.programAddrSpace .zeroed .func true with
-    | .error e => .error e
-    | .ok (obj, mem') =>
-      let ptr := MemoryState.derivePointer dl obj
-      registerBlockAddrs dl cfg fnName rest (mem'.insertFuncAddr key obj.baseAddr ptr)
+    if takenBlks.contains key then
+      match mem.allocate dl cfg 0 1 key.ToString dl.programAddrSpace .zeroed .func true with
+      | .error e => .error e
+      | .ok (obj, mem') =>
+        let ptr := MemoryState.derivePointer dl obj
+        registerBlockAddrs dl cfg takenBlks fnName rest (mem'.insertFuncAddr key obj.baseAddr ptr)
+    else
+      registerBlockAddrs dl cfg takenBlks fnName rest mem
 
-private theorem registerBlockAddrs_wf {dl cfg fnName blks mem mem'}
+private theorem registerBlockAddrs_wf {dl cfg takenBlks fnName blks mem mem'}
     (hwf : MemoryState.WellFormed mem)
-    (h : registerBlockAddrs dl cfg fnName blks mem = .ok mem') :
+    (h : registerBlockAddrs dl cfg takenBlks fnName blks mem = .ok mem') :
     MemoryState.WellFormed mem' := by
   induction blks generalizing mem with
   | nil => unfold registerBlockAddrs at h; cases h; exact hwf
   | cons blk rest ih =>
     unfold registerBlockAddrs at h
     dsimp only at h
-    cases ha : mem.allocate dl cfg 7 8 (blockAddrKey fnName blk.id).ToString dl.programAddrSpace .zeroed .func true with
-    | error e => rw [ha] at h; cases h
-    | ok p =>
-      rw [ha] at h; obtain ⟨obj, m1⟩ := p
-      exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
+    split at h
+    · cases ha : mem.allocate dl cfg 0 1 (blockAddrKey fnName blk.id).ToString dl.programAddrSpace .zeroed .func true with
+      | error e => rw [ha] at h; cases h
+      | ok p =>
+        rw [ha] at h; obtain ⟨obj, m1⟩ := p
+        exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
+    · exact ih hwf h
 
-private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig) :
+private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
+    (takenFns takenBlks : List GlobalId) :
     List TopLevelEntity → MemoryState → AssocMap FunctionId Definition → AssocMap FunctionId Declaration →
     Except ExecError (MemoryState × AssocMap FunctionId Definition × AssocMap FunctionId Declaration)
   | [], mem, fns, decls => .ok (mem, fns, decls)
   | ent :: rest, mem, fns, decls =>
     match ent with
     | .declaration decl =>
-      match mem.allocate dl cfg 7 8 decl.name.ToString dl.programAddrSpace .zeroed .func true with
-      | .error e => .error e
-      | .ok (obj, mem') =>
-        let ptr := MemoryState.derivePointer dl obj
-        let mem'' := mem'.insertFuncAddr decl.name obj.baseAddr ptr
-        initModulePass1 dl cfg rest mem'' fns (decls.insert decl.name decl)
-    | .definition defn =>
-      match mem.allocate dl cfg 7 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
-      | .error e => .error e
-      | .ok (obj, mem') =>
-        let ptr := MemoryState.derivePointer dl obj
-        let mem'' := mem'.insertFuncAddr defn.prototype.name obj.baseAddr ptr
-        match registerBlockAddrs dl cfg defn.prototype.name defn.blocks mem'' with
+      if takenFns.contains decl.name then
+        match mem.allocate dl cfg 0 8 decl.name.ToString dl.programAddrSpace .zeroed .func true with
         | .error e => .error e
-        | .ok mem''' => initModulePass1 dl cfg rest mem''' (fns.insert defn.prototype.name defn) decls
+        | .ok (obj, mem') =>
+          let ptr := MemoryState.derivePointer dl obj
+          let mem'' := mem'.insertFuncAddr decl.name obj.baseAddr ptr
+          initModulePass1 dl cfg takenFns takenBlks rest mem'' fns (decls.insert decl.name decl)
+      else
+        initModulePass1 dl cfg takenFns takenBlks rest mem fns (decls.insert decl.name decl)
+    | .definition defn =>
+      let afterFn : Except ExecError MemoryState :=
+        if takenFns.contains defn.prototype.name then
+          match mem.allocate dl cfg 0 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+          | .error e => .error e
+          | .ok (obj, mem') =>
+            let ptr := MemoryState.derivePointer dl obj
+            .ok (mem'.insertFuncAddr defn.prototype.name obj.baseAddr ptr)
+        else .ok mem
+      match afterFn with
+      | .error e => .error e
+      | .ok mem'' =>
+        match registerBlockAddrs dl cfg takenBlks defn.prototype.name defn.blocks mem'' with
+        | .error e => .error e
+        | .ok mem''' => initModulePass1 dl cfg takenFns takenBlks rest mem''' (fns.insert defn.prototype.name defn) decls
     | .global gv =>
       let size := dl.typeAllocSize gv.ty
-      let effAlign := max 8 (gv.align.getD (dl.typeABIAlign gv.ty))
+      let effAlign := gv.align.getD (dl.typePrefAlign gv.ty)
       let initKind := if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized
       match mem.allocate dl cfg size effAlign gv.name.ToString gv.addrSpace initKind .global gv.isConstant with
       | .error e => .error e
       | .ok (obj, mem') =>
         let ptr := MemoryState.derivePointer dl obj
         let mem'' := mem'.insertGlobalAddr gv.name ptr
-        initModulePass1 dl cfg rest mem'' fns decls
-    | .typeDef _ _ => initModulePass1 dl cfg rest mem fns decls
+        initModulePass1 dl cfg takenFns takenBlks rest mem'' fns decls
+    | .typeDef _ _ => initModulePass1 dl cfg takenFns takenBlks rest mem fns decls
 
 private def initModulePass2 (dl : DataLayout) (cfg : SemanticsConfig) :
     List TopLevelEntity → MemoryState → OracleState →
@@ -1950,16 +2111,17 @@ def initModuleExec (mod : TopLevel) (cfg : SemanticsConfig := .modern)
   match mod.resolveTypes with
   | .error msg => .error (.staticError msg)
   | .ok resolvedMod =>
-    match initModulePass1 dl cfg resolvedMod.entities {} ∅ ∅ with
+    let (takenFns, takenBlks) := collectAddrTaken resolvedMod.entities
+    match initModulePass1 dl cfg takenFns takenBlks resolvedMod.entities {} ∅ ∅ with
     | .error e => .error e
     | .ok (mem1, fns, decls) =>
       match initModulePass2 dl cfg resolvedMod.entities mem1 oracle with
       | .error e => .error e
       | .ok (mem2, o2) => .ok (mem2, fns, decls, o2)
 
-private theorem initModulePass1_wf {dl cfg ents mem fns decls mem' fns' decls'}
+private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls mem' fns' decls'}
     (hwf : MemoryState.WellFormed mem)
-    (h : initModulePass1 dl cfg ents mem fns decls = .ok (mem', fns', decls')) :
+    (h : initModulePass1 dl cfg takenFns takenBlks ents mem fns decls = .ok (mem', fns', decls')) :
     MemoryState.WellFormed mem' := by
   induction ents generalizing mem fns decls with
   | nil => unfold initModulePass1 at h; cases h; exact hwf
@@ -1968,26 +2130,38 @@ private theorem initModulePass1_wf {dl cfg ents mem fns decls mem' fns' decls'}
     cases ent with
     | declaration decl =>
       dsimp only at h
-      cases ha : mem.allocate dl cfg 7 8 decl.name.ToString dl.programAddrSpace .zeroed .func true with
-      | error e => rw [ha] at h; cases h
-      | ok p =>
-        rw [ha] at h; obtain ⟨obj, m1⟩ := p
-        exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
+      split at h
+      · cases ha : mem.allocate dl cfg 0 8 decl.name.ToString dl.programAddrSpace .zeroed .func true with
+        | error e => rw [ha] at h; cases h
+        | ok p =>
+          rw [ha] at h; obtain ⟨obj, m1⟩ := p
+          exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
+      · exact ih hwf h
     | definition defn =>
       dsimp only at h
-      cases ha : mem.allocate dl cfg 7 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
-      | error e => rw [ha] at h; cases h
-      | ok p =>
-        rw [ha] at h; obtain ⟨obj, m1⟩ := p; dsimp only at h
-        have hwf1 := MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha)
-          defn.prototype.name obj.baseAddr (MemoryState.derivePointer dl obj)
-        cases hb : registerBlockAddrs dl cfg defn.prototype.name defn.blocks
-            (m1.insertFuncAddr defn.prototype.name obj.baseAddr (MemoryState.derivePointer dl obj)) with
+      have hwfAfter : ∀ m2, ((if takenFns.contains defn.prototype.name then
+            match mem.allocate dl cfg 0 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+            | .error e => .error e
+            | .ok (obj, mem') => .ok (mem'.insertFuncAddr defn.prototype.name obj.baseAddr (MemoryState.derivePointer dl obj))
+          else .ok mem) : Except ExecError MemoryState) = .ok m2 → MemoryState.WellFormed m2 := by
+        intro m2 hm2
+        split at hm2
+        · cases ha : mem.allocate dl cfg 0 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+          | error e => rw [ha] at hm2; cases hm2
+          | ok p =>
+            rw [ha] at hm2; obtain ⟨obj, m1⟩ := p; cases hm2
+            exact MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _
+        · cases hm2; exact hwf
+      split at h
+      · cases h
+      · rename_i m2 hm2
+        have hwf1 := hwfAfter m2 hm2
+        cases hb : registerBlockAddrs dl cfg takenBlks defn.prototype.name defn.blocks m2 with
         | error e => rw [hb] at h; cases h
-        | ok m2 => rw [hb] at h; exact ih (registerBlockAddrs_wf hwf1 hb) h
+        | ok m3 => rw [hb] at h; exact ih (registerBlockAddrs_wf hwf1 hb) h
     | global gv =>
       dsimp only at h
-      cases ha : mem.allocate dl cfg (dl.typeAllocSize gv.ty) (max 8 (gv.align.getD (dl.typeABIAlign gv.ty)))
+      cases ha : mem.allocate dl cfg (dl.typeAllocSize gv.ty) (gv.align.getD (dl.typePrefAlign gv.ty))
           gv.name.ToString gv.addrSpace
           (if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized)
           .global gv.isConstant with
@@ -2041,7 +2215,7 @@ theorem initModuleExec_wf {mod cfg dl oracle mem fns decls o'}
   | error msg => rw [hres] at h; cases h
   | ok rmod =>
     rw [hres] at h; dsimp only at h
-    cases h1 : initModulePass1 dl cfg rmod.entities {} ∅ ∅ with
+    cases h1 : initModulePass1 dl cfg (collectAddrTaken rmod.entities).1 (collectAddrTaken rmod.entities).2 rmod.entities {} ∅ ∅ with
     | error e => rw [h1] at h; cases h
     | ok p1 =>
       rw [h1] at h; obtain ⟨m1, fns1, decls1⟩ := p1; dsimp only at h

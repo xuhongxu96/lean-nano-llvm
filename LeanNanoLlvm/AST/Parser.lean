@@ -557,7 +557,32 @@ def parseValueAttrs (fuel : Nat) : ParseM (List ValueAttr) := do
       attrs := .sret ty :: attrs
     | .ident "nofpclass" =>
       let _ ← bump
-      skipParenGroup fuel
+      if ← tryEat .lparen then
+        let mut mask : Nat := 0
+        let mut g := 32
+        while !(← tryEat .rparen) && g > 0 do
+          g := g - 1
+          match ← bump with
+          | .ident "snan" => mask := mask ||| 1
+          | .ident "qnan" => mask := mask ||| 2
+          | .ident "nan" => mask := mask ||| 3
+          | .ident "ninf" => mask := mask ||| 4
+          | .ident "nnorm" => mask := mask ||| 8
+          | .ident "nsub" => mask := mask ||| 16
+          | .ident "nzero" => mask := mask ||| 32
+          | .ident "pzero" => mask := mask ||| 64
+          | .ident "psub" => mask := mask ||| 128
+          | .ident "pnorm" => mask := mask ||| 256
+          | .ident "pinf" => mask := mask ||| 512
+          | .ident "inf" => mask := mask ||| 516
+          | .ident "norm" => mask := mask ||| 264
+          | .ident "sub" => mask := mask ||| 144
+          | .ident "zero" => mask := mask ||| 96
+          | .ident "all" => mask := mask ||| 1023
+          | .intLit n => mask := mask ||| n.toNat
+          | .eof => g := 0
+          | _ => pure ()
+        attrs := .nofpclass mask :: attrs
     -- Common LLVM attributes that do not change value semantics here
     | .ident "signext" | .ident "zeroext" | .ident "inreg" | .ident "nocapture"
     | .ident "nofree" | .ident "writeonly" | .ident "readnone" | .ident "returned"
@@ -795,6 +820,60 @@ def parseExp : Nat → ParseM Exp
       let v2 ← parseExp fuel
       expect .rparen "sub constexpr"
       return .binConst (.sub (nuw || nuw2) nsw) ty v1 v2
+    | .ident "mul" =>
+      let nuw ← tryEatIdent "nuw"; let nsw ← tryEatIdent "nsw"; let nuw2 ← tryEatIdent "nuw"
+      expect .lparen "mul constexpr"
+      let ty ← parseType fuel; let v1 ← parseExp fuel
+      expect .comma "mul constexpr"
+      let _ ← parseType fuel; let v2 ← parseExp fuel
+      expect .rparen "mul constexpr"
+      return .binConst (.mul (nuw || nuw2) nsw) ty v1 v2
+    | .ident "shl" =>
+      let nuw ← tryEatIdent "nuw"; let nsw ← tryEatIdent "nsw"; let nuw2 ← tryEatIdent "nuw"
+      expect .lparen "shl constexpr"
+      let ty ← parseType fuel; let v1 ← parseExp fuel
+      expect .comma "shl constexpr"
+      let _ ← parseType fuel; let v2 ← parseExp fuel
+      expect .rparen "shl constexpr"
+      return .binConst (.shl (nuw || nuw2) nsw) ty v1 v2
+    | .ident "lshr" =>
+      let ex ← tryEatIdent "exact"
+      expect .lparen "lshr constexpr"
+      let ty ← parseType fuel; let v1 ← parseExp fuel
+      expect .comma "lshr constexpr"
+      let _ ← parseType fuel; let v2 ← parseExp fuel
+      expect .rparen "lshr constexpr"
+      return .binConst (.lshr ex) ty v1 v2
+    | .ident "ashr" =>
+      let ex ← tryEatIdent "exact"
+      expect .lparen "ashr constexpr"
+      let ty ← parseType fuel; let v1 ← parseExp fuel
+      expect .comma "ashr constexpr"
+      let _ ← parseType fuel; let v2 ← parseExp fuel
+      expect .rparen "ashr constexpr"
+      return .binConst (.ashr ex) ty v1 v2
+    | .ident "and" =>
+      expect .lparen "and constexpr"
+      let ty ← parseType fuel; let v1 ← parseExp fuel
+      expect .comma "and constexpr"
+      let _ ← parseType fuel; let v2 ← parseExp fuel
+      expect .rparen "and constexpr"
+      return .binConst .and ty v1 v2
+    | .ident "or" =>
+      let disj ← tryEatIdent "disjoint"
+      expect .lparen "or constexpr"
+      let ty ← parseType fuel; let v1 ← parseExp fuel
+      expect .comma "or constexpr"
+      let _ ← parseType fuel; let v2 ← parseExp fuel
+      expect .rparen "or constexpr"
+      return .binConst (.or disj) ty v1 v2
+    | .ident "xor" =>
+      expect .lparen "xor constexpr"
+      let ty ← parseType fuel; let v1 ← parseExp fuel
+      expect .comma "xor constexpr"
+      let _ ← parseType fuel; let v2 ← parseExp fuel
+      expect .rparen "xor constexpr"
+      return .binConst .xor ty v1 v2
     | .ident "trunc" =>
       let _ ← tryEatIdent "nuw"; let _ ← tryEatIdent "nsw"
       expect .lparen "trunc constexpr"
@@ -848,6 +927,35 @@ def parseExp : Nat → ParseM Exp
       let idxE ← parseExp fuel
       expect .rparen "insertelement constexpr"
       return .insertElemConst vecTy vecE elemTy elemE idxTy idxE
+    | .ident "extractelement" =>
+      expect .lparen "extractelement constexpr"
+      let vecTy ← parseType fuel
+      let vecE ← parseExp fuel
+      expect .comma "extractelement constexpr"
+      let idxTy ← parseType fuel
+      let idxE ← parseExp fuel
+      expect .rparen "extractelement constexpr"
+      return .extractElemConst vecTy vecE idxTy idxE
+    | .ident "shufflevector" =>
+      expect .lparen "shufflevector constexpr"
+      let vecTy ← parseType fuel
+      let v1 ← parseExp fuel
+      expect .comma "shufflevector constexpr"
+      let _ ← parseType fuel
+      let v2 ← parseExp fuel
+      expect .comma "shufflevector constexpr"
+      let maskTy ← parseType fuel
+      let maskExp ← parseExp fuel
+      expect .rparen "shufflevector constexpr"
+      let maskLen := match maskTy with | .vector n _ => n | _ => 1
+      let mask : List (Option Nat) := match maskExp with
+        | .vector es => es.map fun (_, e) => match e with | .int k => some k.toNat | _ => none
+        | .zeroinitializer => List.replicate maskLen (some 0)
+        | .poison | .undef => List.replicate maskLen none
+        | .splat (_, .int k) => List.replicate maskLen (some k.toNat)
+        | .splat _ => List.replicate maskLen none
+        | _ => []
+      return .shuffleVecConst vecTy v1 v2 mask
     | .ident "asm" =>
       -- Inline asm callee: `asm [sideeffect|alignstack|inteldialect|unwind]* "asm", "constraints"`
       let mut gAsm := 8

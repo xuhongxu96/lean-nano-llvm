@@ -657,14 +657,16 @@ def evalPureDetIntrinsic? (cfg : SemanticsConfig) (name : String) (retTy : LlvmR
   else if strHasPrefix name "llvm.experimental.cttz.elts" then
     some <| match argVals, retTy with
       | [.vector _ elems, .bv 1 (.value zpBV)], .ret (.int rw) =>
-        let isZeroPoison := zpBV == 1#1
-        let rec goCttz (idx : Nat) : List RegisterValue → RegisterValue
-          | [] => if isZeroPoison then .bv rw .poison else .bv rw (.value (BitVec.ofNat rw elems.length))
-          | e :: es =>
-            match e with
-            | .bv _ (.value b) => if b.toNat != 0 then .bv rw (.value (BitVec.ofNat rw idx)) else goCttz (idx + 1) es
-            | _ => .bv rw .poison
-        .ok (goCttz 0 elems)
+        if elems.any RegisterValue.isScalarPoison then .ok (.bv rw .poison)
+        else
+          let isZeroPoison := zpBV == 1#1
+          let rec goCttz (idx : Nat) : List RegisterValue → RegisterValue
+            | [] => if isZeroPoison then .bv rw .poison else .bv rw (.value (BitVec.ofNat rw elems.length))
+            | e :: es =>
+              match e with
+              | .bv _ (.value b) => if b.toNat != 0 then .bv rw (.value (BitVec.ofNat rw idx)) else goCttz (idx + 1) es
+              | _ => .bv rw .poison
+          .ok (goCttz 0 elems)
       | [_, _], .ret (.int rw) => .ok (.bv rw .poison)
       | _, _ => .error (.staticError "llvm.experimental.cttz.elts expects (vector, i1)")
   else if strHasPrefix name "llvm.experimental.get.vector.length" then
@@ -1353,7 +1355,7 @@ private def evalPrintfSpec (dl : DataLayout) (rest : List Char) (args : List Reg
       | arg :: restArgs =>
         match arg with
         | .float _ .poison => .error (.immediateUB "Poison argument passed to printf")
-        | .float _ (.value flt) =>
+        | .float .double (.value flt) =>
           let formatted := formatPrintfFloat flt spec
           .ok (tail, restArgs, none, written + formatted.length)
         | _ => .error (.immediateUB s!"Argument type mismatch in printf for format specifier '{spec}'")
@@ -1585,9 +1587,18 @@ theorem evalNonAllocLibcall?_preserves_wf {dl mem name argVals res mem'}
                     · cases h
                     · cases h
 
-/-- Add a signed byte offset to a pointer, preserving provenance and address width. -/
-private def ptrAddBytes (p : Pointer) (delta : Int) : Pointer :=
-  { p with addr := p.addr + BitVec.ofInt p.addrWidth delta }
+/-- Add a signed byte offset to a pointer, wrapping at the DataLayout index width. -/
+private def ptrAddBytes (dl : DataLayout) (p : Pointer) (delta : Int) : Pointer :=
+  let idxW := dl.getIndexSizeInBits 0
+  let oldIdx : BitVec idxW := p.addr.truncate idxW
+  let newIdx := oldIdx + BitVec.ofInt idxW delta
+  let highBits : Nat := (p.addr.toNat >>> idxW) <<< idxW
+  { p with addr := BitVec.ofNat p.addrWidth (highBits ||| newIdx.toNat) }
+
+private def getArgAlign? (argAttrs : List (List ValueAttr)) (idx : Nat) : Option Nat :=
+  (argAttrs.getD idx []).findSome? fun
+    | .align a => some a
+    | _ => none
 
 /-- Load a single element of type `elemTy` from pointer `p` with alignment `align`. -/
 private def loadElemFromPtr (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
@@ -1687,49 +1698,56 @@ private theorem execHistogramLoop_preserves_wf {dl cfg op w incVal mem ptrs mem'
 
 /-- Read-only vector/masked/VP/speculative memory load intrinsics (never modify `mem`). -/
 def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
-    (name : String) (retTy : LlvmRetType) (argVals : List RegisterValue) (o : OracleState) :
+    (name : String) (retTy : LlvmRetType) (argVals : List RegisterValue) (o : OracleState)
+    (argAttrs : List (List ValueAttr) := []) :
     Option (Except ExecError (RegisterValue × OracleState)) :=
   if strHasPrefix name "llvm.masked.load" then
     some <| match argVals, retTy with
       | [ptrVal, .vector _ mask, .vector elemTy passthru], .ret (.vector len _) =>
-        let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
-        let rec goLoad (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
-            Except ExecError (List RegisterValue × OracleState) :=
-          if i ≥ len then .ok (acc.reverse, o0)
-          else match mask.getD i (.bv 1 .poison) with
-            | .bv 1 (.value b) =>
-              if b == 1#1 then
-                match ptrVal with
-                | .ptr _ (.value p) =>
-                  match loadElemFromPtr dl cfg mem (ptrAddBytes p (Int.ofNat i * stride)) elemTy 1 o0 with
-                  | .error e => .error e
-                  | .ok (v, o1) => goLoad (i + 1) o1 (v :: acc)
-                | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.load")
-              else goLoad (i + 1) o0 (passthru.getD i (poisonOf elemTy) :: acc)
-            | _ => .error (.immediateUB "poison mask lane in llvm.masked.load")
-        termination_by len - i
-        (goLoad 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
+        if dl.typeSizeInBits elemTy % 8 != 0 then
+          .error (.staticError s!"{name} with non-byte-sized element type is not supported")
+        else
+          let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
+          let rec goLoad (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
+              Except ExecError (List RegisterValue × OracleState) :=
+            if i ≥ len then .ok (acc.reverse, o0)
+            else match mask.getD i (.bv 1 .poison) with
+              | .bv 1 (.value b) =>
+                if b == 1#1 then
+                  match ptrVal with
+                  | .ptr _ (.value p) =>
+                    match loadElemFromPtr dl cfg mem (ptrAddBytes dl p (Int.ofNat i * stride)) elemTy 1 o0 with
+                    | .error e => .error e
+                    | .ok (v, o1) => goLoad (i + 1) o1 (v :: acc)
+                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.load")
+                else goLoad (i + 1) o0 (passthru.getD i (poisonOf elemTy) :: acc)
+              | _ => .error (.immediateUB "poison mask lane in llvm.masked.load")
+          termination_by len - i
+          (goLoad 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
       | _, _ => .error (.staticError "llvm.masked.load expects (ptr, mask, passthru)")
   else if strHasPrefix name "llvm.masked.expandload" then
     some <| match argVals, retTy with
       | [ptrVal, .vector _ mask, .vector elemTy passthru], .ret (.vector len _) =>
-        let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
-        let rec goExpand (i memIdx : Nat) (o0 : OracleState) (acc : List RegisterValue) :
-            Except ExecError (List RegisterValue × OracleState) :=
-          if i ≥ len then .ok (acc.reverse, o0)
-          else match mask.getD i (.bv 1 .poison) with
-            | .bv 1 (.value b) =>
-              if b == 1#1 then
-                match ptrVal with
-                | .ptr _ (.value p) =>
-                  match loadElemFromPtr dl cfg mem (ptrAddBytes p (Int.ofNat memIdx * stride)) elemTy 1 o0 with
-                  | .error e => .error e
-                  | .ok (v, o1) => goExpand (i + 1) (memIdx + 1) o1 (v :: acc)
-                | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.expandload")
-              else goExpand (i + 1) memIdx o0 (passthru.getD i (poisonOf elemTy) :: acc)
-            | _ => .error (.immediateUB "poison mask lane in llvm.masked.expandload")
-        termination_by len - i
-        (goExpand 0 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
+        if dl.typeSizeInBits elemTy % 8 != 0 then
+          .error (.staticError s!"{name} with non-byte-sized element type is not supported")
+        else
+          let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
+          let rec goExpand (i memIdx : Nat) (o0 : OracleState) (acc : List RegisterValue) :
+              Except ExecError (List RegisterValue × OracleState) :=
+            if i ≥ len then .ok (acc.reverse, o0)
+            else match mask.getD i (.bv 1 .poison) with
+              | .bv 1 (.value b) =>
+                if b == 1#1 then
+                  match ptrVal with
+                  | .ptr _ (.value p) =>
+                    match loadElemFromPtr dl cfg mem (ptrAddBytes dl p (Int.ofNat memIdx * stride)) elemTy 1 o0 with
+                    | .error e => .error e
+                    | .ok (v, o1) => goExpand (i + 1) (memIdx + 1) o1 (v :: acc)
+                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.expandload")
+                else goExpand (i + 1) memIdx o0 (passthru.getD i (poisonOf elemTy) :: acc)
+              | _ => .error (.immediateUB "poison mask lane in llvm.masked.expandload")
+          termination_by len - i
+          (goExpand 0 0 o []).map fun (vs, o') => (.vector elemTy vs, o')
       | _, _ => .error (.staticError "llvm.masked.expandload expects (ptr, mask, passthru)")
   else if strHasPrefix name "llvm.masked.gather" then
     some <| match argVals, retTy with
@@ -1757,6 +1775,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
         let evl := evlBV.toNat
         if evl > len then .error (.immediateUB "evl exceeds vector length in llvm.vp.load")
         else
+          let baseReqAlign := (getArgAlign? argAttrs 0).getD (dl.typeABIAlign (.vector len elemTy))
           let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
           let rec goVpLoad (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
               Except ExecError (List RegisterValue × OracleState) :=
@@ -1767,9 +1786,12 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                 if b == 1#1 then
                   match ptrVal with
                   | .ptr _ (.value p) =>
-                    match loadElemFromPtr dl cfg mem (ptrAddBytes p (Int.ofNat i * stride)) elemTy 1 o0 with
-                    | .error e => .error e
-                    | .ok (v, o1) => goVpLoad (i + 1) o1 (v :: acc)
+                    if baseReqAlign > 1 && p.addr.toNat % baseReqAlign != 0 then
+                      .error (.immediateUB "Misaligned pointer in llvm.vp.load")
+                    else
+                      match loadElemFromPtr dl cfg mem (ptrAddBytes dl p (Int.ofNat i * stride)) elemTy 1 o0 with
+                      | .error e => .error e
+                      | .ok (v, o1) => goVpLoad (i + 1) o1 (v :: acc)
                   | _ => .error (.immediateUB "poison/invalid pointer in llvm.vp.load")
                 else goVpLoad (i + 1) o0 (poisonOf elemTy :: acc)
               | _ => .error (.immediateUB "poison mask lane in llvm.vp.load")
@@ -1783,6 +1805,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
         let evl := evlBV.toNat
         if evl > len then .error (.immediateUB "evl exceeds vector length in llvm.vp.gather")
         else
+          let laneReqAlign := (getArgAlign? argAttrs 0).getD (dl.typeABIAlign elemTy)
           let rec goVpGather (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
               Except ExecError (List RegisterValue × OracleState) :=
             if i ≥ len then .ok (acc.reverse, o0)
@@ -1792,7 +1815,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                 if b == 1#1 then
                   match ptrs.getD i (.ptr 0 .poison) with
                   | .ptr _ (.value p) =>
-                    match loadElemFromPtr dl cfg mem p elemTy 1 o0 with
+                    match loadElemFromPtr dl cfg mem p elemTy laneReqAlign o0 with
                     | .error e => .error e
                     | .ok (v, o1) => goVpGather (i + 1) o1 (v :: acc)
                   | _ => .error (.immediateUB "poison/invalid pointer in llvm.vp.gather")
@@ -1808,6 +1831,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
         let evl := evlBV.toNat
         if evl > len then .error (.immediateUB "evl exceeds vector length in llvm.experimental.vp.strided.load")
         else
+          let baseReqAlign := (getArgAlign? argAttrs 0).getD (dl.typeABIAlign elemTy)
           let strideOpt : Option Int := match strideVal with
             | .bv _ (.value bv) => some bv.toInt
             | _ => none
@@ -1820,17 +1844,20 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                 if b == 1#1 then
                   match ptrVal with
                   | .ptr _ (.value p) =>
-                    let lanePtr? : Except ExecError Pointer :=
-                      if i == 0 then .ok p
-                      else match strideOpt with
-                        | some stride => .ok (ptrAddBytes p (Int.ofNat i * stride))
-                        | none => .error (.immediateUB "poison stride in llvm.experimental.vp.strided.load")
-                    match lanePtr? with
-                    | .error e => .error e
-                    | .ok lp =>
-                      match loadElemFromPtr dl cfg mem lp elemTy 1 o0 with
+                    if baseReqAlign > 1 && p.addr.toNat % baseReqAlign != 0 then
+                      .error (.immediateUB "Misaligned pointer in llvm.experimental.vp.strided.load")
+                    else
+                      let lanePtr? : Except ExecError Pointer :=
+                        if i == 0 then .ok p
+                        else match strideOpt with
+                          | some stride => .ok (ptrAddBytes dl p (Int.ofNat i * stride))
+                          | none => .error (.immediateUB "poison stride in llvm.experimental.vp.strided.load")
+                      match lanePtr? with
                       | .error e => .error e
-                      | .ok (v, o1) => goVpStrided (i + 1) o1 (v :: acc)
+                      | .ok lp =>
+                        match loadElemFromPtr dl cfg mem lp elemTy 1 o0 with
+                        | .error e => .error e
+                        | .ok (v, o1) => goVpStrided (i + 1) o1 (v :: acc)
                   | _ => .error (.immediateUB "poison/invalid pointer in llvm.experimental.vp.strided.load")
                 else goVpStrided (i + 1) o0 (poisonOf elemTy :: acc)
               | _ => .error (.immediateUB "poison mask lane in llvm.experimental.vp.strided.load")
@@ -1858,7 +1885,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
             .ok (v, o')
           else
             let startOff := if isRev then totalSz - bound else 0
-            match mem.verifyMemAccess (ptrAddBytes p (Int.ofNat startOff)) bound 1 false with
+            match mem.verifyMemAccess (ptrAddBytes dl p (Int.ofNat startOff)) bound 1 false with
             | .error e => .error e
             | .ok (mo, objOff) =>
               let liveBytes := MemoryState.readObjectBytes mo objOff bound
@@ -1877,9 +1904,9 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
   else
     none
 
-private theorem evalVecMemRead?_none_indep {dl cfg mem name retTy argVals o o'}
-    (h : evalVecMemRead? dl cfg mem name retTy argVals o = none) :
-    evalVecMemRead? dl cfg mem name retTy argVals o' = none := by
+private theorem evalVecMemRead?_none_indep {dl cfg mem name retTy argVals o o' argAttrs}
+    (h : evalVecMemRead? dl cfg mem name retTy argVals o argAttrs = none) :
+    evalVecMemRead? dl cfg mem name retTy argVals o' argAttrs = none := by
   have ite_none : ∀ {α : Type} {c : Prop} [Decidable c] {a : α} {b : Option α},
       (if c then some a else b) = none → ¬ c ∧ b = none := by
     intro α c _ a b h0; by_cases hc : c
@@ -1890,7 +1917,8 @@ private theorem evalVecMemRead?_none_indep {dl cfg mem name retTy argVals o o'}
 
 /-- Collect active `(Pointer, RegisterValue)` writes for masked/VP/strided/matrix stores. -/
 private def collectMaskedWrites (dl : DataLayout) (elemTy : LlvmType) (ptrVal : RegisterValue)
-    (vals mask : List RegisterValue) (evl : Nat) (stride : Int) (compress : Bool) :
+    (vals mask : List RegisterValue) (evl : Nat) (stride : Int) (compress : Bool)
+    (baseReqAlign : Nat := 1) :
     Except ExecError (List (Pointer × RegisterValue)) :=
   let rec go (i memIdx : Nat) (acc : List (Pointer × RegisterValue)) :
       Except ExecError (List (Pointer × RegisterValue)) :=
@@ -1900,14 +1928,16 @@ private def collectMaskedWrites (dl : DataLayout) (elemTy : LlvmType) (ptrVal : 
         if b == 1#1 then
           match ptrVal with
           | .ptr _ (.value p) =>
-            let idx := if compress then memIdx else i
-            let p' := ptrAddBytes p (Int.ofNat idx * stride)
-            go (i + 1) (memIdx + 1) ((p', vals.getD i (poisonOf elemTy)) :: acc)
+            if baseReqAlign > 1 && p.addr.toNat % baseReqAlign != 0 then
+              .error (.immediateUB "Misaligned pointer in masked/vp store")
+            else
+              let idx := if compress then memIdx else i
+              let p' := ptrAddBytes dl p (Int.ofNat idx * stride)
+              go (i + 1) (memIdx + 1) ((p', vals.getD i (poisonOf elemTy)) :: acc)
           | _ => .error (.immediateUB "poison/invalid pointer in masked/vp store")
         else go (i + 1) memIdx acc
       | _ => .error (.immediateUB "poison mask lane in masked/vp store")
   termination_by evl - i
-  let _ := dl
   go 0 0 []
 
 /-- Collect active `(Pointer, RegisterValue)` writes for masked/VP scatter. -/
@@ -1930,15 +1960,19 @@ private def collectScatterWrites (elemTy : LlvmType) (vals ptrs mask : List Regi
 
 /-- Vector/masked/VP/matrix/histogram memory store intrinsics (oracle-independent). -/
 def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
-    (name : String) (argVals : List RegisterValue) : Option (Except ExecError MemoryState) :=
+    (name : String) (argVals : List RegisterValue)
+    (argAttrs : List (List ValueAttr) := []) : Option (Except ExecError MemoryState) :=
   if strHasPrefix name "llvm.masked.store" || strHasPrefix name "llvm.masked.compressstore" then
     some <| match argVals with
       | [.vector elemTy vals, ptrVal, .vector _ mask] =>
-        let compress := strHasPrefix name "llvm.masked.compressstore"
-        let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
-        match collectMaskedWrites dl elemTy ptrVal vals mask vals.length stride compress with
-        | .error e => .error e
-        | .ok ws => execStoreList dl cfg elemTy 1 mem ws
+        if dl.typeSizeInBits elemTy % 8 != 0 then
+          .error (.staticError s!"{name} with non-byte-sized element type is not supported")
+        else
+          let compress := strHasPrefix name "llvm.masked.compressstore"
+          let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
+          match collectMaskedWrites dl elemTy ptrVal vals mask vals.length stride compress with
+          | .error e => .error e
+          | .ok ws => execStoreList dl cfg elemTy 1 mem ws
       | _ => .error (.staticError s!"{name} expects (val, ptr, mask)")
   else if strHasPrefix name "llvm.masked.scatter" then
     some <| match argVals with
@@ -1953,8 +1987,9 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
         let evl := evlBV.toNat
         if evl > vals.length then .error (.immediateUB "evl exceeds vector length in llvm.vp.store")
         else
+          let baseReqAlign := (getArgAlign? argAttrs 1).getD (dl.typeABIAlign (.vector vals.length elemTy))
           let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
-          match collectMaskedWrites dl elemTy ptrVal vals mask evl stride false with
+          match collectMaskedWrites dl elemTy ptrVal vals mask evl stride false baseReqAlign with
           | .error e => .error e
           | .ok ws => execStoreList dl cfg elemTy 1 mem ws
       | [_, _, _, .bv _ .poison] => .error (.immediateUB "poison evl in llvm.vp.store")
@@ -1965,9 +2000,10 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
         let evl := evlBV.toNat
         if evl > vals.length then .error (.immediateUB "evl exceeds vector length in llvm.vp.scatter")
         else
+          let laneReqAlign := (getArgAlign? argAttrs 1).getD (dl.typeABIAlign elemTy)
           match collectScatterWrites elemTy vals ptrs mask evl with
           | .error e => .error e
-          | .ok ws => execStoreList dl cfg elemTy 1 mem ws
+          | .ok ws => execStoreList dl cfg elemTy laneReqAlign mem ws
       | [_, _, _, .bv _ .poison] => .error (.immediateUB "poison evl in llvm.vp.scatter")
       | _ => .error (.staticError "llvm.vp.scatter expects (val, ptrs, mask, evl)")
   else if strHasPrefix name "llvm.experimental.vp.strided.store" then
@@ -1976,6 +2012,7 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
         let evl := evlBV.toNat
         if evl > vals.length then .error (.immediateUB "evl exceeds vector length in llvm.experimental.vp.strided.store")
         else
+          let baseReqAlign := (getArgAlign? argAttrs 1).getD (dl.typeABIAlign elemTy)
           let strideOpt : Option Int := match strideVal with
             | .bv _ (.value bv) => some bv.toInt
             | _ => none
@@ -1987,14 +2024,17 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
                 if b == 1#1 then
                   match ptrVal with
                   | .ptr _ (.value p) =>
-                    let lanePtr? : Except ExecError Pointer :=
-                      if i == 0 then .ok p
-                      else match strideOpt with
-                        | some stride => .ok (ptrAddBytes p (Int.ofNat i * stride))
-                        | none => .error (.immediateUB "poison stride in llvm.experimental.vp.strided.store")
-                    match lanePtr? with
-                    | .error e => .error e
-                    | .ok lp => collectStrided (i + 1) ((lp, vals.getD i (poisonOf elemTy)) :: acc)
+                    if baseReqAlign > 1 && p.addr.toNat % baseReqAlign != 0 then
+                      .error (.immediateUB "Misaligned pointer in llvm.experimental.vp.strided.store")
+                    else
+                      let lanePtr? : Except ExecError Pointer :=
+                        if i == 0 then .ok p
+                        else match strideOpt with
+                          | some stride => .ok (ptrAddBytes dl p (Int.ofNat i * stride))
+                          | none => .error (.immediateUB "poison stride in llvm.experimental.vp.strided.store")
+                      match lanePtr? with
+                      | .error e => .error e
+                      | .ok lp => collectStrided (i + 1) ((lp, vals.getD i (poisonOf elemTy)) :: acc)
                   | _ => .error (.immediateUB "poison/invalid pointer in llvm.experimental.vp.strided.store")
                 else collectStrided (i + 1) acc
               | _ => .error (.immediateUB "poison mask lane in llvm.experimental.vp.strided.store")
@@ -2015,12 +2055,21 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
         else if rows * cols == 0 then .ok mem
         else match ptrVal with
           | .ptr _ (.value p) =>
+            let idxW := dl.getIndexSizeInBits 0
+            let idxLimit := 1 <<< idxW
+            let strideIdx := stride % idxLimit
             let elemSz := dl.typeAllocSize elemTy
-            let ws := (List.range cols).flatMap fun c =>
-              (List.range rows).map fun r =>
-                (ptrAddBytes p (Int.ofNat ((c * stride + r) * elemSz)),
-                 vals.getD (c * rows + r) (poisonOf elemTy))
-            execStoreList dl cfg elemTy 1 mem ws
+            let overflowed := (List.range cols).any fun c =>
+              let colByteOff := c * strideIdx * elemSz
+              c > 0 && (colByteOff ≥ idxLimit || (p.addr.truncate idxW).toNat + colByteOff ≥ idxLimit)
+            if overflowed then
+              .error (.immediateUB "Invalid memory access with a poison pointer in llvm.matrix.column.major.store")
+            else
+              let ws := (List.range cols).flatMap fun c =>
+                (List.range rows).map fun r =>
+                  (ptrAddBytes dl p (Int.ofNat ((c * strideIdx + r) * elemSz)),
+                   vals.getD (c * rows + r) (poisonOf elemTy))
+              execStoreList dl cfg elemTy 1 mem ws
           | _ => .error (.immediateUB "poison/invalid pointer in llvm.matrix.column.major.store")
       | [_, _, .bv _ .poison, _, _, _] | [_, _, _, .bv 1 .poison, _, _] =>
         .error (.immediateUB "poison stride/volatile in llvm.matrix.column.major.store")
@@ -2051,17 +2100,18 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
   else
     none
 
-private theorem evalVecMemWrite?_preserves_wf {dl cfg mem name argVals mem'}
+private theorem evalVecMemWrite?_preserves_wf {dl cfg mem name argVals argAttrs mem'}
     (hwf : MemoryState.WellFormed mem)
-    (h : evalVecMemWrite? dl cfg mem name argVals = some (.ok mem')) :
+    (h : evalVecMemWrite? dl cfg mem name argVals argAttrs = some (.ok mem')) :
     MemoryState.WellFormed mem' := by
   unfold evalVecMemWrite? at h
   split at h
   · injection h with h; split at h
-    · dsimp only at h
-      cases hc : collectMaskedWrites dl _ _ _ _ _ _ _ with
-      | error e => rw [hc] at h; cases h
-      | ok ws => rw [hc] at h; exact execStoreList_preserves_wf hwf h
+    · dsimp only at h; split at h
+      · cases h
+      · cases hc : collectMaskedWrites dl _ _ _ _ _ _ _ _ with
+        | error e => rw [hc] at h; cases h
+        | ok ws => rw [hc] at h; exact execStoreList_preserves_wf hwf h
     · cases h
   · split at h
     · injection h with h; split at h
@@ -2073,7 +2123,7 @@ private theorem evalVecMemWrite?_preserves_wf {dl cfg mem name argVals mem'}
       · injection h with h; split at h
         · dsimp only at h; split at h
           · cases h
-          · cases hc : collectMaskedWrites dl _ _ _ _ _ _ _ with
+          · cases hc : collectMaskedWrites dl _ _ _ _ _ _ _ _ with
             | error e => rw [hc] at h; cases h
             | ok ws => rw [hc] at h; exact execStoreList_preserves_wf hwf h
         · cases h
@@ -2103,7 +2153,9 @@ private theorem evalVecMemWrite?_preserves_wf {dl cfg mem name argVals mem'}
                 · split at h
                   · cases h; exact hwf
                   · split at h
-                    · exact execStoreList_preserves_wf hwf h
+                    · split at h
+                      · cases h
+                      · exact execStoreList_preserves_wf hwf h
                     · cases h
               · cases h
               · cases h
@@ -2120,7 +2172,7 @@ private theorem evalVecMemWrite?_preserves_wf {dl cfg mem name argVals mem'}
 /-- Non-allocating memory & pure intrinsics/libcalls (shared between `Step` and `Exec`). -/
 def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
     (name : String) (retTy : LlvmRetType) (fmf : FastMathFlags) (argVals : List RegisterValue)
-    (o : OracleState) (allowLibcalls : Bool := true) :
+    (o : OracleState) (allowLibcalls : Bool := true) (argAttrs : List (List ValueAttr) := []) :
     Option (Except ExecError (RegisterValue × MemoryState × OracleState)) :=
   if strHasPrefix name "llvm.lifetime.start" then
     let mem' := match argVals.getLast? with
@@ -2145,10 +2197,10 @@ def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : 
       | dst :: val :: len :: _ => (execMemSetPure mem dst val len).map (fun m' => (.void, m', o))
       | _ => .error (.staticError "llvm.memset requires at least 3 arguments")
   else
-    match evalVecMemRead? dl cfg mem name retTy argVals o with
+    match evalVecMemRead? dl cfg mem name retTy argVals o argAttrs with
     | some r => some (r.map fun (v, o') => (v, mem, o'))
     | none =>
-      match evalVecMemWrite? dl cfg mem name argVals with
+      match evalVecMemWrite? dl cfg mem name argVals argAttrs with
       | some r => some (r.map fun m' => (.void, m', o))
       | none =>
         match (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
@@ -2157,9 +2209,9 @@ def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : 
           (evalPureIntrinsicExec? cfg name retTy fmf argVals o).map fun r =>
             r.map fun (v, o') => (v, mem, o')
 
-theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVals o allowLibcalls res mem' o'}
+theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVals o allowLibcalls argAttrs res mem' o'}
     (hwf : MemoryState.WellFormed mem)
-    (h : evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o allowLibcalls = some (.ok (res, mem', o'))) :
+    (h : evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o allowLibcalls argAttrs = some (.ok (res, mem', o'))) :
     MemoryState.WellFormed mem' := by
   unfold evalNonAllocIntrinsicExec? at h
   by_cases h1 : strHasPrefix name "llvm.lifetime.start" = true
@@ -2215,7 +2267,7 @@ theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVa
               | error e => rw [ht] at h; cases h
               | ok m1 => rw [ht] at h; cases h; exact execMemSetPure_preserves_wf hwf ht
           · rw [if_neg h5] at h
-            cases hvr : evalVecMemRead? dl cfg mem name retTy argVals o with
+            cases hvr : evalVecMemRead? dl cfg mem name retTy argVals o argAttrs with
             | some r =>
               rw [hvr] at h
               cases r with
@@ -2223,7 +2275,7 @@ theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVa
               | ok p => cases h; exact hwf
             | none =>
               rw [hvr] at h
-              cases hvw : evalVecMemWrite? dl cfg mem name argVals with
+              cases hvw : evalVecMemWrite? dl cfg mem name argVals argAttrs with
               | some r =>
                 rw [hvw] at h
                 cases r with
@@ -2269,21 +2321,21 @@ theorem evalPureIntrinsicExec?_none_indep {cfg name retTy fmf argVals o o'}
   | none => rfl
 
 /-- Whether `evalNonAllocIntrinsicExec?` recognizes a name is independent of the oracle. -/
-theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals o o' allowLibcalls}
-    (h : evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o allowLibcalls = none) :
-    evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o' allowLibcalls = none := by
+theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals o o' allowLibcalls argAttrs}
+    (h : evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o allowLibcalls argAttrs = none) :
+    evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o' allowLibcalls argAttrs = none := by
   unfold evalNonAllocIntrinsicExec? at h ⊢
   obtain ⟨hc1, h⟩ := ite_some_eq_none h; rw [if_neg hc1]
   obtain ⟨hc2, h⟩ := ite_some_eq_none h; rw [if_neg hc2]
   obtain ⟨hc3, h⟩ := ite_some_eq_none h; rw [if_neg hc3]
   obtain ⟨hc4, h⟩ := ite_some_eq_none h; rw [if_neg hc4]
   obtain ⟨hc5, h⟩ := ite_some_eq_none h; rw [if_neg hc5]
-  cases hvr : evalVecMemRead? dl cfg mem name retTy argVals o with
+  cases hvr : evalVecMemRead? dl cfg mem name retTy argVals o argAttrs with
   | some r => simp [hvr] at h
   | none =>
     rw [evalVecMemRead?_none_indep (o' := o') hvr]
     simp only [hvr] at h
-    cases hvw : evalVecMemWrite? dl cfg mem name argVals with
+    cases hvw : evalVecMemWrite? dl cfg mem name argVals argAttrs with
     | some r => simp [hvw] at h
     | none =>
       simp only [hvw] at h
