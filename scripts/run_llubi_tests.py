@@ -181,7 +181,24 @@ def decode_lean_float(ft: str, bits: int):
         else:
             val = ((-1.0) ** sign) * (2.0 ** (exp - 15)) * (1.0 + frac / 1024.0)
         return (False, False, bool(sign), val)
-    if ft == "fp128":
+    if ft == "x86_fp80":
+        sign = (bits >> 78) & 1
+        exp = (bits >> 63) & 0x7FFF
+        frac = bits & ((1 << 63) - 1)
+        if exp == 0x7FFF:
+            return (frac != 0, frac == 0, bool(sign), 0.0)
+        if exp == 0 and frac == 0:
+            return (False, False, bool(sign), -0.0 if sign else 0.0)
+        e = (exp - 16383) if exp != 0 else -16382
+        sig = (1.0 if exp != 0 else 0.0) + (frac / float(1 << 63))
+        try:
+            val = math.ldexp(sig, e)
+            if sign:
+                val = -val
+        except OverflowError:
+            val = float("-inf") if sign else float("inf")
+        return (False, False, bool(sign), val)
+    if ft in ("fp128", "ppc_fp128"):
         sign = (bits >> 127) & 1
         exp = (bits >> 112) & 0x7FFF
         frac = bits & ((1 << 112) - 1)
@@ -202,6 +219,52 @@ def decode_lean_float(ft: str, bits: int):
     return None
 
 
+def parse_llubi_byte_val(s: str):
+    """Parse llubi `b<w> <tokens>` into (w, list_of_byte_bitstrings) where each char is 0/1/!/?."""
+    m = re.match(r"^b(\d+)\s+(.+)$", s.strip())
+    if not m:
+        return None
+    w = int(m.group(1))
+    rest = m.group(2).strip()
+    # Replace `ptr 0x... [...]` with a placeholder token
+    rest = re.sub(r"ptr\s+0x[0-9a-fA-F]+(?:\s+\[[^\]]*\])?", "PTR64", rest)
+    chunks = []
+    for tok in rest.split():
+        if tok == "PTR64":
+            # 64 concrete non-poison bits (address may differ between allocators)
+            chunks.append("?" * 64)
+        elif tok == "0x!!":
+            chunks.append("!" * 8)
+        elif re.match(r"^0x[0-9a-fA-F]{2}$", tok):
+            chunks.append(format(int(tok[2:], 16), "08b"))
+        else:
+            # e.g. `00001000(00111110)` or `!!!!0101` or `1101`
+            tm = re.match(r"^([01!]+)(?:\(([01!]+)\))?$", tok)
+            if not tm:
+                return None
+            bits_s = tm.group(1)
+            tag_s = tm.group(2)
+            if tag_s is not None:
+                # Bits with provenance tag carry pointer address bits (allocator-dependent);
+                # keep poison `!` exact and allow `0`/`1` to match `?`.
+                chunks.append("".join("!" if c == "!" else "?" for c in bits_s))
+            else:
+                chunks.append(bits_s)
+    return (w, chunks)
+
+
+def byte_bits_match(pattern: str, actual: str) -> bool:
+    if len(pattern) != len(actual):
+        return False
+    for p, a in zip(pattern, actual):
+        if p == "?":
+            if a == "!":
+                return False
+        elif p != a:
+            return False
+    return True
+
+
 def parse_lean_scalar(s: str):
     s = s.strip()
     if s == "void":
@@ -214,6 +277,9 @@ def parse_lean_scalar(s: str):
         if m.group(2) == "poison":
             return ("poison",)
         return ("int", w, int(m.group(2)))
+    m = re.match(r"^b(\d+)\s+([01!]+)$", s)
+    if m:
+        return ("byte", int(m.group(1)), m.group(2))
     m = re.match(r"^ptr\(as=\d+\)\s+(poison|0x[0-9a-fA-F]+)$", s)
     if m:
         if m.group(1) == "poison":
@@ -263,8 +329,19 @@ def values_match(llubi_str: str, lean_str: str) -> bool:
                 return False
             return all(values_match(a, b) for a, b in zip(l_elems, r_elems))
 
-    lc = parse_llubi_scalar_to_canonical(ls)
     rc = parse_lean_scalar(rs)
+    if rc[0] == "byte":
+        lb = parse_llubi_byte_val(ls)
+        if lb is not None and lb[0] == rc[1]:
+            chunks = lb[1]
+            # Try both LE (reversed byte chunks) and BE (forward byte chunks)
+            le_bits = "".join(reversed(chunks))
+            be_bits = "".join(chunks)
+            return byte_bits_match(le_bits, rc[2]) or byte_bits_match(be_bits, rc[2])
+        if ls == "poison":
+            return rc[2] == "!" * rc[1]
+
+    lc = parse_llubi_scalar_to_canonical(ls)
 
     if lc[0] == "poison" and rc[0] == "poison":
         return True
@@ -294,7 +371,6 @@ def values_match(llubi_str: str, lean_str: str) -> bool:
                     return fval == 0.0 and neg == exp_neg
                 # llubi prints 6 significant digits in scientific notation
                 return math.isclose(fval, exp_f, rel_tol=1e-4, abs_tol=1e-12) and (neg == exp_neg)
-    # Fallback: skip unparsed exotic formats (e.g. b64 before M4)
     return ls == rs
 
 

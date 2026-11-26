@@ -51,6 +51,7 @@ def execExp (dl : DataLayout) (cfg : SemanticsConfig)
   | .int x =>
     match ty with
     | .int w => .ok (.bv w (.value (BitVec.ofInt w x)), mem, o)
+    | .byte w => .ok (RegisterValue.byteOfBitVec (BitVec.ofInt w x), mem, o)
     | _ => .error (.staticError s!"invalid type for int literal: found {ty.print}")
   | .floatBits bits =>
     match ty with
@@ -345,6 +346,7 @@ theorem execExp_sound (dl : DataLayout) (cfg : SemanticsConfig)
     unfold execExp
     cases ty with
     | int w => exact EvalExp.leaf_ok (by simp [evalPureLeafExp?])
+    | byte w => exact EvalExp.leaf_ok (by simp [evalPureLeafExp?])
     | _ => exact EvalExp.leaf_err (by simp [evalPureLeafExp?])
   | mem, ty, .floatBits bits, o => by
     unfold execExp
@@ -1043,6 +1045,29 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     | .ok (val, m1, o1) =>
       match freezeValue dl cfg val o1 with
       | (frozen, o2) => (none, finishRegInstr st frame callers rest iid frozen m1, o2)
+  | .bitinsert baseTy base valTy val offTy off =>
+    match execExp dl cfg regs st.memory baseTy base o with
+    | .error err => (none, Config.ofError err, o)
+    | .ok (vBase, m1, o1) =>
+      match execExp dl cfg regs m1 valTy val o1 with
+      | .error err => (none, Config.ofError err, o1)
+      | .ok (vVal, m2, o2) =>
+        match execExp dl cfg regs m2 offTy off o2 with
+        | .error err => (none, Config.ofError err, o2)
+        | .ok (vOff, m3, o3) =>
+          match evalBitInsertPure dl baseTy valTy vBase vVal vOff with
+          | .ok res => (none, finishRegInstr st frame callers rest iid res m3, o3)
+          | .error err => (none, Config.ofError err, o3)
+  | .bitextract retTy srcTy src offTy off =>
+    match execExp dl cfg regs st.memory srcTy src o with
+    | .error err => (none, Config.ofError err, o)
+    | .ok (vSrc, m1, o1) =>
+      match execExp dl cfg regs m1 offTy off o1 with
+      | .error err => (none, Config.ofError err, o1)
+      | .ok (vOff, m2, o2) =>
+        match evalBitExtractPure dl retTy vSrc vOff with
+        | .ok res => (none, finishRegInstr st frame callers rest iid res m2, o2)
+        | .error err => (none, Config.ofError err, o2)
   | .call retTy fmf calleeExp args retAttrs bundles isNoRet =>
     match execCallArgs dl cfg regs st.memory args o with
     | .error err => (none, Config.ofError err, o)
@@ -1516,6 +1541,41 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       | mk frozen o2 =>
         rw [hfz] at hfr h; cases h
         exact StepInstr.freeze_ok ih1 hfr
+  | bitinsert baseTy base valTy val offTy off =>
+    dsimp only at h
+    have ih1 := execExp_sound st.dataLayout st.config frame.registers st.memory baseTy base o
+    cases h1 : execExp st.dataLayout st.config frame.registers st.memory baseTy base o with
+    | error err => rw [h1] at ih1 h; cases h; exact StepInstr.bitinsert_err1 ih1
+    | ok p1 =>
+      rw [h1] at ih1 h; obtain ⟨vBase, m1, o1⟩ := p1; dsimp only at ih1 h
+      have ih2 := execExp_sound st.dataLayout st.config frame.registers m1 valTy val o1
+      cases h2 : execExp st.dataLayout st.config frame.registers m1 valTy val o1 with
+      | error err => rw [h2] at ih2 h; cases h; exact StepInstr.bitinsert_err2 ih1 ih2
+      | ok p2 =>
+        rw [h2] at ih2 h; obtain ⟨vVal, m2, o2⟩ := p2; dsimp only at ih2 h
+        have ih3 := execExp_sound st.dataLayout st.config frame.registers m2 offTy off o2
+        cases h3 : execExp st.dataLayout st.config frame.registers m2 offTy off o2 with
+        | error err => rw [h3] at ih3 h; cases h; exact StepInstr.bitinsert_err3 ih1 ih2 ih3
+        | ok p3 =>
+          rw [h3] at ih3 h; obtain ⟨vOff, m3, o3⟩ := p3; dsimp only at ih3 h
+          cases hev : evalBitInsertPure st.dataLayout baseTy valTy vBase vVal vOff with
+          | ok res => rw [hev] at h; cases h; exact StepInstr.bitinsert_ok ih1 ih2 ih3 hev
+          | error err => rw [hev] at h; cases h; exact StepInstr.bitinsert_eval_err ih1 ih2 ih3 hev
+  | bitextract retTy srcTy src offTy off =>
+    dsimp only at h
+    have ih1 := execExp_sound st.dataLayout st.config frame.registers st.memory srcTy src o
+    cases h1 : execExp st.dataLayout st.config frame.registers st.memory srcTy src o with
+    | error err => rw [h1] at ih1 h; cases h; exact StepInstr.bitextract_err1 ih1
+    | ok p1 =>
+      rw [h1] at ih1 h; obtain ⟨vSrc, m1, o1⟩ := p1; dsimp only at ih1 h
+      have ih2 := execExp_sound st.dataLayout st.config frame.registers m1 offTy off o1
+      cases h2 : execExp st.dataLayout st.config frame.registers m1 offTy off o1 with
+      | error err => rw [h2] at ih2 h; cases h; exact StepInstr.bitextract_err2 ih1 ih2
+      | ok p2 =>
+        rw [h2] at ih2 h; obtain ⟨vOff, m2, o2⟩ := p2; dsimp only at ih2 h
+        cases hev : evalBitExtractPure st.dataLayout retTy vSrc vOff with
+        | ok res => rw [hev] at h; cases h; exact StepInstr.bitextract_ok ih1 ih2 hev
+        | error err => rw [hev] at h; cases h; exact StepInstr.bitextract_eval_err ih1 ih2 hev
   | call retTy fmf calleeExp args retAttrs bundles isNoRet =>
     dsimp only at h
     have iha := execCallArgs_sound st.dataLayout st.config frame.registers st.memory args o

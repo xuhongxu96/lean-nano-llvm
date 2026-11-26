@@ -103,8 +103,8 @@ structure SemanticsConfig : Type where
   maxStackDepth : Nat := 256
   /-- Maximum allocated bytes across all live objects. -/
   maxMem        : Nat := 1 <<< 28
-  /-- Runtime `vscale` multiplier for scalable vectors `<vscale x N x T>`. -/
-  vscale        : Nat := 1
+  /-- Runtime `vscale` multiplier for scalable vectors `<vscale x N x T>` (default = 4, matching `llubi`). -/
+  vscale        : Nat := 4
   /-- Whether `llvm.fmuladd` fuses multiply-add (like `fma`) or rounds separately. -/
   fuseFMulAdd   : Bool := true
 deriving Repr, DecidableEq

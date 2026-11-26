@@ -18,6 +18,7 @@ Runtime SSA value representation covering all first-class LLVM IR types
 -/
 inductive RegisterValue : Type where
   | bv     (w : Nat) (val : IntW w)
+  | byte   (w : Nat) (bits : List MemBit)
   | float  (ft : FloatType) (val : FloatW ft)
   | ptr    (addrSpace : Nat) (val : PoisonOr Pointer)
   | vector (elemTy : LlvmType) (elems : List RegisterValue)
@@ -31,6 +32,12 @@ mutual
 def toStringAux : RegisterValue → String
   | .bv _ .poison => "poison"
   | .bv _ (.value v) => s!"{v}"
+  | .byte w bits =>
+    let bitStr := String.ofList (bits.reverse.map fun
+      | .concrete true _ => '1'
+      | .concrete false _ => '0'
+      | .poison | .undef => '!')
+    s!"b{w} {bitStr}"
   | .float _ .poison => "poison"
   | .float ft (.value f) => s!"{ft.print} {f}"
   | .ptr _ .poison => "poison"
@@ -52,6 +59,8 @@ mutual
 def beq : RegisterValue → RegisterValue → Bool
   | .bv w1 v1, .bv w2 v2 =>
       if h : w1 = w2 then (h ▸ v1) == v2 else false
+  | .byte w1 b1, .byte w2 b2 =>
+      w1 == w2 && b1 == b2
   | .float ft1 v1, .float ft2 v2 =>
       if h : ft1 = ft2 then (h ▸ v1) == v2 else false
   | .ptr as1 v1, .ptr as2 v2 =>
@@ -80,6 +89,10 @@ def decEq : (a b : RegisterValue) → Decidable (a = b)
     if hw : w1 = w2 then by
       subst hw
       exact if hv : v1 = v2 then isTrue (by rw [hv]) else isFalse (by intro h; cases h; exact hv rfl)
+    else isFalse (by intro h; cases h; exact hw rfl)
+  | .byte w1 b1, .byte w2 b2 =>
+    if hw : w1 = w2 then
+      if hb : b1 = b2 then isTrue (by rw [hw, hb]) else isFalse (by intro h; cases h; exact hb rfl)
     else isFalse (by intro h; cases h; exact hw rfl)
   | .float ft1 v1, .float ft2 v2 =>
     if hft : ft1 = ft2 then by
@@ -111,13 +124,14 @@ def decEq : (a b : RegisterValue) → Decidable (a = b)
       else isFalse (by intro h; cases h; exact hts rfl)
     else isFalse (by intro h; cases h; exact hp rfl)
   | .void, .void => isTrue rfl
-  | .bv _ _, .float _ _ | .bv _ _, .ptr _ _ | .bv _ _, .vector _ _ | .bv _ _, .array _ _ | .bv _ _, .struct _ _ _ | .bv _ _, .void
-  | .float _ _, .bv _ _ | .float _ _, .ptr _ _ | .float _ _, .vector _ _ | .float _ _, .array _ _ | .float _ _, .struct _ _ _ | .float _ _, .void
-  | .ptr _ _, .bv _ _ | .ptr _ _, .float _ _ | .ptr _ _, .vector _ _ | .ptr _ _, .array _ _ | .ptr _ _, .struct _ _ _ | .ptr _ _, .void
-  | .vector _ _, .bv _ _ | .vector _ _, .float _ _ | .vector _ _, .ptr _ _ | .vector _ _, .array _ _ | .vector _ _, .struct _ _ _ | .vector _ _, .void
-  | .array _ _, .bv _ _ | .array _ _, .float _ _ | .array _ _, .ptr _ _ | .array _ _, .vector _ _ | .array _ _, .struct _ _ _ | .array _ _, .void
-  | .struct _ _ _, .bv _ _ | .struct _ _ _, .float _ _ | .struct _ _ _, .ptr _ _ | .struct _ _ _, .vector _ _ | .struct _ _ _, .array _ _ | .struct _ _ _, .void
-  | .void, .bv _ _ | .void, .float _ _ | .void, .ptr _ _ | .void, .vector _ _ | .void, .array _ _ | .void, .struct _ _ _ =>
+  | .bv _ _, .byte _ _ | .bv _ _, .float _ _ | .bv _ _, .ptr _ _ | .bv _ _, .vector _ _ | .bv _ _, .array _ _ | .bv _ _, .struct _ _ _ | .bv _ _, .void
+  | .byte _ _, .bv _ _ | .byte _ _, .float _ _ | .byte _ _, .ptr _ _ | .byte _ _, .vector _ _ | .byte _ _, .array _ _ | .byte _ _, .struct _ _ _ | .byte _ _, .void
+  | .float _ _, .bv _ _ | .float _ _, .byte _ _ | .float _ _, .ptr _ _ | .float _ _, .vector _ _ | .float _ _, .array _ _ | .float _ _, .struct _ _ _ | .float _ _, .void
+  | .ptr _ _, .bv _ _ | .ptr _ _, .byte _ _ | .ptr _ _, .float _ _ | .ptr _ _, .vector _ _ | .ptr _ _, .array _ _ | .ptr _ _, .struct _ _ _ | .ptr _ _, .void
+  | .vector _ _, .bv _ _ | .vector _ _, .byte _ _ | .vector _ _, .float _ _ | .vector _ _, .ptr _ _ | .vector _ _, .array _ _ | .vector _ _, .struct _ _ _ | .vector _ _, .void
+  | .array _ _, .bv _ _ | .array _ _, .byte _ _ | .array _ _, .float _ _ | .array _ _, .ptr _ _ | .array _ _, .vector _ _ | .array _ _, .struct _ _ _ | .array _ _, .void
+  | .struct _ _ _, .bv _ _ | .struct _ _ _, .byte _ _ | .struct _ _ _, .float _ _ | .struct _ _ _, .ptr _ _ | .struct _ _ _, .vector _ _ | .struct _ _ _, .array _ _ | .struct _ _ _, .void
+  | .void, .bv _ _ | .void, .byte _ _ | .void, .float _ _ | .void, .ptr _ _ | .void, .vector _ _ | .void, .array _ _ | .void, .struct _ _ _ =>
     isFalse (by intro h; cases h)
 
 def decEqList : (a b : List RegisterValue) → Decidable (a = b)
@@ -137,6 +151,7 @@ instance : Inhabited RegisterValue := ⟨.void⟩
 mutual
 def poisonOf : LlvmType → RegisterValue
   | .int w => .bv w .poison
+  | .byte w => .byte w (List.replicate w .poison)
   | .float ft => .float ft .poison
   | .ptr as => .ptr as .poison
   | .vector n elem => .vector elem (List.replicate n (poisonOf elem))
@@ -153,6 +168,7 @@ end
 mutual
 def nullOf (dl : DataLayout) : LlvmType → RegisterValue
   | .int w => .bv w (.value (BitVec.ofNat w 0))
+  | .byte w => .byte w (List.replicate w (.concrete false none))
   | .float ft => .float ft (.value (IEEEFloat.zero ft.format false))
   | .ptr as => .ptr as (.value (Pointer.null dl as))
   | .vector n elem => .vector elem (List.replicate n (nullOf dl elem))
@@ -169,6 +185,7 @@ end
 mutual
 def containsPoison : RegisterValue → Bool
   | .bv _ .poison => true
+  | .byte _ bits => bits.any (fun b => !b.isConcrete)
   | .float _ .poison => true
   | .ptr _ .poison => true
   | .vector _ elems => containsPoisonList elems
@@ -184,9 +201,14 @@ end
 @[simp]
 def isScalarPoison : RegisterValue → Bool
   | .bv _ .poison => true
+  | .byte _ bits => !bits.isEmpty && bits.all (fun b => b.isPoison)
   | .float _ .poison => true
   | .ptr _ .poison => true
   | _ => false
+
+/-- Convert an integer `BitVec w` into a concrete `RegisterValue.byte w` (LSB-first, no provenance). -/
+def byteOfBitVec {w : Nat} (bv : BitVec w) : RegisterValue :=
+  .byte w ((List.range w).map fun i => .concrete (bv.getLsbD i) none)
 
 /-- Extract boolean tri-state (`poison` or `value b`) from an `i1` `RegisterValue`. -/
 def asBool? : RegisterValue → Option (PoisonOr Bool)
@@ -196,6 +218,30 @@ def asBool? : RegisterValue → Option (PoisonOr Bool)
 
 /-! ### Value Refinement (under `MemoryInjection`, poison-aware) -/
 
+@[simp]
+def IsRefinedByBits (inj : MemoryInjection) : List MemBit → List MemBit → Prop
+  | [], [] => True
+  | x :: xs, y :: ys => MemBit.IsRefinedBy inj x y ∧ IsRefinedByBits inj xs ys
+  | _, _ => False
+
+theorem IsRefinedByBits.refl : ∀ (bs : List MemBit), IsRefinedByBits .id bs bs
+  | [] => trivial
+  | b :: bs => ⟨MemBit.IsRefinedBy.refl b, IsRefinedByBits.refl bs⟩
+
+theorem IsRefinedByBits.trans {f g : MemoryInjection} :
+    ∀ {xs ys zs : List MemBit},
+      IsRefinedByBits f xs ys → IsRefinedByBits g ys zs → IsRefinedByBits (f.comp g) xs zs
+  | [], [], [], _, _ => trivial
+  | _ :: _, _ :: _, _ :: _, h12, h23 => ⟨MemBit.IsRefinedBy.trans h12.1 h23.1, IsRefinedByBits.trans h12.2 h23.2⟩
+  | [], _ :: _, _, h12, _ | _ :: _, [], _, h12, _ => False.elim h12
+  | [], [], _ :: _, _, h23 | _ :: _, _ :: _, [], _, h23 => False.elim h23
+
+theorem IsRefinedByBits.mono {f g : MemoryInjection} (hext : f.Extends g) :
+    ∀ {xs ys : List MemBit}, IsRefinedByBits f xs ys → IsRefinedByBits g xs ys
+  | [], [], _ => trivial
+  | _ :: _, _ :: _, h => ⟨MemBit.IsRefinedBy.mono hext h.1, IsRefinedByBits.mono hext h.2⟩
+  | [], _ :: _, h | _ :: _, [], h => False.elim h
+
 mutual
 @[simp]
 def IsRefinedBy (inj : MemoryInjection) : RegisterValue → RegisterValue → Prop
@@ -204,6 +250,7 @@ def IsRefinedBy (inj : MemoryInjection) : RegisterValue → RegisterValue → Pr
     | .poison, _ => wx = wy
     | .value vx, .value vy => ∃ h : wx = wy, h ▸ vx = vy
     | .value _, .poison => False
+  | .byte wx bsx, .byte wy bsy => wx = wy ∧ IsRefinedByBits inj bsx bsy
   | .float ftx fx, .float fty fy =>
     match fx, fy with
     | .poison, _ => ftx = fty
@@ -232,6 +279,7 @@ mutual
 theorem IsRefinedBy.refl : ∀ (v : RegisterValue), IsRefinedBy .id v v
   | .bv _ .poison => rfl
   | .bv _ (.value _) => ⟨rfl, rfl⟩
+  | .byte _ bs => ⟨rfl, IsRefinedByBits.refl bs⟩
   | .float _ .poison => rfl
   | .float _ (.value _) => ⟨rfl, rfl⟩
   | .ptr _ .poison => rfl
@@ -258,6 +306,8 @@ theorem IsRefinedBy.trans {f g : MemoryInjection} :
       subst hw12; subst hw23; exact ⟨rfl, Eq.trans hv12 hv23⟩
   | .bv _ (.value _), .bv _ .poison, .bv _ _, h12, _ => False.elim h12
   | .bv _ (.value _), .bv _ (.value _), .bv _ .poison, _, h23 => False.elim h23
+  | .byte _ _, .byte _ _, .byte _ _, h12, h23 =>
+      ⟨Eq.trans h12.1 h23.1, IsRefinedByBits.trans h12.2 h23.2⟩
   | .float _ .poison, .float _ .poison, .float _ _, h12, h23 => Eq.trans h12 h23
   | .float _ .poison, .float _ (.value _), .float _ (.value _), h12, h23 => Eq.trans h12 h23.1
   | .float _ .poison, .float _ (.value _), .float _ .poison, _, h23 => False.elim h23
@@ -283,34 +333,38 @@ theorem IsRefinedBy.trans {f g : MemoryInjection} :
     simp only [IsRefinedBy] at h12 h23 ⊢
     exact ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1, IsRefinedByList.trans h12.2.2 h23.2.2⟩
   | .void, .void, .void, _, _ => trivial
-  | .bv _ _, .float _ _, _, h12, _ | .bv _ _, .ptr _ _, _, h12, _ | .bv _ _, .vector _ _, _, h12, _
+  | .bv _ _, .byte _ _, _, h12, _ | .bv _ _, .float _ _, _, h12, _ | .bv _ _, .ptr _ _, _, h12, _ | .bv _ _, .vector _ _, _, h12, _
   | .bv _ _, .array _ _, _, h12, _ | .bv _ _, .struct _ _ _, _, h12, _ | .bv _ _, .void, _, h12, _
-  | .float _ _, .bv _ _, _, h12, _ | .float _ _, .ptr _ _, _, h12, _ | .float _ _, .vector _ _, _, h12, _
+  | .byte _ _, .bv _ _, _, h12, _ | .byte _ _, .float _ _, _, h12, _ | .byte _ _, .ptr _ _, _, h12, _ | .byte _ _, .vector _ _, _, h12, _
+  | .byte _ _, .array _ _, _, h12, _ | .byte _ _, .struct _ _ _, _, h12, _ | .byte _ _, .void, _, h12, _
+  | .float _ _, .bv _ _, _, h12, _ | .float _ _, .byte _ _, _, h12, _ | .float _ _, .ptr _ _, _, h12, _ | .float _ _, .vector _ _, _, h12, _
   | .float _ _, .array _ _, _, h12, _ | .float _ _, .struct _ _ _, _, h12, _ | .float _ _, .void, _, h12, _
-  | .ptr _ _, .bv _ _, _, h12, _ | .ptr _ _, .float _ _, _, h12, _ | .ptr _ _, .vector _ _, _, h12, _
+  | .ptr _ _, .bv _ _, _, h12, _ | .ptr _ _, .byte _ _, _, h12, _ | .ptr _ _, .float _ _, _, h12, _ | .ptr _ _, .vector _ _, _, h12, _
   | .ptr _ _, .array _ _, _, h12, _ | .ptr _ _, .struct _ _ _, _, h12, _ | .ptr _ _, .void, _, h12, _
-  | .vector _ _, .bv _ _, _, h12, _ | .vector _ _, .float _ _, _, h12, _ | .vector _ _, .ptr _ _, _, h12, _
+  | .vector _ _, .bv _ _, _, h12, _ | .vector _ _, .byte _ _, _, h12, _ | .vector _ _, .float _ _, _, h12, _ | .vector _ _, .ptr _ _, _, h12, _
   | .vector _ _, .array _ _, _, h12, _ | .vector _ _, .struct _ _ _, _, h12, _ | .vector _ _, .void, _, h12, _
-  | .array _ _, .bv _ _, _, h12, _ | .array _ _, .float _ _, _, h12, _ | .array _ _, .ptr _ _, _, h12, _
+  | .array _ _, .bv _ _, _, h12, _ | .array _ _, .byte _ _, _, h12, _ | .array _ _, .float _ _, _, h12, _ | .array _ _, .ptr _ _, _, h12, _
   | .array _ _, .vector _ _, _, h12, _ | .array _ _, .struct _ _ _, _, h12, _ | .array _ _, .void, _, h12, _
-  | .struct _ _ _, .bv _ _, _, h12, _ | .struct _ _ _, .float _ _, _, h12, _ | .struct _ _ _, .ptr _ _, _, h12, _
+  | .struct _ _ _, .bv _ _, _, h12, _ | .struct _ _ _, .byte _ _, _, h12, _ | .struct _ _ _, .float _ _, _, h12, _ | .struct _ _ _, .ptr _ _, _, h12, _
   | .struct _ _ _, .vector _ _, _, h12, _ | .struct _ _ _, .array _ _, _, h12, _ | .struct _ _ _, .void, _, h12, _
-  | .void, .bv _ _, _, h12, _ | .void, .float _ _, _, h12, _ | .void, .ptr _ _, _, h12, _
+  | .void, .bv _ _, _, h12, _ | .void, .byte _ _, _, h12, _ | .void, .float _ _, _, h12, _ | .void, .ptr _ _, _, h12, _
   | .void, .vector _ _, _, h12, _ | .void, .array _ _, _, h12, _ | .void, .struct _ _ _, _, h12, _ =>
     False.elim (by cases h12)
-  | .bv _ _, .bv _ _, .float _ _, _, h23 | .bv _ _, .bv _ _, .ptr _ _, _, h23 | .bv _ _, .bv _ _, .vector _ _, _, h23
+  | .bv _ _, .bv _ _, .byte _ _, _, h23 | .bv _ _, .bv _ _, .float _ _, _, h23 | .bv _ _, .bv _ _, .ptr _ _, _, h23 | .bv _ _, .bv _ _, .vector _ _, _, h23
   | .bv _ _, .bv _ _, .array _ _, _, h23 | .bv _ _, .bv _ _, .struct _ _ _, _, h23 | .bv _ _, .bv _ _, .void, _, h23
-  | .float _ _, .float _ _, .bv _ _, _, h23 | .float _ _, .float _ _, .ptr _ _, _, h23 | .float _ _, .float _ _, .vector _ _, _, h23
+  | .byte _ _, .byte _ _, .bv _ _, _, h23 | .byte _ _, .byte _ _, .float _ _, _, h23 | .byte _ _, .byte _ _, .ptr _ _, _, h23 | .byte _ _, .byte _ _, .vector _ _, _, h23
+  | .byte _ _, .byte _ _, .array _ _, _, h23 | .byte _ _, .byte _ _, .struct _ _ _, _, h23 | .byte _ _, .byte _ _, .void, _, h23
+  | .float _ _, .float _ _, .bv _ _, _, h23 | .float _ _, .float _ _, .byte _ _, _, h23 | .float _ _, .float _ _, .ptr _ _, _, h23 | .float _ _, .float _ _, .vector _ _, _, h23
   | .float _ _, .float _ _, .array _ _, _, h23 | .float _ _, .float _ _, .struct _ _ _, _, h23 | .float _ _, .float _ _, .void, _, h23
-  | .ptr _ _, .ptr _ _, .bv _ _, _, h23 | .ptr _ _, .ptr _ _, .float _ _, _, h23 | .ptr _ _, .ptr _ _, .vector _ _, _, h23
+  | .ptr _ _, .ptr _ _, .bv _ _, _, h23 | .ptr _ _, .ptr _ _, .byte _ _, _, h23 | .ptr _ _, .ptr _ _, .float _ _, _, h23 | .ptr _ _, .ptr _ _, .vector _ _, _, h23
   | .ptr _ _, .ptr _ _, .array _ _, _, h23 | .ptr _ _, .ptr _ _, .struct _ _ _, _, h23 | .ptr _ _, .ptr _ _, .void, _, h23
-  | .vector _ _, .vector _ _, .bv _ _, _, h23 | .vector _ _, .vector _ _, .float _ _, _, h23 | .vector _ _, .vector _ _, .ptr _ _, _, h23
+  | .vector _ _, .vector _ _, .bv _ _, _, h23 | .vector _ _, .vector _ _, .byte _ _, _, h23 | .vector _ _, .vector _ _, .float _ _, _, h23 | .vector _ _, .vector _ _, .ptr _ _, _, h23
   | .vector _ _, .vector _ _, .array _ _, _, h23 | .vector _ _, .vector _ _, .struct _ _ _, _, h23 | .vector _ _, .vector _ _, .void, _, h23
-  | .array _ _, .array _ _, .bv _ _, _, h23 | .array _ _, .array _ _, .float _ _, _, h23 | .array _ _, .array _ _, .ptr _ _, _, h23
+  | .array _ _, .array _ _, .bv _ _, _, h23 | .array _ _, .array _ _, .byte _ _, _, h23 | .array _ _, .array _ _, .float _ _, _, h23 | .array _ _, .array _ _, .ptr _ _, _, h23
   | .array _ _, .array _ _, .vector _ _, _, h23 | .array _ _, .array _ _, .struct _ _ _, _, h23 | .array _ _, .array _ _, .void, _, h23
-  | .struct _ _ _, .struct _ _ _, .bv _ _, _, h23 | .struct _ _ _, .struct _ _ _, .float _ _, _, h23 | .struct _ _ _, .struct _ _ _, .ptr _ _, _, h23
+  | .struct _ _ _, .struct _ _ _, .bv _ _, _, h23 | .struct _ _ _, .struct _ _ _, .byte _ _, _, h23 | .struct _ _ _, .struct _ _ _, .float _ _, _, h23 | .struct _ _ _, .struct _ _ _, .ptr _ _, _, h23
   | .struct _ _ _, .struct _ _ _, .vector _ _, _, h23 | .struct _ _ _, .struct _ _ _, .array _ _, _, h23 | .struct _ _ _, .struct _ _ _, .void, _, h23
-  | .void, .void, .bv _ _, _, h23 | .void, .void, .float _ _, _, h23 | .void, .void, .ptr _ _, _, h23
+  | .void, .void, .bv _ _, _, h23 | .void, .void, .byte _ _, _, h23 | .void, .void, .float _ _, _, h23 | .void, .void, .ptr _ _, _, h23
   | .void, .void, .vector _ _, _, h23 | .void, .void, .array _ _, _, h23 | .void, .void, .struct _ _ _, _, h23 =>
     False.elim (by cases h23)
 
@@ -329,6 +383,7 @@ theorem IsRefinedBy.mono {f g : MemoryInjection} (hext : f.Extends g) :
   | .bv _ .poison, .bv _ _, h => h
   | .bv _ (.value _), .bv _ (.value _), h => h
   | .bv _ (.value _), .bv _ .poison, h => h
+  | .byte _ _, .byte _ _, h => ⟨h.1, IsRefinedByBits.mono hext h.2⟩
   | .float _ .poison, .float _ _, h => h
   | .float _ (.value _), .float _ (.value _), h => h
   | .float _ (.value _), .float _ .poison, h => h
@@ -339,19 +394,21 @@ theorem IsRefinedBy.mono {f g : MemoryInjection} (hext : f.Extends g) :
   | .array _ _, .array _ _, h => ⟨h.1, IsRefinedByList.mono hext h.2⟩
   | .struct _ _ _, .struct _ _ _, h => ⟨h.1, h.2.1, IsRefinedByList.mono hext h.2.2⟩
   | .void, .void, _ => trivial
-  | .bv _ _, .float _ _, h | .bv _ _, .ptr _ _, h | .bv _ _, .vector _ _, h
+  | .bv _ _, .byte _ _, h | .bv _ _, .float _ _, h | .bv _ _, .ptr _ _, h | .bv _ _, .vector _ _, h
   | .bv _ _, .array _ _, h | .bv _ _, .struct _ _ _, h | .bv _ _, .void, h
-  | .float _ _, .bv _ _, h | .float _ _, .ptr _ _, h | .float _ _, .vector _ _, h
+  | .byte _ _, .bv _ _, h | .byte _ _, .float _ _, h | .byte _ _, .ptr _ _, h | .byte _ _, .vector _ _, h
+  | .byte _ _, .array _ _, h | .byte _ _, .struct _ _ _, h | .byte _ _, .void, h
+  | .float _ _, .bv _ _, h | .float _ _, .byte _ _, h | .float _ _, .ptr _ _, h | .float _ _, .vector _ _, h
   | .float _ _, .array _ _, h | .float _ _, .struct _ _ _, h | .float _ _, .void, h
-  | .ptr _ _, .bv _ _, h | .ptr _ _, .float _ _, h | .ptr _ _, .vector _ _, h
+  | .ptr _ _, .bv _ _, h | .ptr _ _, .byte _ _, h | .ptr _ _, .float _ _, h | .ptr _ _, .vector _ _, h
   | .ptr _ _, .array _ _, h | .ptr _ _, .struct _ _ _, h | .ptr _ _, .void, h
-  | .vector _ _, .bv _ _, h | .vector _ _, .float _ _, h | .vector _ _, .ptr _ _, h
+  | .vector _ _, .bv _ _, h | .vector _ _, .byte _ _, h | .vector _ _, .float _ _, h | .vector _ _, .ptr _ _, h
   | .vector _ _, .array _ _, h | .vector _ _, .struct _ _ _, h | .vector _ _, .void, h
-  | .array _ _, .bv _ _, h | .array _ _, .float _ _, h | .array _ _, .ptr _ _, h
+  | .array _ _, .bv _ _, h | .array _ _, .byte _ _, h | .array _ _, .float _ _, h | .array _ _, .ptr _ _, h
   | .array _ _, .vector _ _, h | .array _ _, .struct _ _ _, h | .array _ _, .void, h
-  | .struct _ _ _, .bv _ _, h | .struct _ _ _, .float _ _, h | .struct _ _ _, .ptr _ _, h
+  | .struct _ _ _, .bv _ _, h | .struct _ _ _, .byte _ _, h | .struct _ _ _, .float _ _, h | .struct _ _ _, .ptr _ _, h
   | .struct _ _ _, .vector _ _, h | .struct _ _ _, .array _ _, h | .struct _ _ _, .void, h
-  | .void, .bv _ _, h | .void, .float _ _, h | .void, .ptr _ _, h
+  | .void, .bv _ _, h | .void, .byte _ _, h | .void, .float _ _, h | .void, .ptr _ _, h
   | .void, .vector _ _, h | .void, .array _ _, h | .void, .struct _ _ _, h => False.elim h
 
 theorem IsRefinedByList.mono {f g : MemoryInjection} (hext : f.Extends g) :
@@ -419,6 +476,18 @@ def writeScalarBits (dl : DataLayout) (val : RegisterValue) (ty : LlvmType)
     writeBitLoop dl offsetInBits
       (fun i => if i < numBits then .concrete (bv.getLsbD i) none else .concrete false none)
       0 totalWrite bytes
+  | .byte _ bits =>
+    let remBits := numBits % 8
+    let startPadByte := numBits - remBits
+    let padBit : MemBit :=
+      if remBits == 0 then .concrete false none
+      else
+        let allNonPadPoison := (List.range remBits).all fun k =>
+          (bits.getD (startPadByte + k) .poison).isPoison
+        if allNonPadPoison then .poison else .concrete false none
+    writeBitLoop dl offsetInBits
+      (fun i => if i < numBits then bits.getD i .poison else padBit)
+      0 totalWrite bytes
   | .float _ (.value flt) =>
     writeBitLoop dl offsetInBits
       (fun i => if i < numBits then .concrete (flt.bits.getLsbD i) none else .concrete false none)
@@ -433,6 +502,24 @@ def writeScalarBits (dl : DataLayout) (val : RegisterValue) (ty : LlvmType)
 def readScalarBits (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemByte)
     (ty : LlvmType) (offsetInBits : Nat) (checkPadding : Bool) (oracle : OracleState) :
     RegisterValue × Bool × OracleState :=
+  match ty with
+  | .byte w =>
+    let remBits := w % 8
+    let (bytes', padUndef) : Array MemByte × Bool :=
+      if !checkPadding || remBits == 0 || bytes.size == 0 then (bytes, false)
+      else
+        let msbByte := getLogicalByte dl bytes (bytes.size - 1)
+        if msbByte.isCanonicalPaddingByte remBits then (bytes, false)
+        else (setLogicalByte dl bytes (bytes.size - 1) MemByte.poison, true)
+    let rec loopByte (i : Nat) : Nat → List MemBit → Bool → List MemBit × Bool
+      | 0, acc, hasU => (acc.reverse, hasU)
+      | rem + 1, acc, hasU =>
+        match getLogicalBit dl bytes' (offsetInBits + i) with
+        | .concrete b p => loopByte (i + 1) rem (.concrete b p :: acc) hasU
+        | .poison | .undef => loopByte (i + 1) rem (.poison :: acc) true
+    match loopByte 0 w [] padUndef with
+    | (bits, hasU) => (.byte w bits, hasU, oracle)
+  | _ =>
   let numBits := dl.typeSizeInBits ty
   let endBits := if checkPadding then DataLayout.alignTo (offsetInBits + numBits) 8 else offsetInBits + numBits
   let totalRead := endBits - offsetInBits
@@ -518,6 +605,8 @@ def valueToBytes (dl : DataLayout) (cfg : SemanticsConfig)
     (val : RegisterValue) : LlvmType → Array MemByte
   | .int w =>
     writeScalarBits dl val (.int w) 0 true (Array.replicate (dl.typeStoreSize (.int w)) MemByte.zero)
+  | .byte w =>
+    writeScalarBits dl val (.byte w) 0 true (Array.replicate (dl.typeStoreSize (.byte w)) MemByte.zero)
   | .float ft =>
     writeScalarBits dl val (.float ft) 0 true (Array.replicate (dl.typeStoreSize (.float ft)) MemByte.zero)
   | .ptr as =>
@@ -590,6 +679,7 @@ def bytesToValue (dl : DataLayout) (cfg : SemanticsConfig)
     (bytes : Array MemByte) : LlvmType → OracleState →
     RegisterValue × Bool × OracleState
   | .int w, oracle => readScalarBits dl cfg bytes (.int w) 0 true oracle
+  | .byte w, oracle => readScalarBits dl cfg bytes (.byte w) 0 true oracle
   | .float ft, oracle => readScalarBits dl cfg bytes (.float ft) 0 true oracle
   | .ptr as, oracle => readScalarBits dl cfg bytes (.ptr as) 0 true oracle
   | .vector n elemTy, oracle =>
@@ -651,6 +741,23 @@ theorem bytesToValue_satisfies_rel {dl cfg bytes ty o val hasUndef o'}
 
 /-! ### Relational & Executable `freeze` and `undef` Value Generation -/
 
+/-- Per-bit relational specification of `freeze` for byte values (`bN`). -/
+inductive FreezeBitRel (cfg : SemanticsConfig) : MemBit → MemBit → Prop where
+  | concrete (b : Bool) (p : Option (Provenance × Nat)) :
+      FreezeBitRel cfg (.concrete b p) (.concrete b p)
+  | poison (b : Bool) :
+      (cfg.freezeMode = .zero → b = false) →
+      FreezeBitRel cfg .poison (.concrete b none)
+  | undef (b : Bool) :
+      (cfg.freezeMode = .zero → b = false) →
+      FreezeBitRel cfg .undef (.concrete b none)
+
+inductive FreezeBitListRel (cfg : SemanticsConfig) : List MemBit → List MemBit → Prop where
+  | nil : FreezeBitListRel cfg [] []
+  | cons {b b' : MemBit} {bs bs' : List MemBit} :
+      FreezeBitRel cfg b b' → FreezeBitListRel cfg bs bs' →
+      FreezeBitListRel cfg (b :: bs) (b' :: bs')
+
 mutual
 /-- Relational specification of `freeze`: preserves every non-poison scalar and replaces
     each poison scalar with an arbitrary concrete bitpattern (or `0` when `freezeMode = .zero`). -/
@@ -661,6 +768,9 @@ inductive FreezeRel (dl : DataLayout) (cfg : SemanticsConfig) :
   | bv_poison (w : Nat) (bits : BitVec w) :
       (cfg.freezeMode = .zero → bits = BitVec.ofNat w 0) →
       FreezeRel dl cfg (.bv w .poison) (.bv w (.value bits))
+  | byte (w : Nat) (bs bs' : List MemBit) :
+      FreezeBitListRel cfg bs bs' →
+      FreezeRel dl cfg (.byte w bs) (.byte w bs')
   | float_val (ft : FloatType) (f : IEEEFloat ft.format) :
       FreezeRel dl cfg (.float ft (.value f)) (.float ft (.value f))
   | float_poison (ft : FloatType) (bits : BitVec ft.bitWidth) :
@@ -696,6 +806,53 @@ private def drawFreezeBits (cfg : SemanticsConfig) (w : Nat) (o : OracleState) :
   | .zero => (BitVec.ofNat w 0, o)
   | .nondet => o.nextBitVec w
 
+private def drawFreezeBool (cfg : SemanticsConfig) (o : OracleState) : Bool × OracleState :=
+  match cfg.freezeMode with
+  | .zero => (false, o)
+  | .nondet => o.nextBool
+
+private theorem drawFreezeBool_zero_spec (cfg : SemanticsConfig) (o : OracleState)
+    {b : Bool} {o' : OracleState} (h : drawFreezeBool cfg o = (b, o')) :
+    cfg.freezeMode = .zero → b = false := by
+  intro hz; unfold drawFreezeBool at h; rw [hz] at h; cases h; rfl
+
+private def freezeMemBits (cfg : SemanticsConfig) : List MemBit → OracleState → List MemBit × OracleState
+  | [], o => ([], o)
+  | .concrete b p :: rest, o =>
+    match freezeMemBits cfg rest o with
+    | (rest', o') => (.concrete b p :: rest', o')
+  | .poison :: rest, o =>
+    match drawFreezeBool cfg o with
+    | (b, o1) =>
+      match freezeMemBits cfg rest o1 with
+      | (rest', o2) => (.concrete b none :: rest', o2)
+  | .undef :: rest, o =>
+    match drawFreezeBool cfg o with
+    | (b, o1) =>
+      match freezeMemBits cfg rest o1 with
+      | (rest', o2) => (.concrete b none :: rest', o2)
+
+private theorem freezeMemBits_sound (cfg : SemanticsConfig) :
+    ∀ (bs : List MemBit) (o : OracleState), FreezeBitListRel cfg bs (freezeMemBits cfg bs o).1
+  | [], _ => FreezeBitListRel.nil
+  | .concrete b p :: rest, o => by
+    unfold freezeMemBits
+    exact FreezeBitListRel.cons (FreezeBitRel.concrete b p) (freezeMemBits_sound cfg rest o)
+  | .poison :: rest, o => by
+    unfold freezeMemBits
+    generalize hb : drawFreezeBool cfg o = p1
+    cases p1 with
+    | mk b o1 =>
+      exact FreezeBitListRel.cons (FreezeBitRel.poison b (drawFreezeBool_zero_spec cfg o hb))
+        (freezeMemBits_sound cfg rest o1)
+  | .undef :: rest, o => by
+    unfold freezeMemBits
+    generalize hb : drawFreezeBool cfg o = p1
+    cases p1 with
+    | mk b o1 =>
+      exact FreezeBitListRel.cons (FreezeBitRel.undef b (drawFreezeBool_zero_spec cfg o hb))
+        (freezeMemBits_sound cfg rest o1)
+
 private theorem drawFreezeBits_zero_spec (cfg : SemanticsConfig) (w : Nat) (o : OracleState)
     {bits : BitVec w} {o' : OracleState} (h : drawFreezeBits cfg w o = (bits, o')) :
     cfg.freezeMode = .zero → bits = BitVec.ofNat w 0 := by
@@ -712,6 +869,9 @@ def freezeValue (dl : DataLayout) (cfg : SemanticsConfig) :
     match drawFreezeBits cfg w oracle with
     | (bits, o') => (.bv w (.value bits), o')
   | .bv w (.value v), oracle => (.bv w (.value v), oracle)
+  | .byte w bs, oracle =>
+    match freezeMemBits cfg bs oracle with
+    | (bs', o') => (.byte w bs', o')
   | .float ft .poison, oracle =>
     match drawFreezeBits cfg ft.bitWidth oracle with
     | (bits, o') => (.float ft (.value (IEEEFloat.ofBits bits)), o')
@@ -752,6 +912,13 @@ theorem freezeValue_sound (dl : DataLayout) (cfg : SemanticsConfig) :
     cases p with
     | mk bits o' => exact FreezeRel.bv_poison w bits (drawFreezeBits_zero_spec cfg w o h)
   | .bv w (.value b), _ => FreezeRel.bv_val w b
+  | .byte w bs, o => by
+    unfold freezeValue
+    have ih := freezeMemBits_sound cfg bs o
+    cases h : freezeMemBits cfg bs o with
+    | mk bs' o' =>
+      rw [h] at ih
+      exact FreezeRel.byte w bs bs' ih
   | .float ft .poison, o => by
     unfold freezeValue
     generalize h : drawFreezeBits cfg ft.bitWidth o = p
@@ -813,6 +980,9 @@ inductive UndefValRel (dl : DataLayout) (cfg : SemanticsConfig) :
   | int (w : Nat) (bits : BitVec w) :
       (cfg.undefMode = .zero → bits = BitVec.ofNat w 0) →
       UndefValRel dl cfg (.int w) (.bv w (.value bits))
+  | byte (w : Nat) (bits : BitVec w) :
+      (cfg.undefMode = .zero → bits = BitVec.ofNat w 0) →
+      UndefValRel dl cfg (.byte w) (RegisterValue.byteOfBitVec bits)
   | float (ft : FloatType) (bits : BitVec ft.bitWidth) :
       (cfg.undefMode = .zero → bits = BitVec.ofNat ft.bitWidth 0) →
       UndefValRel dl cfg (.float ft) (.float ft (.value (IEEEFloat.ofBits bits)))
@@ -850,6 +1020,7 @@ end
 mutual
 def genUndefZeroExec (dl : DataLayout) : LlvmType → Except ExecError RegisterValue
   | .int w => .ok (.bv w (.value (BitVec.ofNat w 0)))
+  | .byte w => .ok (RegisterValue.byteOfBitVec (BitVec.ofNat w 0))
   | .float ft => .ok (.float ft (.value (IEEEFloat.ofBits (BitVec.ofNat ft.bitWidth 0))))
   | .ptr as =>
     let pw := dl.getPointerSizeInBits as
@@ -895,6 +1066,9 @@ def genUndefNondetExec (dl : DataLayout) : LlvmType → OracleState → Except E
   | .int w, o =>
     match o.nextBitVec w with
     | (bv, o') => .ok (.bv w (.value bv), o')
+  | .byte w, o =>
+    match o.nextBitVec w with
+    | (bv, o') => .ok (RegisterValue.byteOfBitVec bv, o')
   | .float ft, o =>
     match o.nextBitVec ft.bitWidth with
     | (bv, o') => .ok (.float ft (.value (IEEEFloat.ofBits bv)), o')
@@ -951,6 +1125,9 @@ private theorem genUndefZeroExec_sound (dl : DataLayout) (cfg : SemanticsConfig)
   | .int w, _, h => by
     unfold genUndefZeroExec at h; cases h
     exact UndefValRel.int w (BitVec.ofNat w 0) (fun _ => rfl)
+  | .byte w, _, h => by
+    unfold genUndefZeroExec at h; cases h
+    exact UndefValRel.byte w (BitVec.ofNat w 0) (fun _ => rfl)
   | .float ft, _, h => by
     unfold genUndefZeroExec at h; cases h
     exact UndefValRel.float ft (BitVec.ofNat ft.bitWidth 0) (fun _ => rfl)
@@ -1035,6 +1212,12 @@ private theorem genUndefNondetExec_sound (dl : DataLayout) (cfg : SemanticsConfi
     | mk bv o1 =>
       rw [hnext] at h; cases h
       exact UndefValRel.int w bv (fun hz => absurd hz hne)
+  | .byte w, o, _, _, h => by
+    unfold genUndefNondetExec at h
+    cases hnext : o.nextBitVec w with
+    | mk bv o1 =>
+      rw [hnext] at h; cases h
+      exact UndefValRel.byte w bv (fun hz => absurd hz hne)
   | .float ft, o, _, _, h => by
     unfold genUndefNondetExec at h
     cases hnext : o.nextBitVec ft.bitWidth with
@@ -1533,6 +1716,7 @@ def evalSelectPure (cVal tVal fVal : RegisterValue) : Except ExecError RegisterV
   | .bv 1 .poison =>
     match tVal with
     | .bv w _ => .ok (.bv w .poison)
+    | .byte w _ => .ok (.byte w (List.replicate w .poison))
     | .float ft _ => .ok (.float ft .poison)
     | .ptr as _ => .ok (.ptr as .poison)
     | .vector eTy es => .ok (.vector eTy (List.replicate es.length (RegisterValue.poisonOf eTy)))
@@ -1933,6 +2117,115 @@ theorem evalConversionExec_preserves_wf {dl cfg mem op fromTy val toTy o res mem
   · split at h
     · cases h; exact hwf
     · cases h
+
+/-- Convert a scalar `RegisterValue` into LSB-first `List MemBit` of length `numBits`. -/
+private def scalarToMemBits (dl : DataLayout) (ty : LlvmType) (val : RegisterValue) : List MemBit :=
+  let numBits := dl.typeSizeInBits ty
+  match val with
+  | .bv _ .poison | .float _ .poison | .ptr _ .poison =>
+    List.replicate numBits .poison
+  | .bv _ (.value bv) =>
+    (List.range numBits).map fun i => .concrete (bv.getLsbD i) none
+  | .float _ (.value flt) =>
+    (List.range numBits).map fun i => .concrete (flt.bits.getLsbD i) none
+  | .ptr _ (.value p) =>
+    (List.range numBits).map fun i => .concrete (p.addr.getLsbD i) (some (p.prov, i))
+  | .byte _ bs =>
+    (List.range numBits).map fun i => bs.getD i .poison
+  | _ => List.replicate numBits .poison
+
+/-- Convert an LSB-first `List MemBit` slice of length `numBits` into a scalar `RegisterValue` of type `ty`. -/
+private def memBitsToScalar (dl : DataLayout) (ty : LlvmType) (slice : List MemBit) : RegisterValue :=
+  let numBits := dl.typeSizeInBits ty
+  match ty with
+  | .byte w => .byte w ((List.range w).map fun i => slice.getD i .poison)
+  | _ =>
+    let rec go (i : Nat) : List MemBit → Nat → Bool → Bool → Option Provenance →
+        Nat × Bool × Bool × Option Provenance
+      | [], acc, isP, pOk, pAcc => (acc, isP, pOk, pAcc)
+      | .poison :: rest, acc, _, _, _ => go (i + 1) rest acc true false none
+      | .undef :: rest, acc, _, _, _ => go (i + 1) rest acc true false none
+      | .concrete b provBit :: rest, acc, isP, pOk, pAcc =>
+        let (pOk', pAcc') :=
+          if !pOk then (false, none)
+          else match provBit with
+            | none => (false, none)
+            | some (p, bitPos) =>
+              if bitPos != i then (false, none)
+              else match pAcc with
+                | none => (true, some p)
+                | some p0 => if p0 == p then (true, some p0) else (false, none)
+        let acc' := if b then acc + (1 <<< i) else acc
+        go (i + 1) rest acc' isP pOk' pAcc'
+    match go 0 slice 0 false true none with
+    | (valBits, isPoison, provOk, provAcc) =>
+      if isPoison then RegisterValue.poisonOf ty
+      else match ty with
+        | .int w => .bv w (.value (BitVec.ofNat w valBits))
+        | .float ft => .float ft (.value (IEEEFloat.ofNatBits valBits))
+        | .ptr as =>
+          let prov := if provOk then provAcc.getD .nullary else .nullary
+          .ptr as (.value { prov := prov, addrWidth := numBits, addr := BitVec.ofNat numBits valBits })
+        | _ => RegisterValue.poisonOf ty
+
+/-- Pure scalar `bitinsert` evaluator. -/
+private def evalBitInsertScalarPure (dl : DataLayout) (baseTy valTy : LlvmType)
+    (base val off : RegisterValue) : RegisterValue :=
+  match baseTy, base, off with
+  | .byte w, .byte _ baseBits, .bv _ (.value offBV) =>
+    let offBits := offBV.toNat
+    let numBits := dl.typeSizeInBits valTy
+    if offBits + numBits > w then RegisterValue.poisonOf baseTy
+    else
+      let valBits := scalarToMemBits dl valTy val
+      let newBits := (List.range w).map fun i =>
+        if offBits ≤ i && i < offBits + numBits then
+          valBits.getD (i - offBits) .poison
+        else
+          baseBits.getD i .poison
+      .byte w newBits
+  | _, _, _ => RegisterValue.poisonOf baseTy
+
+/-- Pure scalar/vector `bitinsert` evaluator. -/
+def evalBitInsertPure (dl : DataLayout) (baseTy valTy : LlvmType)
+    (base val off : RegisterValue) : Except ExecError RegisterValue :=
+  match baseTy, base, val, off with
+  | .vector n elemBaseTy, .vector _ bs, .vector _ vs, .vector _ os =>
+    let elemValTy := valTy.scalarType
+    let res := (List.range n).map fun i =>
+      evalBitInsertScalarPure dl elemBaseTy elemValTy
+        (bs.getD i (RegisterValue.poisonOf elemBaseTy))
+        (vs.getD i (RegisterValue.poisonOf elemValTy))
+        (os.getD i (.bv 32 .poison))
+    .ok (.vector elemBaseTy res)
+  | _, _, _, _ =>
+    .ok (evalBitInsertScalarPure dl baseTy valTy base val off)
+
+/-- Pure scalar `bitextract` evaluator. -/
+private def evalBitExtractScalarPure (dl : DataLayout) (retTy : LlvmType)
+    (src off : RegisterValue) : RegisterValue :=
+  match src, off with
+  | .byte w srcBits, .bv _ (.value offBV) =>
+    let offBits := offBV.toNat
+    let numBits := dl.typeSizeInBits retTy
+    if offBits + numBits > w then RegisterValue.poisonOf retTy
+    else
+      let slice := (List.range numBits).map fun i => srcBits.getD (offBits + i) .poison
+      memBitsToScalar dl retTy slice
+  | _, _ => RegisterValue.poisonOf retTy
+
+/-- Pure scalar/vector `bitextract` evaluator. -/
+def evalBitExtractPure (dl : DataLayout) (retTy : LlvmType)
+    (src off : RegisterValue) : Except ExecError RegisterValue :=
+  match retTy, src, off with
+  | .vector n elemRetTy, .vector _ ss, .vector _ os =>
+    let res := (List.range n).map fun i =>
+      evalBitExtractScalarPure dl elemRetTy
+        (ss.getD i (.byte 0 []))
+        (os.getD i (.bv 32 .poison))
+    .ok (.vector elemRetTy res)
+  | _, _, _ =>
+    .ok (evalBitExtractScalarPure dl retTy src off)
 
 attribute [simp_llvm] liftUnaryPure liftBinaryPure evalIntBinaryScalarPure
 attribute [simp_step] applyValueAttrsPure

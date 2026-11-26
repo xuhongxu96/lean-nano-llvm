@@ -19,6 +19,12 @@ private def padHex (width : Nat) (n : Nat) : String :=
 private def formatRegisterValue : RegisterValue → String
   | .void => "void"
   | .bv w pv => s!"i{w} {formatPoison (fun bv => toString bv.toNat) pv}"
+  | .byte w bits =>
+    let bitStr := String.ofList (bits.reverse.map fun
+      | .concrete true _ => '1'
+      | .concrete false _ => '0'
+      | .poison | .undef => '!')
+    s!"b{w} {bitStr}"
   | .float ft pv =>
     let hexW := (ft.bitWidth + 3) / 4
     s!"{ft.print} {formatPoison (fun f => s!"0x{padHex hexW f.bits.toNat}") pv}"
@@ -234,7 +240,7 @@ def main (args : List String) : IO UInt32 := do
           (← IO.getStdin).readToEnd
         else
           IO.FS.readFile opts.file
-      match Parser.parseLlvmModule src with
+      match Parser.parseLlvmModule src opts.cfg.vscale with
       | .error msg =>
         IO.eprintln s!"PARSE_ERROR: {msg}"
         return 4

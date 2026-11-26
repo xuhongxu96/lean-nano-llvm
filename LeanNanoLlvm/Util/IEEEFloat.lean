@@ -13,8 +13,9 @@ namespace FloatFormat
 def half   : FloatFormat := { expBits := 5,  sigBits := 10 }   -- IEEE binary16
 def bfloat : FloatFormat := { expBits := 8,  sigBits := 7 }    -- bfloat16
 def single : FloatFormat := { expBits := 8,  sigBits := 23 }   -- IEEE binary32 (float)
-def double : FloatFormat := { expBits := 11, sigBits := 52 }   -- IEEE binary64 (double)
-def fp128  : FloatFormat := { expBits := 15, sigBits := 112 }  -- IEEE binary128 (fp128)
+def double   : FloatFormat := { expBits := 11, sigBits := 52 }   -- IEEE binary64 (double)
+def x86_fp80 : FloatFormat := { expBits := 15, sigBits := 63 }   -- x87 80-bit extended (64-bit precision)
+def fp128    : FloatFormat := { expBits := 15, sigBits := 112 }  -- IEEE binary128 (fp128)
 
 @[simp] def totalBits (fmt : FloatFormat) : Nat := 1 + fmt.expBits + fmt.sigBits
 @[simp] def precision (fmt : FloatFormat) : Nat := fmt.sigBits + 1

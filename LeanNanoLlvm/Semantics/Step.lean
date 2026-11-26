@@ -50,6 +50,7 @@ def evalPureLeafExp? (dl : DataLayout) (cfg : SemanticsConfig)
   | .int x =>
     some <| match ty with
       | .int w => .ok (.bv w (.value (BitVec.ofInt w x)))
+      | .byte w => .ok (RegisterValue.byteOfBitVec (BitVec.ofInt w x))
       | _ => .error (.staticError s!"invalid type for int literal: found {ty.print}")
   | .floatBits bits =>
     some <| match ty with
@@ -1008,6 +1009,51 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalExp st.dataLayout st.config frame.registers st.memory ty e (.error err) →
       StepInstr st frame callers iid rest (.freeze (ty, e)) none (Config.ofError err)
 
+  /- Bitinsert / Bitextract -/
+  | bitinsert_ok {baseTy base valTy val offTy off vBase m1 vVal m2 vOff m3 res} :
+      EvalExp st.dataLayout st.config frame.registers st.memory baseTy base (.ok (vBase, m1)) →
+      EvalExp st.dataLayout st.config frame.registers m1 valTy val (.ok (vVal, m2)) →
+      EvalExp st.dataLayout st.config frame.registers m2 offTy off (.ok (vOff, m3)) →
+      evalBitInsertPure st.dataLayout baseTy valTy vBase vVal vOff = .ok res →
+      StepInstr st frame callers iid rest (.bitinsert baseTy base valTy val offTy off) none
+        (finishRegInstr st frame callers rest iid res m3)
+  | bitinsert_err1 {baseTy base valTy val offTy off err} :
+      EvalExp st.dataLayout st.config frame.registers st.memory baseTy base (.error err) →
+      StepInstr st frame callers iid rest (.bitinsert baseTy base valTy val offTy off) none (Config.ofError err)
+  | bitinsert_err2 {baseTy base valTy val offTy off vBase m1 err} :
+      EvalExp st.dataLayout st.config frame.registers st.memory baseTy base (.ok (vBase, m1)) →
+      EvalExp st.dataLayout st.config frame.registers m1 valTy val (.error err) →
+      StepInstr st frame callers iid rest (.bitinsert baseTy base valTy val offTy off) none (Config.ofError err)
+  | bitinsert_err3 {baseTy base valTy val offTy off vBase m1 vVal m2 err} :
+      EvalExp st.dataLayout st.config frame.registers st.memory baseTy base (.ok (vBase, m1)) →
+      EvalExp st.dataLayout st.config frame.registers m1 valTy val (.ok (vVal, m2)) →
+      EvalExp st.dataLayout st.config frame.registers m2 offTy off (.error err) →
+      StepInstr st frame callers iid rest (.bitinsert baseTy base valTy val offTy off) none (Config.ofError err)
+  | bitinsert_eval_err {baseTy base valTy val offTy off vBase m1 vVal m2 vOff m3 err} :
+      EvalExp st.dataLayout st.config frame.registers st.memory baseTy base (.ok (vBase, m1)) →
+      EvalExp st.dataLayout st.config frame.registers m1 valTy val (.ok (vVal, m2)) →
+      EvalExp st.dataLayout st.config frame.registers m2 offTy off (.ok (vOff, m3)) →
+      evalBitInsertPure st.dataLayout baseTy valTy vBase vVal vOff = .error err →
+      StepInstr st frame callers iid rest (.bitinsert baseTy base valTy val offTy off) none (Config.ofError err)
+  | bitextract_ok {retTy srcTy src offTy off vSrc m1 vOff m2 res} :
+      EvalExp st.dataLayout st.config frame.registers st.memory srcTy src (.ok (vSrc, m1)) →
+      EvalExp st.dataLayout st.config frame.registers m1 offTy off (.ok (vOff, m2)) →
+      evalBitExtractPure st.dataLayout retTy vSrc vOff = .ok res →
+      StepInstr st frame callers iid rest (.bitextract retTy srcTy src offTy off) none
+        (finishRegInstr st frame callers rest iid res m2)
+  | bitextract_err1 {retTy srcTy src offTy off err} :
+      EvalExp st.dataLayout st.config frame.registers st.memory srcTy src (.error err) →
+      StepInstr st frame callers iid rest (.bitextract retTy srcTy src offTy off) none (Config.ofError err)
+  | bitextract_err2 {retTy srcTy src offTy off vSrc m1 err} :
+      EvalExp st.dataLayout st.config frame.registers st.memory srcTy src (.ok (vSrc, m1)) →
+      EvalExp st.dataLayout st.config frame.registers m1 offTy off (.error err) →
+      StepInstr st frame callers iid rest (.bitextract retTy srcTy src offTy off) none (Config.ofError err)
+  | bitextract_eval_err {retTy srcTy src offTy off vSrc m1 vOff m2 err} :
+      EvalExp st.dataLayout st.config frame.registers st.memory srcTy src (.ok (vSrc, m1)) →
+      EvalExp st.dataLayout st.config frame.registers m1 offTy off (.ok (vOff, m2)) →
+      evalBitExtractPure st.dataLayout retTy vSrc vOff = .error err →
+      StepInstr st frame callers iid rest (.bitextract retTy srcTy src offTy off) none (Config.ofError err)
+
   /- Call (alloc libcalls via AllocLibcallSpec, non-alloc intrinsics, user-defined functions) -/
   | call_args_err {retTy fmf calleeExp args retAttrs bundles isNoRet err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.error err) →
@@ -1317,6 +1363,10 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
     exact finishRegInstr_wf (EvalExp.preserves_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2) h3)
   | shufflevector_ok h1 h2 _ => exact finishRegInstr_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2)
   | freeze_ok h1 _ => exact finishRegInstr_wf (EvalExp.preserves_wf hwf h1)
+  | bitinsert_ok h1 h2 h3 _ =>
+    exact finishRegInstr_wf (EvalExp.preserves_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2) h3)
+  | bitextract_ok h1 h2 _ =>
+    exact finishRegInstr_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2)
   | call_alloc_ok ha hc _ hspec _ =>
     exact finishCallResult_wf (AllocLibcallSpec.preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hspec)
   | call_intrinsic_ok ha hc _ hint hb _ =>

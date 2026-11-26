@@ -294,6 +294,7 @@ structure PState where
   rangeMeta    : List (String × Int × Int) := []
   intMeta      : List (String × Nat) := []
   noReturnGrps : List Nat := []
+  vscale       : Nat := 4
 deriving Inhabited
 
 abbrev ParseM := StateT PState (Except String)
@@ -374,7 +375,9 @@ def parseType : Nat → ParseM LlvmType
     | .ident "bfloat" => return .float .bfloat
     | .ident "float" => return .float .float
     | .ident "double" => return .float .double
+    | .ident "x86_fp80" => return .float .x86_fp80
     | .ident "fp128" => return .float .fp128
+    | .ident "ppc_fp128" => return .float .ppc_fp128
     | .ident "metadata" => return .ptr 0
     | .ident "ptr" =>
       if ← tryEatIdent "addrspace" then
@@ -389,13 +392,18 @@ def parseType : Nat → ParseM LlvmType
         match parseNatStr (s.drop 1).toString with
         | some w => return .int w
         | none => throw s!"parse error: unknown type '{s}'"
+      else if s.startsWith "b" then
+        match parseNatStr (s.drop 1).toString with
+        | some w => return .byte w
+        | none => throw s!"parse error: unknown type '{s}'"
       else
         throw s!"parse error: unknown type '{s}'"
     | .localId id => return .named id
     | .langle =>
-      -- Vector `<N x T>` or `<Nx T>` (skip `vscale` if present)
-      let _ ← tryEatIdent "vscale"
-      let _ ← tryEatIdent "x"
+      -- Vector `<N x T>`, `<Nx T>`, or `<vscale x N x T>`
+      let isScalable ← tryEatIdent "vscale"
+      if isScalable then
+        let _ ← tryEatIdent "x"
       let n ←
         match ← bump with
         | .intLit k =>
@@ -412,7 +420,8 @@ def parseType : Nat → ParseM LlvmType
         | tok => throw s!"parse error: expected vector length, got {repr tok}"
       let elem ← parseType fuel
       expect .rangle "vector type"
-      return .vector n elem
+      let vscale := (← get).vscale
+      return .vector (if isScalable then n * vscale else n) elem
     | .lbrack =>
       -- Array `[N x T]`
       let n ← parseNatTok "array length"
@@ -615,6 +624,23 @@ private def decodeHexFloatForType (tag : Char) (val : Nat) : Exp :=
     let lo64 := val >>> 64
     let hi64 := val &&& mask64
     .floatBits ((hi64 <<< 64) ||| lo64)
+  else if tag == 'K' then
+    -- LLVM `0xK<80-bit>`: bit 79 = sign, bits 78..64 = exp (15b), bit 63 = explicit int bit, bits 62..0 = frac (63b)
+    let sign := (val >>> 79) &&& 1
+    let exp := (val >>> 64) &&& ((1 <<< 15) - 1)
+    let frac := val &&& ((1 <<< 63) - 1)
+    .floatBits ((sign <<< 78) ||| (exp <<< 63) ||| frac)
+  else if tag == 'M' then
+    -- LLVM `0xM<hi64><lo64>`: IBM double-double pair of two IEEE binary64 values
+    let mask64 : Nat := (1 <<< 64) - 1
+    let hi64 := val >>> 64
+    let lo64 := val &&& mask64
+    let hiF : IEEEFloat .double := ⟨BitVec.ofNat 64 hi64⟩
+    let loF : IEEEFloat .double := ⟨BitVec.ofNat 64 lo64⟩
+    let hiQ := IEEEFloat.convert .fp128 .RNE hiF
+    let loQ := IEEEFloat.convert .fp128 .RNE loF
+    let sumQ := if lo64 == 0 then hiQ else IEEEFloat.add .RNE hiQ loQ
+    .floatBits sumQ.bits.toNat
   else
     .floatBits val
 
@@ -837,7 +863,7 @@ def parseExp : Nat → ParseM Exp
       return .identifier (.global_id (.name "llvm.inlineasm.noop"))
     | .metaId _ =>
       -- Metadata operand like `!0` (used in e.g. `llvm.experimental.noalias.scope.decl(metadata !0)`)
-      return .int 0
+      return .null
     | .bang =>
       -- Inline metadata node `!{...}`
       if ← tryEat .lbrace then
@@ -850,7 +876,7 @@ def parseExp : Nat → ParseM Exp
           | .rbrace => depth := depth - 1
           | .eof => depth := 0
           | _ => pure ()
-      return .int 0
+      return .null
     | .ident "c" =>
       match ← bump with
       | .strLit s =>
@@ -1220,6 +1246,27 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
     let e ← parseExp fuel
     skipTrailingMetadata fuel
     return .freeze (ty, e)
+  | .ident "bitinsert" =>
+    let baseTy ← parseType fuel
+    let base ← parseExp fuel
+    expect .comma "bitinsert"
+    let valTy ← parseType fuel
+    let val ← parseExp fuel
+    expect .comma "bitinsert"
+    let offTy ← parseType fuel
+    let off ← parseExp fuel
+    skipTrailingMetadata fuel
+    return .bitinsert baseTy base valTy val offTy off
+  | .ident "bitextract" =>
+    let retTy ← parseType fuel
+    expect .comma "bitextract"
+    let srcTy ← parseType fuel
+    let src ← parseExp fuel
+    expect .comma "bitextract"
+    let offTy ← parseType fuel
+    let off ← parseExp fuel
+    skipTrailingMetadata fuel
+    return .bitextract retTy srcTy src offTy off
   | .ident "alloca" =>
     let _ ← tryEatIdent "inalloca"
     let allocTy ← parseType fuel
@@ -1850,7 +1897,7 @@ private def prescanNoReturnGroups (toks : Array Tok) : List Nat :=
   go 0 []
 
 /-- Parse an entire LLVM IR `.ll` text module into `ParsedModule`. -/
-def parseLlvmModule (input : String) : Except String ParsedModule := do
+def parseLlvmModule (input : String) (vscale : Nat := 4) : Except String ParsedModule := do
   let toks := tokenize input
   let fuel := toks.size * 4 + 64
   let initSt : PState := {
@@ -1858,6 +1905,7 @@ def parseLlvmModule (input : String) : Except String ParsedModule := do
     rangeMeta := prescanRangeMetadata toks
     intMeta := prescanIntMetadata toks
     noReturnGrps := prescanNoReturnGroups toks
+    vscale := vscale
   }
   let run : ParseM ParsedModule := do
     let mut entities : List TopLevelEntity := []

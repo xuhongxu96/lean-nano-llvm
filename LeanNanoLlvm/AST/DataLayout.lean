@@ -97,14 +97,21 @@ def floatABIAlign : FloatType → Nat
   | .half   => 2
   | .bfloat => 2
   | .float  => 4
-  | .double => 8
-  | .fp128  => 16
+  | .double    => 8
+  | .x86_fp80  => 16
+  | .fp128     => 16
+  | .ppc_fp128 => 16
 
 mutual
 
 /-- Compute `(sizeInBits, abiAlignInBytes)` structurally for an `LlvmType`. -/
 def typeLayout (dl : DataLayout) : LlvmType → Nat × Nat
   | .int w =>
+      let al := match dl.intAligns.find? (fun p => p.1 == w) with
+        | some (_, a) => a
+        | none => intABIAlign w
+      (w, al)
+  | .byte w =>
       let al := match dl.intAligns.find? (fun p => p.1 == w) with
         | some (_, a) => a
         | none => intABIAlign w

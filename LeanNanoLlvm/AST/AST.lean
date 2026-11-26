@@ -41,28 +41,34 @@ inductive FloatType : Type where
   | bfloat
   | float
   | double
+  | x86_fp80
   | fp128
+  | ppc_fp128
 deriving Repr, DecidableEq, Inhabited
 
 namespace FloatType
 
 @[simp]
 def format : FloatType → FloatFormat
-  | .half   => .half
-  | .bfloat => .bfloat
-  | .float  => .single
-  | .double => .double
-  | .fp128  => .fp128
+  | .half      => .half
+  | .bfloat    => .bfloat
+  | .float     => .single
+  | .double    => .double
+  | .x86_fp80  => .x86_fp80
+  | .fp128     => .fp128
+  | .ppc_fp128 => .fp128
 
 @[simp]
 def bitWidth (ft : FloatType) : Nat := ft.format.totalBits
 
 def print : FloatType → String
-  | .half   => "half"
-  | .bfloat => "bfloat"
-  | .float  => "float"
-  | .double => "double"
-  | .fp128  => "fp128"
+  | .half      => "half"
+  | .bfloat    => "bfloat"
+  | .float     => "float"
+  | .double    => "double"
+  | .x86_fp80  => "x86_fp80"
+  | .fp128     => "fp128"
+  | .ppc_fp128 => "ppc_fp128"
 
 end FloatType
 
@@ -76,6 +82,7 @@ deriving Repr
 
 inductive LlvmType : Type where
   | int (w : Nat)
+  | byte (w : Nat)
   | float (ft : FloatType)
   | ptr (addrSpace : Nat := 0)
   | vector (len : Nat) (elem : LlvmType)
@@ -97,6 +104,7 @@ def LlvmRetType.beq : LlvmRetType → LlvmRetType → Bool
 
 def LlvmType.beq : LlvmType → LlvmType → Bool
   | .int w1, .int w2 => w1 == w2
+  | .byte w1, .byte w2 => w1 == w2
   | .float f1, .float f2 => f1 == f2
   | .ptr a1, .ptr a2 => a1 == a2
   | .vector n1 e1, .vector n2 e2 => n1 == n2 && LlvmType.beq e1 e2
@@ -129,6 +137,8 @@ def LlvmRetType.decEq : (a b : LlvmRetType) → Decidable (a = b)
 def LlvmType.decEq : (a b : LlvmType) → Decidable (a = b)
   | .int w1, .int w2 =>
     if h : w1 = w2 then isTrue (by rw [h]) else isFalse (by intro heq; cases heq; exact h rfl)
+  | .byte w1, .byte w2 =>
+    if h : w1 = w2 then isTrue (by rw [h]) else isFalse (by intro heq; cases heq; exact h rfl)
   | .float f1, .float f2 =>
     if h : f1 = f2 then isTrue (by rw [h]) else isFalse (by intro heq; cases heq; exact h rfl)
   | .ptr a1, .ptr a2 =>
@@ -160,14 +170,15 @@ def LlvmType.decEq : (a b : LlvmType) → Decidable (a = b)
       | isFalse hr, _ => isFalse (by intro heq; cases heq; exact hr rfl)
       | _, isFalse ha => isFalse (by intro heq; cases heq; exact ha rfl)
     else isFalse (by intro heq; cases heq; exact hv rfl)
-  | .int _, .float _ | .int _, .ptr _ | .int _, .vector _ _ | .int _, .array _ _ | .int _, .struct _ _ | .int _, .named _ | .int _, .function _ _ _
-  | .float _, .int _ | .float _, .ptr _ | .float _, .vector _ _ | .float _, .array _ _ | .float _, .struct _ _ | .float _, .named _ | .float _, .function _ _ _
-  | .ptr _, .int _ | .ptr _, .float _ | .ptr _, .vector _ _ | .ptr _, .array _ _ | .ptr _, .struct _ _ | .ptr _, .named _ | .ptr _, .function _ _ _
-  | .vector _ _, .int _ | .vector _ _, .float _ | .vector _ _, .ptr _ | .vector _ _, .array _ _ | .vector _ _, .struct _ _ | .vector _ _, .named _ | .vector _ _, .function _ _ _
-  | .array _ _, .int _ | .array _ _, .float _ | .array _ _, .ptr _ | .array _ _, .vector _ _ | .array _ _, .struct _ _ | .array _ _, .named _ | .array _ _, .function _ _ _
-  | .struct _ _, .int _ | .struct _ _, .float _ | .struct _ _, .ptr _ | .struct _ _, .vector _ _ | .struct _ _, .array _ _ | .struct _ _, .named _ | .struct _ _, .function _ _ _
-  | .named _, .int _ | .named _, .float _ | .named _, .ptr _ | .named _, .vector _ _ | .named _, .array _ _ | .named _, .struct _ _ | .named _, .function _ _ _
-  | .function _ _ _, .int _ | .function _ _ _, .float _ | .function _ _ _, .ptr _ | .function _ _ _, .vector _ _ | .function _ _ _, .array _ _ | .function _ _ _, .struct _ _ | .function _ _ _, .named _ =>
+  | .int _, .byte _ | .int _, .float _ | .int _, .ptr _ | .int _, .vector _ _ | .int _, .array _ _ | .int _, .struct _ _ | .int _, .named _ | .int _, .function _ _ _
+  | .byte _, .int _ | .byte _, .float _ | .byte _, .ptr _ | .byte _, .vector _ _ | .byte _, .array _ _ | .byte _, .struct _ _ | .byte _, .named _ | .byte _, .function _ _ _
+  | .float _, .int _ | .float _, .byte _ | .float _, .ptr _ | .float _, .vector _ _ | .float _, .array _ _ | .float _, .struct _ _ | .float _, .named _ | .float _, .function _ _ _
+  | .ptr _, .int _ | .ptr _, .byte _ | .ptr _, .float _ | .ptr _, .vector _ _ | .ptr _, .array _ _ | .ptr _, .struct _ _ | .ptr _, .named _ | .ptr _, .function _ _ _
+  | .vector _ _, .int _ | .vector _ _, .byte _ | .vector _ _, .float _ | .vector _ _, .ptr _ | .vector _ _, .array _ _ | .vector _ _, .struct _ _ | .vector _ _, .named _ | .vector _ _, .function _ _ _
+  | .array _ _, .int _ | .array _ _, .byte _ | .array _ _, .float _ | .array _ _, .ptr _ | .array _ _, .vector _ _ | .array _ _, .struct _ _ | .array _ _, .named _ | .array _ _, .function _ _ _
+  | .struct _ _, .int _ | .struct _ _, .byte _ | .struct _ _, .float _ | .struct _ _, .ptr _ | .struct _ _, .vector _ _ | .struct _ _, .array _ _ | .struct _ _, .named _ | .struct _ _, .function _ _ _
+  | .named _, .int _ | .named _, .byte _ | .named _, .float _ | .named _, .ptr _ | .named _, .vector _ _ | .named _, .array _ _ | .named _, .struct _ _ | .named _, .function _ _ _
+  | .function _ _ _, .int _ | .function _ _ _, .byte _ | .function _ _ _, .float _ | .function _ _ _, .ptr _ | .function _ _ _, .vector _ _ | .function _ _ _, .array _ _ | .function _ _ _, .struct _ _ | .function _ _ _, .named _ =>
     isFalse (by intro h; cases h)
 
 def LlvmType.decEqList : (a b : List LlvmType) → Decidable (a = b)
@@ -236,7 +247,7 @@ def LlvmType.asFunction? : LlvmType → Option (LlvmRetType × List LlvmType)
 
 @[simp]
 def LlvmType.isScalar : LlvmType → Bool
-  | .int _ | .float _ | .ptr _ => true
+  | .int _ | .byte _ | .float _ | .ptr _ => true
   | _ => false
 
 @[simp]
@@ -472,6 +483,10 @@ inductive Instruction : Type where
                    (bundles : List (String × List (LlvmType × Exp)) := [])
                    (isNoReturn : Bool := false)
   | freeze         (v : TypedExp)
+  | bitinsert      (baseTy : LlvmType) (base : Exp) (valTy : LlvmType) (val : Exp)
+                   (offTy : LlvmType) (off : Exp)
+  | bitextract     (retTy : LlvmType) (srcTy : LlvmType) (src : Exp)
+                   (offTy : LlvmType) (off : Exp)
 deriving Repr
 
 /-- LLVM IR block terminators. -/
@@ -551,6 +566,7 @@ def resolveType (defs : List (LocalId × LlvmType)) : Nat → LlvmType → Excep
   | fuel + 1, ty =>
     match ty with
     | .int w => .ok (.int w)
+    | .byte w => .ok (.byte w)
     | .float ft => .ok (.float ft)
     | .ptr as => .ok (.ptr as)
     | .named nm =>
@@ -663,6 +679,13 @@ private def resolveInstr (defs : List (LocalId × LlvmType)) (fuel : Nat) :
       .ok (tag, bargs')
     .ok (.call rTy' fmf callee' args' retAttrs' bundles' isNoRet)
   | .freeze (t, e) => do .ok (.freeze (← resolveType defs fuel t, ← resolveExp defs fuel e))
+  | .bitinsert bTy b vTy v oTy o => do
+    .ok (.bitinsert (← resolveType defs fuel bTy) (← resolveExp defs fuel b)
+      (← resolveType defs fuel vTy) (← resolveExp defs fuel v)
+      (← resolveType defs fuel oTy) (← resolveExp defs fuel o))
+  | .bitextract rTy sTy s oTy o => do
+    .ok (.bitextract (← resolveType defs fuel rTy) (← resolveType defs fuel sTy) (← resolveExp defs fuel s)
+      (← resolveType defs fuel oTy) (← resolveExp defs fuel o))
 
 private def resolveTerm (defs : List (LocalId × LlvmType)) (fuel : Nat) :
     Terminator → Except String Terminator

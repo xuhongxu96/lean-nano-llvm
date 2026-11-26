@@ -10,7 +10,7 @@ def Exp.WellFormedFor (cfg : SemanticsConfig := .modern) (ty : LlvmType) : Exp �
   | .identifier (.local_id _) => ty.isFirstClass = true
   | .identifier (.global_id _) => ty.asPtr?.isSome = true
   | .bool _ => ty = LlvmType.i1
-  | .int _ => ty.asInt?.isSome = true
+  | .int _ => ty.asInt?.isSome = true ∨ ∃ w, ty = .byte w
   | .floatBits _ => ty.asFloat?.isSome = true
   | .floatDec _ _ _ => ty.asFloat?.isSome = true
   | .floatSpecial _ _ _ _ => ty.asFloat?.isSome = true
@@ -222,6 +222,21 @@ def Instruction.WellFormedWith (cfg : SemanticsConfig) (locals : List LocalId)
       ∧ ty.isFirstClass = true
       ∧ v.WellFormedFor cfg ty
       ∧ v.WellScopedTo locals
+  | .bitinsert baseTy base valTy val offTy off =>
+      instrId.DefinesLocal
+      ∧ baseTy.isFirstClass = true
+      ∧ valTy.isFirstClass = true
+      ∧ offTy.isIntOrIntVector = true
+      ∧ base.WellFormedFor cfg baseTy ∧ base.WellScopedTo locals
+      ∧ val.WellFormedFor cfg valTy ∧ val.WellScopedTo locals
+      ∧ off.WellFormedFor cfg offTy ∧ off.WellScopedTo locals
+  | .bitextract retTy srcTy src offTy off =>
+      instrId.DefinesLocal
+      ∧ retTy.isFirstClass = true
+      ∧ srcTy.isFirstClass = true
+      ∧ offTy.isIntOrIntVector = true
+      ∧ src.WellFormedFor cfg srcTy ∧ src.WellScopedTo locals
+      ∧ off.WellFormedFor cfg offTy ∧ off.WellScopedTo locals
 
 @[simp_wellform]
 def Code.WellFormedFrom (cfg : SemanticsConfig) (locals : List LocalId)

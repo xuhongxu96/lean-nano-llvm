@@ -262,6 +262,7 @@ def writeFrameReg (regs : AssocMap Identifier RegisterValue) (id : InstructionId
 @[simp, simp_step]
 def RegisterValue.matchesType : LlvmType → RegisterValue → Bool
   | .int wTy, .bv wVal _ => wTy == wVal
+  | .byte wTy, .byte wVal _ => wTy == wVal
   | .float ft1, .float ft2 _ => ft1 == ft2
   | .ptr as1, .ptr as2 _ => as1 == as2
   | .vector n _, .vector _ elems => n == elems.length
@@ -419,7 +420,7 @@ theorem mkEntryFrameWithMem_preserves_wf {dl cfg mem defn argVals frame' mem'}
   | ok frame => rw [hmk] at h; exact applyByValCopies_preserves_wf hwf h
 
 /-- Check that a callsite's return type and `byval` attributes match the callee prototype. -/
-def checkCallSignatureAndByVal (dl : DataLayout) (retTy : LlvmRetType)
+def checkCallSignatureAndByVal (_dl : DataLayout) (retTy : LlvmRetType)
     (callArgAttrs : List (List ValueAttr)) (defn : Definition) : Except ExecError Unit :=
   match defn.prototype.type with
   | .function calleeRetTy _ _ =>

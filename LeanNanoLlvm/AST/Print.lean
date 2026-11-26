@@ -10,6 +10,7 @@ mutual
 
 def LlvmType.print : LlvmType → String
   | .int w => s!"i{w}"
+  | .byte w => s!"b{w}"
   | .float ft => ft.print
   | .ptr 0 => "ptr"
   | .ptr as => s!"ptr addrspace({as})"
@@ -256,6 +257,10 @@ def Instruction.print : Instruction → String
       s!"call{formatFlags fmf.toStrings}{retAttrStr} {retTy.print} {callee.print}({argStr})"
   | .freeze ⟨ty, v⟩ =>
       s!"freeze {ty.print} {v.print}"
+  | .bitinsert bTy b vTy v oTy o =>
+      s!"bitinsert {bTy.print} {b.print}, {vTy.print} {v.print}, {oTy.print} {o.print}"
+  | .bitextract rTy sTy s oTy o =>
+      s!"bitextract {rTy.print}, {sTy.print} {s.print}, {oTy.print} {o.print}"
 
 def Terminator.print : Terminator → String
   | .retVoid => "ret void"
