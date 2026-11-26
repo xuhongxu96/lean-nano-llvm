@@ -1224,6 +1224,7 @@ theorem test_byval_poison_ub :
      | _ => false) = true := by
   decide +kernel
 
+-- Under LLVM's default data layout (`i64:32:64`) the `i64` field sits at offset 4.
 def namedStructModule : AST.TopLevel := [llvm|
 %Pair = type { i32, i64 }
 define i64 @use_pair() {
@@ -1232,10 +1233,10 @@ entry:
   %f0 = getelementptr inbounds %Pair, ptr %p, i64 0, i32 0
   %f1 = getelementptr inbounds %Pair, ptr %p, i64 0, i32 1
   store i32 12, ptr %f0, align 4
-  store i64 30, ptr %f1, align 8
+  store i64 30, ptr %f1, align 4
   %a = load i32, ptr %f0, align 4
   %a64 = zext i32 %a to i64
-  %b = load i64, ptr %f1, align 8
+  %b = load i64, ptr %f1, align 4
   %res = add i64 %a64, %b
   ret i64 %res
 }

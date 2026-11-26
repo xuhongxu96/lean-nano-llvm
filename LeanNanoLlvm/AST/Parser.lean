@@ -69,8 +69,21 @@ private def mkRawId (s : String) : RawId :=
   | some n => .anonymous n
   | none => .name s
 
-/-- Lex an LLVM IR source string into a token array (total via structural recursion on `List Char`). -/
-def tokenize (input : String) : Array Tok :=
+/-- Token accumulator that also records the (0-based) source line of every token. -/
+structure LexAcc where
+  toks  : Array Tok := #[]
+  lines : Array Nat := #[]
+  line  : Nat := 0
+
+namespace LexAcc
+@[inline] def push (a : LexAcc) (t : Tok) : LexAcc :=
+  { a with toks := a.toks.push t, lines := a.lines.push a.line }
+@[inline] def nl (a : LexAcc) : LexAcc := { a with line := a.line + 1 }
+end LexAcc
+
+/-- Lex an LLVM IR source string into a token array plus per-token 0-based line numbers
+(total via structural recursion on `List Char`). -/
+def tokenizeWithLines (input : String) : Array Tok × Array Nat :=
   let rec skipComment : List Char → List Char
     | [] => []
     | '\n' :: cs => cs
@@ -102,7 +115,7 @@ def tokenize (input : String) : Array Tok :=
     | cs =>
       let (s, rest) := readIdent [] cs
       (mkRawId s, rest)
-  let rec go (fuel : Nat) (acc : Array Tok) : List Char → Array Tok
+  let rec go (fuel : Nat) (acc : LexAcc) : List Char → LexAcc
     | [] => acc.push .eof
     | cs =>
       match fuel with
@@ -111,8 +124,8 @@ def tokenize (input : String) : Array Tok :=
         match cs with
         | [] => acc.push .eof
         | c :: rest =>
-          if c.isWhitespace then go fuel' acc rest
-          else if c == ';' then go fuel' acc (skipComment rest)
+          if c.isWhitespace then go fuel' (if c == '\n' then acc.nl else acc) rest
+          else if c == ';' then go fuel' acc.nl (skipComment rest)
           else if c == '=' then go fuel' (acc.push .eq) rest
           else if c == ',' then go fuel' (acc.push .comma) rest
           else if c == ':' then go fuel' (acc.push .colon) rest
@@ -226,7 +239,12 @@ def tokenize (input : String) : Array Tok :=
             -- Skip unrecognized single punctuation character
             go fuel' acc rest
   let cs := input.toList
-  go (cs.length + 1) #[] cs
+  let acc := go (cs.length + 1) {} cs
+  (acc.toks, acc.lines)
+
+/-- Lex an LLVM IR source string into a token array. -/
+def tokenize (input : String) : Array Tok := (tokenizeWithLines input).1
+
 
 /-- Parse an LLVM `target datalayout = "..."` string into `DataLayout`. -/
 def parseDataLayoutString (s : String) : DataLayout :=
@@ -264,11 +282,17 @@ def parseDataLayoutString (s : String) : DataLayout :=
     else if part.startsWith "i" then
       let fields := (part.drop 1).toString.splitOn ":"
       match fields with
-      | wStr :: abiStr :: _ =>
+      | wStr :: abiStr :: rest =>
         match parseNatStr wStr, parseNatStr abiStr with
         | some w, some abiBits =>
           let abiBytes := max 1 (abiBits / 8)
-          { dl with intAligns := (w, abiBytes) :: dl.intAligns }
+          let prefBytes := match rest with
+            | prefStr :: _ => match parseNatStr prefStr with
+              | some pb => max 1 (pb / 8)
+              | none => abiBytes
+            | [] => abiBytes
+          { dl with intAligns := (w, abiBytes) :: dl.intAligns,
+                    intPrefAligns := (w, prefBytes) :: dl.intPrefAligns }
         | _, _ => dl
       | _ => dl
     else if part.startsWith "P" then
@@ -285,6 +309,23 @@ def parseDataLayoutString (s : String) : DataLayout :=
       | none => dl
     else dl
 
+/-- Source location of one parsed instruction / terminator: its token range and 0-based line. -/
+structure SrcEntry where
+  iid      : InstructionId
+  startTok : Nat
+  endTok   : Nat
+  line     : Nat
+deriving Repr, Inhabited
+
+/-- Source information for one function definition (used by printers needing the exact source). -/
+structure FnSrc where
+  name        : FunctionId
+  /-- Token range of the parameter list (between, and excluding, the parentheses). -/
+  paramsStart : Nat
+  paramsEnd   : Nat
+  entries     : Array SrcEntry
+deriving Repr, Inhabited
+
 /-- Parser state holding token stream, cursor, metadata tables, and void/anon counters. -/
 structure PState where
   toks         : Array Tok
@@ -295,6 +336,9 @@ structure PState where
   intMeta      : List (String × Nat) := []
   noReturnGrps : List Nat := []
   vscale       : Nat := 4
+  curSrc       : Array SrcEntry := #[]
+  lines        : Array Nat := #[]
+  fnSrcs       : Array FnSrc := #[]
 deriving Inhabited
 
 abbrev ParseM := StateT PState (Except String)
@@ -1764,6 +1808,8 @@ def parseBlock (fuel : Nat) (isFirst : Bool) : ParseM Block := do
   let mut guard := fuel
   while term?.isNone && guard > 0 do
     guard := guard - 1
+    let p0 := (← get).pos
+    let n0 := code.length
     let t0 ← peek
     if isTerminatorStart t0 then
       let term ← parseTerminator fuel
@@ -1819,6 +1865,17 @@ def parseBlock (fuel : Nat) (isFirst : Bool) : ParseM Block := do
           | .store .. | .call .void .. => freshVoidId
           | _ => pure (.id (← freshAnonId))
         code := (iid, instr) :: code
+    let p1 := (← get).pos
+    let line := (← get).lines.getD p0 0
+    if code.length != n0 then
+      match code with
+      | (iid, _) :: _ =>
+        modify fun st => { st with curSrc := st.curSrc.push { iid, startTok := p0, endTok := p1, line } }
+      | [] => pure ()
+    match term? with
+    | some (tid, _) =>
+      modify fun st => { st with curSrc := st.curSrc.push { iid := tid, startTok := p0, endTok := p1, line } }
+    | none => pure ()
   match term? with
   | some term => return { id := bid, code := code.reverse, terminator := term }
   | none => throw s!"parse error: block '{bid.ToString}' missing terminator"
@@ -1966,6 +2023,10 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
 structure ParsedModule where
   topLevel   : TopLevel
   dataLayout : DataLayout := .default64LE
+  /-- Token stream of the source (for source-faithful printing). -/
+  tokens     : Array Tok := #[]
+  /-- Per-function source map (token ranges and line numbers of instructions). -/
+  fnSrcs     : Array FnSrc := #[]
 deriving Repr
 
 /-- Pre-scan `!N = !{ i32 lo, i32 hi }` metadata nodes so `load ... !range !N` resolves cleanly. -/
@@ -2024,12 +2085,35 @@ private def prescanNoReturnGroups (toks : Array Tok) : List Nat :=
   termination_by n - i
   go 0 []
 
+/-- Locate the parameter list of a function header in `[lo, hi)`: the token range strictly inside
+the first top-level parenthesis pair following the function's `@name`. -/
+def findParamRange (toks : Array Tok) (lo hi : Nat) : Nat × Nat := Id.run do
+  let mut i := lo
+  while i < hi do
+    match toks.getD i .eof with
+    | .globalId _ =>
+      if toks.getD (i + 1) .eof == .lparen then
+        let start := i + 2
+        let mut depth : Nat := 1
+        let mut j := start
+        while j < hi && depth > 0 do
+          match toks.getD j .eof with
+          | .lparen => depth := depth + 1
+          | .rparen => depth := depth - 1
+          | _ => pure ()
+          j := j + 1
+        return (start, if depth == 0 then j - 1 else j)
+      i := i + 1
+    | _ => i := i + 1
+  return (hi, hi)
+
 /-- Parse an entire LLVM IR `.ll` text module into `ParsedModule`. -/
 def parseLlvmModule (input : String) (vscale : Nat := 4) : Except String ParsedModule := do
-  let toks := tokenize input
+  let (toks, lines) := tokenizeWithLines input
   let fuel := toks.size * 4 + 64
   let initSt : PState := {
     toks := toks
+    lines := lines
     rangeMeta := prescanRangeMetadata toks
     intMeta := prescanIntMetadata toks
     noReturnGrps := prescanNoReturnGroups toks
@@ -2153,7 +2237,10 @@ def parseLlvmModule (input : String) (vscale : Nat := 4) : Except String ParsedM
         entities := .declaration decl :: entities
       | .ident "define" =>
         let _ ← bump
+        let hdrStart := (← get).pos
         let (decl, argNames) ← parseFnHeader fuel
+        let hdrEnd := (← get).pos
+        modify fun st => { st with curSrc := #[] }
         expect .lbrace "define body"
         modify fun st => { st with nextAnon := argNames.length }
         let mut blocks : List Block := []
@@ -2169,11 +2256,16 @@ def parseLlvmModule (input : String) (vscale : Nat := 4) : Except String ParsedM
           args := argNames
           blocks := blocks.reverse
         }
+        let toksNow := (← get).toks
+        let (ps, pe) := findParamRange toksNow hdrStart hdrEnd
+        modify fun st => { st with
+          fnSrcs := st.fnSrcs.push { name := decl.name, paramsStart := ps, paramsEnd := pe, entries := st.curSrc }
+          curSrc := #[] }
         entities := .definition defn :: entities
       | tok => throw s!"parse error: unexpected top-level token {repr tok}"
     return { topLevel := { entities := entities.reverse }, dataLayout := dl }
   match run.run initSt with
-  | .ok (res, _) => .ok res
+  | .ok (res, st) => .ok { res with tokens := toks, fnSrcs := st.fnSrcs }
   | .error msg => .error msg
 
 end LeanNanoLlvm.AST.Parser

@@ -365,7 +365,7 @@ def applyByValCopies (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
               let newPtr := MemoryState.derivePointer dl newObj
               go (i + 1) m2 (regs.insert (.local_id nm) (.ptr as (.value newPtr)))
                 (newObj.allocId :: allocas) rest
-        | some (.ptr _ .poison) => .error (.immediateUB s!"byval argument %{nm} is poison")
+        | some (.ptr _ .poison) => .error (.immediateUB "Invalid poison byval pointer argument.")
         | _ => .error (.staticError s!"byval argument %{nm} must be a pointer")
   if defn.prototype.argAttrs.any (fun as => as.any (fun | .byval _ => true | _ => false)) then
     go 0 mem frame.registers frame.frameAllocas defn.args
@@ -423,9 +423,9 @@ theorem mkEntryFrameWithMem_preserves_wf {dl cfg mem defn argVals frame' mem'}
 def checkCallSignatureAndByVal (_dl : DataLayout) (retTy : LlvmRetType)
     (callArgAttrs : List (List ValueAttr)) (defn : Definition) : Except ExecError Unit :=
   match defn.prototype.type with
-  | .function calleeRetTy _ _ =>
+  | .function calleeRetTy ps va =>
     if calleeRetTy != retTy then
-      .error (.immediateUB "Call through function pointer with mismatched return type")
+      .error (.immediateUB s!"Indirect call through a function pointer with mismatched signature. Expected: {(LlvmType.function retTy ps va).print}, Actual: {defn.prototype.type.print}.")
     else
       let rec go (i : Nat) : List (List ValueAttr) → Except ExecError Unit
         | [] =>
@@ -441,7 +441,7 @@ def checkCallSignatureAndByVal (_dl : DataLayout) (retTy : LlvmRetType)
           | none, none => go (i + 1) rest
           | some t1, some t2 =>
             if t1 == t2 then go (i + 1) rest
-            else .error (.immediateUB "Mismatched byval attribute type between callee and callsite")
+            else .error (.immediateUB "Mismatched byval attribute between callee and callsite")
           | _, _ =>
             .error (.immediateUB "Mismatched byval attribute between callee and callsite")
       go 0 callArgAttrs

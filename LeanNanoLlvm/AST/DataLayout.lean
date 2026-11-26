@@ -27,6 +27,8 @@ structure DataLayout : Type where
   allocaAddrSpace   : Nat := 0
   globalsAddrSpace  : Nat := 0
   intAligns         : List (Nat × Nat) := []
+  /-- Explicit integer preferred alignments `(bitWidth, prefAlignBytes)` from `i<N>:<abi>:<pref>`. -/
+  intPrefAligns     : List (Nat × Nat) := []
   targetTriple      : String := ""
 deriving Repr, DecidableEq, Inhabited
 
@@ -86,12 +88,41 @@ def getPointerABIAlign (dl : DataLayout) (addrSpace : Nat := 0) : Nat :=
 def getNullPtrValue (dl : DataLayout) (addrSpace : Nat := 0) : Nat :=
   (dl.getPointerLayout addrSpace).nullAddr
 
+/-- LLVM's default integer alignment specs `(bitWidth, abiBytes, prefBytes)`
+(`i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64`). -/
+def defaultIntSpecs : List (Nat × Nat × Nat) :=
+  [(1, 1, 1), (8, 1, 1), (16, 2, 2), (32, 4, 4), (64, 4, 8)]
+
+/-- Integer alignment lookup following `DataLayout::getIntegerAlignment`: the spec for the
+smallest specified width `≥ w`, or the largest specified width if none is larger. -/
+def intAlignLookup (specs : List (Nat × Nat)) (w : Nat) : Nat :=
+  -- smallest specified width ≥ w (structural fold, kernel-reducible)
+  let best := specs.foldl (fun (acc : Option (Nat × Nat)) p =>
+    if p.1 ≥ w then
+      match acc with
+      | some q => if p.1 < q.1 then some p else acc
+      | none => some p
+    else acc) none
+  match best with
+  | some (_, a) => a
+  | none =>
+    let largest := specs.foldl (fun (acc : Option (Nat × Nat)) p =>
+      match acc with
+      | some q => if p.1 > q.1 then some p else acc
+      | none => some p) none
+    match largest with
+    | some (_, a) => a
+    | none => 1
+
+/-- Merge explicit `(width, align)` specs over LLVM's defaults (selected by `pick`). -/
+def mergeIntSpecs (explicit : List (Nat × Nat)) (pick : Nat × Nat × Nat → Nat) : List (Nat × Nat) :=
+  let defaults := defaultIntSpecs.filterMap fun d =>
+    if explicit.any (·.1 == d.1) then none else some (d.1, pick d)
+  explicit.foldl (fun acc e => if acc.any (·.1 == e.1) then acc else acc ++ [e]) [] ++ defaults
+
 /-- Default ABI alignment (in bytes) for an integer of `w` bits (matches LLVM default DataLayout). -/
 def intABIAlign (w : Nat) : Nat :=
-  if w ≤ 8 then 1
-  else if w ≤ 16 then 2
-  else if w ≤ 32 then 4
-  else 8
+  intAlignLookup (defaultIntSpecs.map fun (w', a, _) => (w', a)) w
 
 /-- Default ABI alignment (in bytes) for a floating-point type. -/
 def floatABIAlign : FloatType → Nat
@@ -107,16 +138,8 @@ mutual
 
 /-- Compute `(sizeInBits, abiAlignInBytes)` structurally for an `LlvmType`. -/
 def typeLayout (dl : DataLayout) : LlvmType → Nat × Nat
-  | .int w =>
-      let al := match dl.intAligns.find? (fun p => p.1 == w) with
-        | some (_, a) => a
-        | none => intABIAlign w
-      (w, al)
-  | .byte w =>
-      let al := match dl.intAligns.find? (fun p => p.1 == w) with
-        | some (_, a) => a
-        | none => intABIAlign w
-      (w, al)
+  | .int w => (w, intAlignLookup (mergeIntSpecs dl.intAligns (fun (_, a, _) => a)) w)
+  | .byte w => (w, intAlignLookup (mergeIntSpecs dl.intAligns (fun (_, a, _) => a)) w)
   | .float ft => (ft.bitWidth, floatABIAlign ft)
   | .ptr as => (dl.getPointerSizeInBits as, dl.getPointerABIAlign as)
   | .vector n elem =>
@@ -166,7 +189,31 @@ def typeABIAlign (dl : DataLayout) (ty : LlvmType) : Nat :=
 def typePrefAlign (dl : DataLayout) (ty : LlvmType) : Nat :=
   match ty with
   | .struct _ _ => max 8 (dl.typeABIAlign ty)
+  | .int w | .byte w =>
+    let explicitPref := dl.intPrefAligns ++
+      (dl.intAligns.filter fun (w', _) => !(dl.intPrefAligns.any (·.1 == w')))
+    max (dl.typeABIAlign ty) (intAlignLookup (mergeIntSpecs explicitPref (fun (_, _, p) => p)) w)
+  | .array _ elem => max (dl.typeABIAlign ty) (typePrefAlignScalar dl elem)
   | _ => dl.typeABIAlign ty
+where
+  typePrefAlignScalar (dl : DataLayout) : LlvmType → Nat
+    | .int w | .byte w =>
+      let explicitPref := dl.intPrefAligns ++
+        (dl.intAligns.filter fun (w', _) => !(dl.intPrefAligns.any (·.1 == w')))
+      max (dl.typeABIAlign (.int w)) (intAlignLookup (mergeIntSpecs explicitPref (fun (_, _, p) => p)) w)
+    | t => dl.typeABIAlign t
+
+/-- Alignment `llubi` gives a global variable (`GlobalValue::getPointerAlignment`): an explicit
+`align`, else for definitions `DataLayout::getPreferredAlign` (preferred type alignment, raised
+to 16 bytes for globals larger than 128 bits), else (external declarations) the ABI alignment. -/
+def globalAlign (dl : DataLayout) (ty : LlvmType) (explicit? : Option Nat) (isDefinition : Bool) : Nat :=
+  match explicit? with
+  | some a => a
+  | none =>
+    if isDefinition then
+      let a := dl.typePrefAlign ty
+      if a < 16 && (dl.typeLayout ty).1 > 128 then 16 else a
+    else dl.typeABIAlign ty
 
 def structFieldsMaxAlign (dl : DataLayout) (fields : List LlvmType) : Nat :=
   (dl.structLayoutAux false 0 1 fields).2.2

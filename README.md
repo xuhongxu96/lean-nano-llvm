@@ -48,11 +48,14 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
   - Multi-block CFGs with `br`, conditional `br`, `switch`, `indirectbr`/`blockaddress`, `invoke`/`callbr`, `unreachable`, parallel `phi` nodes, recursive/indirect function-pointer calls, `nobuiltin`, and C/C++ libcalls (`printf`, `puts`, `putchar`, `exit`, `abort`, `_ZSt9terminatev`).
   - First-class `ValueAttr` (`noundef`, `nonnull`, `align`, `dereferenceable`, `dereferenceable_or_null`, `range`/`rangeList`, `nofpclass`, `byval`, `sret`, `noalias`, `readonly`), `noreturn`, `llvm.assume` operand bundles, `volatile` load/store, constant expressions (`getelementptr`, `ptrtoint`/`inttoptr`/`bitcast`, `add`/`sub`, `insertelement`), and varargs (`...`).
   - Structs (including `%T = type ...` named types resolved via `TopLevel.resolveTypes`), arrays, fixed-width and scalable vectors (`<vscale x N x T>`, `llvm.vscale`, `llvm.stepvector`, `extractvalue`, `insertvalue`, `extractelement`, `insertelement`, `shufflevector`, `select`), integer/bit intrinsics (`abs`, `smax`/`smin`/`umax`/`umin`, `ctlz`/`cttz`/`ctpop`/`bitreverse`/`bswap`, `fshl`/`fshr`, `sshl.sat`/`ushl.sat`, `scmp`/`ucmp`, `smulh`/`umulh`, `clmul`, `pdep`/`pext`, saturating & `.with.overflow`), and vector/masked/VP/matrix/histogram/speculative intrinsics (`vector.reduce.*`, `vector.reverse`/`extract`/`insert`/`interleave*`/`deinterleave*`/`splice.*`, `get.active.lane.mask`, `mask.beforefirst`, `masked.{load,store,gather,scatter,expandload,compressstore}`, `vp.{merge,load,store,gather,scatter}`, `experimental.vp.strided.{load,store}`, `matrix.{transpose,column.major.store}`, `speculative.load`, `experimental.vector.{compress,extract.last.active,match,histogram.*}`).
-  - Standalone total pure-Lean `.ll` text parser (`LeanNanoLlvm/AST/Parser.lean`) and `llubi`-compatible CLI runner (`lean-nano-llvm run <file.ll> --verbose ...`).
+  - Standalone total pure-Lean `.ll` text parser (`LeanNanoLlvm/AST/Parser.lean`) and CLI runner (`lean-nano-llvm run <file.ll> --verbose ...`).
+- **`llubi`-Compatible Frontend** (`LeanNanoLlvm/Llubi/`, `lean-nano-llvm llubi ...`): runs a module with the verified small-step semantics and reproduces LLVM `llubi`'s observable behaviour byte for byte — the same options, the same `--verbose` trace (instructions re-printed exactly as LLVM's `AsmWriter` prints them, values printed as `llubi`'s `AnyValue::print`), the same `Stacktrace:` / `Immediate UB detected:` / `Error:` diagnostics with `<stdin>:LINE` locations, program output, and exit codes. LLVM's own `llvm/test/tools/llubi` suite therefore runs unmodified under `lit` + `FileCheck`:
+  - `AsmWriter.lean` re-prints each instruction from its source tokens (recorded by the parser's source map) with LLVM's canonicalizations: signed integer constants, `writeAPFloatInternal` float formatting, constant uniquing (`zeroinitializer`, `poison`, `undef`, `splat (...)`, `c"..."`), implicit `align`, intrinsic name re-mangling, attribute ordering, metadata slot numbering, `/* (fpclass) */` comments, and multi-line `switch`/`invoke`/`callbr`.
+  - `FloatFormat.lean` is a bit-exact port of `APFloat::toString` / `toStringRoundTrip`; `Driver.lean` holds the CLI, the trace loop over `execStep`, and an `std::mt19937_64` oracle seeded like `llubi`.
 
 ## Architecture
 
-The project is organized into a clean four-layer acyclic architecture under `LeanNanoLlvm/`:
+The project is organized into a layered acyclic architecture under `LeanNanoLlvm/`:
 
 1. `LeanNanoLlvm/Util`: `AssocMap.lean` (kernel-reducible association map), `Config.lean` (`SemanticsConfig`, `UndefMode`, `ExecError`), `IEEEFloat.lean`, `Poison.lean`, `Undef.lean` (`NondetOracle`, `OracleState`).
 2. `LeanNanoLlvm/AST`: `AST.lean` (plain `Nat` widths, named types, `TopLevel.resolveTypes`), `DataLayout.lean`, `Print.lean`, `Syntax.lean` (`[llvm-*| ...]` quasiquoters with `i$(w)` antiquotation), `Unexpander.lean`, `Parser.lean` (standalone `.ll` text parser).
@@ -62,7 +65,8 @@ The project is organized into a clean four-layer acyclic architecture under `Lea
    - `Step.lean` (primary indexed small-step relation `Step`, `StarStep`, `Terminates`, `Diverges`, `CanAbort`, inversion lemmas)
    - `Exec.lean` (kernel-reducible `execStep` / `runSteps` + `execStep_sound` / `runSteps_sound` + module runners) & `Wellformed.lean`.
 4. `LeanNanoLlvm/Refinement`: `Refinement.lean` (`Config.IsRefinedBy`, `of_simulation`, `RefinementEnv`, `Definition.IsRefinedByIn`, `Definition.IsRefinedByWith`, `x ⊒ y`, `refl`, `trans`, and `Trans` instances).
-5. `LeanNanoLlvm/Tactic.lean`: layered simp sets (`simp_llvm`, `simp_wellform`, `simp_step`) and tactics (`llvm_simp`, `llvm_wf`, `llvm_step`).
+5. `LeanNanoLlvm/Llubi`: the `llubi`-compatible frontend (`FloatFormat.lean`, `AsmWriter.lean`, `ValuePrinter.lean`, `Driver.lean`); executable-only code outside the verified core.
+6. `LeanNanoLlvm/Tactic.lean`: layered simp sets (`simp_llvm`, `simp_wellform`, `simp_step`) and tactics (`llvm_simp`, `llvm_wf`, `llvm_step`).
 
 ## Build, CLI & Tests
 
@@ -72,8 +76,11 @@ lake exe lean-nano-llvm                                # built-in demo
 lake exe lean-nano-llvm run tests/ll/fib.ll            # parse & run a standalone .ll file
 bash scripts/run_ll_tests.sh                           # run standalone .ll regression suite
 lake env lean scripts/audit_axioms.lean                # verify standard-axioms-only audit
-python3 scripts/run_llubi_tests.py <path/to/llubi>     # optional cross-check against LLVM llubi tests
+bash scripts/run_llubi_tests.sh [llvm/test/tools/llubi] # LLVM's llubi suite via lit + FileCheck
+lake exe lean-nano-llvm llubi --verbose < tests/ll/fib.ll  # llubi-compatible trace
 ```
+
+`scripts/run_llubi_tests.sh` only invokes `lit` on [tests/llubi/lit.cfg.py](tests/llubi/lit.cfg.py), which substitutes `llubi` with `lean-nano-llvm llubi`; without a directory argument it fetches the tests from llvm-project at a pinned commit. It needs `lit` (`pip install lit`) and LLVM's `FileCheck` on `PATH` (e.g. Ubuntu's `llvm-18-tools`). Currently 204 of the 246 tests pass; the remaining ones are listed with their reasons in [tests/llubi/xfail.txt](tests/llubi/xfail.txt) (mostly seeded-nondeterminism draw order and `llubi`'s randomized provenance tags), and lit reports any unexpected pass.
 
 Test suites (verified directly in Lean's kernel using only standard axioms — no `native_decide`):
 
@@ -81,6 +88,7 @@ Test suites (verified directly in Lean's kernel using only standard axioms — n
 - [LeanNanoLlvm/Semantics/Test.lean](LeanNanoLlvm/Semantics/Test.lean) — toggleable `undef`, Immediate UB vs `poison`, memory/provenance/endianness/heap/globals, IEEE-754 floats & rounding/reduction intrinsics, CFG/parallel `phi`/recursion, aggregates, vectors, volatile `TraceEvent`s, `load` metadata, `byval` copies, named structs, varargs, and `runSteps_sound`
 - [LeanNanoLlvm/Refinement/Test.lean](LeanNanoLlvm/Refinement/Test.lean) — width-generic (`i$(w)`) arithmetic & `undef` refinement, `poison`, Immediate UB, nondeterministic `freeze`, IEEE-754 `fneg` & FMF (`nnan`), `select`, arbitrary caller-memory store-to-load forwarding & dead `alloca` elimination, caller-memory dead-store elimination (+ negative bogus-store rejection test), `calc` transitivity chaining, loop simulation (`Config.IsRefinedBy.of_simulation`), and module-aware interprocedural refinement (`RefinementEnv.ofTopLevel` / `⊒⟨env⟩`)
 - [tests/ll/](tests/ll/) — standalone `.ll` regression tests executed via `lean-nano-llvm run` in CI
+- [tests/llubi/](tests/llubi/) — `lit` configuration running LLVM's `llvm/test/tools/llubi` suite against `lean-nano-llvm llubi` in CI
 
 ## Acknowledgments
 

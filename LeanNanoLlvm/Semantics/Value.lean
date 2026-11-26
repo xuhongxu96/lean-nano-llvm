@@ -7,6 +7,7 @@ import LeanNanoLlvm.AST.Print
 import LeanNanoLlvm.Semantics.IntOps
 import LeanNanoLlvm.Semantics.FloatOps
 import LeanNanoLlvm.Semantics.Memory
+import LeanNanoLlvm.Llubi.FloatFormat
 
 namespace LeanNanoLlvm.Semantics
 
@@ -54,6 +55,82 @@ def toStringList : List RegisterValue → List String
 end
 
 instance : ToString RegisterValue := ⟨toStringAux⟩
+
+/-! ### `llubi`-compatible rendering (`llvm::ubi::AnyValue::print`) -/
+
+/-- Value of LSB-first concrete bits (non-concrete bits count as 0). -/
+def bitsValue (bits : List MemBit) : Nat :=
+  bits.foldr (fun b acc => acc * 2 + (match b with | .concrete true _ => 1 | _ => 0)) 0
+
+/-- `PrintByte` of `ByteValue::print` for one chunk (`bits` LSB-first, at most 8 bits). -/
+def llubiByteChunk (bits : List MemBit) (full : Bool) : String :=
+  let allConcreteNoTag := bits.all fun | .concrete _ none => true | _ => false
+  let allPoison := bits.all fun | .concrete .. => false | _ => true
+  if full && allConcreteNoTag then "0x" ++ Llubi.hexPadded 2 (bitsValue bits)
+  else if full && allPoison then "0x!!"
+  else
+    let msbFirst := bits.reverse
+    let body := String.ofList (msbFirst.map fun
+      | .concrete true _ => '1'
+      | .concrete false _ => '0'
+      | _ => '!')
+    if bits.any (fun | .concrete _ (some _) => true | _ => false) then
+      body ++ "(" ++ String.ofList (msbFirst.map fun
+        | .concrete b (some _) => if b then '1' else '0'
+        | _ => '!') ++ ")"
+    else body
+
+/-- A pointer reassembled from LSB-first bits that all carry the same provenance. -/
+def pointerOfBits? (bits : List MemBit) : Option Pointer :=
+  match bits.head? with
+  | some (.concrete _ (some (prov, _))) =>
+    if bits.all (fun | .concrete _ (some (p, _)) => p == prov | _ => false) then
+      some { prov, addrWidth := bits.length, addr := BitVec.ofNat bits.length (bitsValue bits) }
+    else none
+  | _ => none
+
+/-- `ByteValue::print` for a `b<w>` value (`bits` LSB-first). -/
+def llubiByteString (mem : MemoryState) (dl : DataLayout) (w : Nat) (bits : List MemBit) : String :=
+  let n := (w + 7) / 8
+  let chunk (k : Nat) : List MemBit := (bits.drop (8 * k)).take (min 8 (w - 8 * k))
+  let order : List Nat := if dl.isLittleEndian then List.range n else (List.range n).reverse
+  let isFull (k : Nat) : Bool := w % 8 == 0 || k != n - 1
+  let ptrW := dl.getPointerSizeInBits 0
+  let body : String :=
+    if ptrW % 8 == 0 && ptrW > 0 && w % ptrW == 0 then
+      let ptrSz := ptrW / 8
+      String.join ((List.range (n / ptrSz)).map fun sIdx =>
+        let ks := (order.drop (sIdx * ptrSz)).take ptrSz
+        let lo := ks.foldl min (n - 1)
+        match pointerOfBits? ((bits.drop (8 * lo)).take ptrW) with
+        | some p => mem.ptrString p ++ " "
+        | none => String.join (ks.map fun k => llubiByteChunk (chunk k) (isFull k) ++ " "))
+    else String.join (order.map fun k => llubiByteChunk (chunk k) (isFull k) ++ " ")
+  s!"b{w} " ++ body
+
+mutual
+/-- `AnyValue::print`: `i32 -1`, `T`/`F`, `float 1.500000e+00`, `ptr 0x8 [a]`, `{ ... }`. -/
+def llubiStringAux (mem : MemoryState) (dl : DataLayout) : RegisterValue → String
+  | .void => "none"
+  | .bv _ .poison => "poison"
+  | .bv w (.value b) => if w == 1 then (if b.toNat == 1 then "T" else "F") else s!"i{w} {b.toInt}"
+  | .byte w bits => llubiByteString mem dl w bits
+  | .float _ .poison => "poison"
+  | .float ft (.value f) => s!"{ft.print} {Llubi.llubiFloatString ft f}"
+  | .ptr _ .poison => "poison"
+  | .ptr _ (.value p) => mem.ptrString p
+  | .vector _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl es) ++ " }"
+  | .array _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl es) ++ " }"
+  | .struct _ _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl es) ++ " }"
+
+def llubiStringList (mem : MemoryState) (dl : DataLayout) : List RegisterValue → List String
+  | [] => []
+  | v :: vs => llubiStringAux mem dl v :: llubiStringList mem dl vs
+end
+
+/-- `llubi` rendering of a runtime value. -/
+def llubiString (v : RegisterValue) (mem : MemoryState) (dl : DataLayout) : String :=
+  llubiStringAux mem dl v
 
 mutual
 def beq : RegisterValue → RegisterValue → Bool
@@ -1528,7 +1605,7 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
   match attr with
   | .noundef =>
     if val.containsPoison then
-      .error (.immediateUB "Value violates `noundef` attribute (contains poison)")
+      .error (.immediateUB s!"The value {val.llubiString mem dl} violates noundef attribute.")
     else .ok val
   | .nonnull =>
     liftUnaryPure ty.scalarType val fun
@@ -1572,32 +1649,32 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
   | .dereferenceable bytes =>
     match val with
     | .ptr _ .poison =>
-      .error (.immediateUB s!"Poison pointer violates `dereferenceable({bytes})` attribute")
+      .error (.immediateUB s!"The value poison violates dereferenceable({bytes}) attribute.")
     | .ptr as (.value p) =>
       if p.isNull dl as then
-        .error (.immediateUB s!"Null pointer violates `dereferenceable({bytes})` attribute")
+        .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable({bytes}) attribute.")
       else match mem.resolveObject? p with
         | none =>
-          .error (.immediateUB s!"Pointer with invalid/nullary provenance violates `dereferenceable({bytes})` attribute")
+          .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable({bytes}) attribute.")
         | some mo =>
           if mo.state == .freed || bytes > mo.size || p.addr.toNat < mo.baseAddr ||
              p.addr.toNat - mo.baseAddr > mo.size - bytes then
-            .error (.immediateUB s!"Pointer violates `dereferenceable({bytes})` attribute")
+            .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable({bytes}) attribute.")
           else .ok (.ptr as (.value p))
     | other => .ok other
   | .dereferenceableOrNull bytes =>
     match val with
     | .ptr _ .poison =>
-      .error (.immediateUB s!"Poison pointer violates `dereferenceable_or_null({bytes})` attribute")
+      .error (.immediateUB s!"The value poison violates dereferenceable_or_null({bytes}) attribute.")
     | .ptr as (.value p) =>
       if p.isNull dl as then .ok (.ptr as (.value p))
       else match mem.resolveObject? p with
         | none =>
-          .error (.immediateUB s!"Pointer with invalid/nullary provenance violates `dereferenceable_or_null({bytes})` attribute")
+          .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable_or_null({bytes}) attribute.")
         | some mo =>
           if mo.state == .freed || bytes > mo.size || p.addr.toNat < mo.baseAddr ||
              p.addr.toNat - mo.baseAddr > mo.size - bytes then
-            .error (.immediateUB s!"Pointer violates `dereferenceable_or_null({bytes})` attribute")
+            .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable_or_null({bytes}) attribute.")
           else .ok (.ptr as (.value p))
     | other => .ok other
   | .byval _ => .ok val

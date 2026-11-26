@@ -1163,7 +1163,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = true →
-      AllocLibcallSpec st.dataLayout st.config m2 fid.ToString retTy argVals (.ok (rawRet, m3)) →
+      AllocLibcallSpec st.dataLayout st.config m2 (heapObjName iid) fid.ToString retTy argVals (.ok (rawRet, m3)) →
       applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet = .ok finalRet →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
         (finishCallResult st frame callers rest iid retTy finalRet m3)
@@ -1171,14 +1171,14 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = true →
-      AllocLibcallSpec st.dataLayout st.config m2 fid.ToString retTy argVals (.ok (rawRet, m3)) →
+      AllocLibcallSpec st.dataLayout st.config m2 (heapObjName iid) fid.ToString retTy argVals (.ok (rawRet, m3)) →
       applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet = .error err →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
   | call_alloc_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = true →
-      AllocLibcallSpec st.dataLayout st.config m2 fid.ToString retTy argVals (.error err) →
+      AllocLibcallSpec st.dataLayout st.config m2 (heapObjName iid) fid.ToString retTy argVals (.error err) →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
   | call_intrinsic_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 m4 finalRet} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →

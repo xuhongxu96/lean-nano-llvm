@@ -259,19 +259,19 @@ LLVM division/remainder with exact Immediate UB precedence:
 def evalDivRemUB {w : Nat} (isSigned isRem exact : Bool) (lhs rhs : IntW w) :
     Except ExecError (IntW w) :=
   match rhs with
-  | .poison => .error (.immediateUB "Division by zero (poison divisor)")
+  | .poison => .error (.immediateUB "Division by zero (refine RHS to 0).")
   | .value y =>
     if y == 0 then
       .error (.immediateUB "Division by zero")
     else match lhs with
     | .poison =>
       if isSigned && y == BitVec.allOnes w then
-        .error (.immediateUB "Signed division overflow (poison dividend with divisor -1)")
+        .error (.immediateUB "Signed division overflow (refine LHS to INT_MIN).")
       else
         .ok .poison
     | .value x =>
       if isSigned && x == BitVec.intMin w && y == BitVec.allOnes w then
-        .error (.immediateUB "Signed division overflow (INT_MIN / -1)")
+        .error (.immediateUB "Signed division overflow.")
       else if isRem then
         .ok (.value (if isSigned then BitVec.srem x y else x % y))
       else

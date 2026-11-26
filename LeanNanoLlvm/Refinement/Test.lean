@@ -1330,7 +1330,7 @@ theorem dead_store_elim_caller_mem_i8 :
     cases pv using PoisonOr.casesOn' with
     | poison =>
       left; left
-      refine ⟨[], "store through poison pointer", StarStep.step (ev := none) ?_ (StarStep.refl _)⟩
+      refine ⟨[], "Invalid memory access with a poison pointer.", StarStep.step (ev := none) ?_ (StarStep.refl _)⟩
       apply Step.instr rfl rfl
       exact StepInstr.store_ptr_poison
         (EvalExp.leaf_ok (by simp [evalPureLeafExp?]; rfl))

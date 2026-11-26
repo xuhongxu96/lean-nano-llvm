@@ -683,6 +683,51 @@ def resolveObject? (mem : MemoryState) (ptr : Pointer) : Option MemoryObject :=
           else findExposed rest
       findExposed mem.exposedProvenances
 
+/-- Upper-case hexadecimal rendering (as `APInt::toStringUnsigned(.., 16)`). -/
+def hexStr (n : Nat) : String :=
+  String.ofList ((Nat.toDigits 16 n).map Char.toUpper)
+
+/-- Is `allocId` the memory object of an IR global value (global variable or function)? -/
+def isIRGlobalObject (mem : MemoryState) (allocId : AllocId) : Bool :=
+  mem.globalAddrs.toList.any (fun (_, p) => p.prov == .concrete allocId) ||
+  mem.funcAddrs.toList.any (fun (_, p) => p.prov == .concrete allocId)
+
+/-- Display name of a memory object as `llubi` prints it (`@g` for IR globals; unnamed stack
+objects print an empty name). -/
+def objectDisplayName (mem : MemoryState) (obj : MemoryObject) : String :=
+  if mem.isIRGlobalObject obj.allocId then "@" ++ obj.name
+  else if obj.allocKind == .stack && !obj.name.isEmpty && obj.name.all Char.isDigit then ""
+  else if obj.allocKind == .stack && obj.name.startsWith "alloca." then ""
+  else obj.name
+
+/-- `llubi`'s `Pointer::print`: `ptr 0x<addr> [<object>[ + <offset>][ (dead|dangling)]]`. -/
+def ptrString (mem : MemoryState) (p : Pointer) : String :=
+  let addr := p.addr.toNat
+  let objOf : Option AllocId := match p.prov with
+    | .concrete id => some id
+    | .wildcard _ (some id) _ => some id
+    | _ => none
+  let tag : String :=
+    match objOf with
+    | some id =>
+      match mem.objects.get? id with
+      | some obj =>
+        let w := p.addrWidth
+        let diff : Int := ((addr : Int) - (obj.baseAddr : Int)) % (2 ^ w : Int)
+        let sdiff : Int := if diff ≥ 2 ^ (w - 1) then diff - 2 ^ w else diff
+        let off := if addr != obj.baseAddr then s!" + {sdiff}" else ""
+        let st := match obj.state with
+          | .alive => ""
+          | .dead => " (dead)"
+          | .freed => " (dangling)"
+        mem.objectDisplayName obj ++ off ++ st
+      | none => "dangling"
+    | none =>
+      match p.prov with
+      | .wildcard .. => "wildcard"
+      | _ => "nullary"
+  s!"ptr 0x{hexStr addr} [{tag}]"
+
 /--
 Verify whether a memory access of `accessSize` bytes with required `alignment` via `ptr` is valid.
 Returns `(memoryObject, byteOffset)` or raises `ExecError.immediateUB` (matches `llubi::ExecutorBase::verifyMemAccess`).
@@ -693,24 +738,25 @@ def verifyMemAccess (mem : MemoryState) (ptr : Pointer) (accessSize alignment : 
     (isStore : Bool) : Except ExecError (MemoryObject × Nat) :=
   match mem.resolveObject? ptr with
   | none =>
-    .error (.immediateUB s!"Invalid memory access via pointer with invalid/nullary provenance: {ptr}")
+    .error (.immediateUB "Invalid memory access via a pointer with nullary provenance.")
   | some mo =>
     let badState := if isStore then mo.state != .alive else mo.state == .freed
     if badState then
-      .error (.immediateUB s!"Access to dead/freed memory object '{mo.name}' via {ptr}")
+      .error (.immediateUB s!"Try to access a dead memory object at address 0x{hexStr ptr.addr.toNat}.")
     else if isStore && mo.isConstant then
-      .error (.immediateUB s!"Write to constant memory object '{mo.name}' via {ptr}")
+      .error (.immediateUB s!"Try to write to a constant memory object: {mem.ptrString ptr}.")
     else
       let effAlign := max 1 alignment
       let addr := ptr.addr.toNat
+      let oob := s!"Memory access is out of bounds. Accessed size: {accessSize}, Address: 0x{hexStr addr}, Object base: 0x{hexStr mo.baseAddr}, Object size: {mo.size}."
       if addr % effAlign != 0 then
-        .error (.immediateUB s!"Misaligned memory access: addr=0x{String.ofList (Nat.toDigits 16 addr)}, align={effAlign}")
+        .error (.immediateUB s!"Misaligned memory access. Address: 0x{hexStr addr}, Required alignment: {effAlign}.")
       else if accessSize > mo.size || addr < mo.baseAddr then
-        .error (.immediateUB s!"Out-of-bounds memory access: size={accessSize}, ptr={ptr}, obj=[0x{String.ofList (Nat.toDigits 16 mo.baseAddr)}, +{mo.size})")
+        .error (.immediateUB oob)
       else
         let offset := addr - mo.baseAddr
         if offset > mo.size - accessSize then
-          .error (.immediateUB s!"Out-of-bounds memory access: offset={offset}, size={accessSize}, objSize={mo.size}")
+          .error (.immediateUB oob)
         else
           .ok (mo, offset)
 

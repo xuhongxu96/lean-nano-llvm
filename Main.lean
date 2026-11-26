@@ -2,6 +2,7 @@ import LeanNanoLlvm
 import LeanNanoLlvm.AST.Test
 import LeanNanoLlvm.Semantics.Test
 import LeanNanoLlvm.Refinement.Test
+import LeanNanoLlvm.Llubi
 
 open LeanNanoLlvm
 open LeanNanoLlvm.AST
@@ -205,6 +206,7 @@ private def printUsage : IO Unit := do
   IO.println "Usage:"
   IO.println "  lean-nano-llvm                                      Run built-in demo"
   IO.println "  lean-nano-llvm run [file.ll | -] [options]          Parse and execute a .ll module"
+  IO.println "  lean-nano-llvm llubi [llubi options] [file.ll | -]  llubi-compatible frontend (same output format)"
   IO.println "Options:"
   IO.println "  --verbose                  Print per-instruction SSA values (`VAL: %x => ...`)"
   IO.println "  --entry <name>             Entry function name (default: main)"
@@ -230,6 +232,9 @@ def main (args : List String) : IO UInt32 := do
   | ["--help"] | ["-h"] =>
     printUsage
     return 0
+  | "llubi" :: rest =>
+    -- llubi-compatible frontend (same options, trace format, diagnostics and exit codes)
+    LeanNanoLlvm.Llubi.llubiMain rest
   | "run" :: rest =>
     match parseRunArgs rest with
     | .error msg =>

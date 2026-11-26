@@ -4,6 +4,7 @@ import LeanNanoLlvm.Semantics.IntOps
 import LeanNanoLlvm.Semantics.FloatOps
 import LeanNanoLlvm.Semantics.Memory
 import LeanNanoLlvm.Semantics.Value
+import LeanNanoLlvm.Util.CFormat
 
 namespace LeanNanoLlvm.Semantics
 
@@ -18,19 +19,23 @@ def strHasPrefix (s p : String) : Bool :=
     | c1 :: cs1, c2 :: cs2 => if c1 == c2 then go cs1 cs2 else false
   go s.toList p.toList
 
+/-- `llubi` diagnostic for `llvm.matrix.column.major.store` with a too-small stride. -/
+@[irreducible] def matrixStrideMsg (stride rows : Nat) : String :=
+  s!"llvm.matrix.column.major.store with stride {stride} less than the number of rows {rows}."
+
 /-- Verified memory transfer (`memcpy` / `memmove`). -/
 def execMemTransferPure (mem : MemoryState) (destVal srcVal lenVal : RegisterValue)
     (isMemMove isLibCall : Bool) : Except ExecError MemoryState :=
   match lenVal with
-  | .bv _ .poison => .error (.immediateUB "memcpy/memmove with poison length")
+  | .bv _ .poison => .error (.immediateUB s!"{if isMemMove then "memmove" else "memcpy"} called with poison length.")
   | .bv _ (.value bv) =>
     let len := bv.toNat
     if len == 0 then .ok mem
     else match destVal with
-      | .ptr _ .poison => .error (.immediateUB "memcpy/memmove with poison destination pointer")
+      | .ptr _ .poison => .error (.immediateUB s!"{if isMemMove then "memmove" else "memcpy"} called with poison destination pointer.")
       | .ptr _ (.value dstPtr) =>
         match srcVal with
-        | .ptr _ .poison => .error (.immediateUB "memcpy/memmove with poison source pointer")
+        | .ptr _ .poison => .error (.immediateUB s!"{if isMemMove then "memmove" else "memcpy"} called with poison source pointer.")
         | .ptr _ (.value srcPtr) =>
           match mem.verifyMemAccess srcPtr len 1 false with
           | .error e => .error e
@@ -41,7 +46,7 @@ def execMemTransferPure (mem : MemoryState) (destVal srcVal lenVal : RegisterVal
               if !isMemMove && srcMO.allocId == dstMO.allocId &&
                  srcOff < dstOff + len && dstOff < srcOff + len &&
                  (isLibCall || srcOff != dstOff) then
-                .error (.immediateUB "memcpy with overlapping source and destination")
+                .error (.immediateUB "memcpy with overlapping source and destination.")
               else
                 let copied := MemoryState.readObjectBytes srcMO srcOff len
                 .ok (mem.writeObjectBytes dstMO.allocId dstOff copied)
@@ -93,12 +98,12 @@ theorem execMemTransferPure_preserves_wf {mem dst src len isMove isLib mem'}
 def execMemSetPure (mem : MemoryState) (destVal fillVal lenVal : RegisterValue) :
     Except ExecError MemoryState :=
   match lenVal with
-  | .bv _ .poison => .error (.immediateUB "memset with poison length")
+  | .bv _ .poison => .error (.immediateUB "memset called with poison length.")
   | .bv _ (.value bv) =>
     let len := bv.toNat
     if len == 0 then .ok mem
     else match destVal with
-      | .ptr _ .poison => .error (.immediateUB "memset with poison destination pointer")
+      | .ptr _ .poison => .error (.immediateUB "memset called with poison destination pointer.")
       | .ptr _ (.value dstPtr) =>
         match mem.verifyMemAccess dstPtr len 1 true with
         | .error e => .error e
@@ -148,6 +153,11 @@ def isCxxNew (name : String) : Bool :=
 def isAllocLibcall (name : String) : Bool :=
   name == "malloc" || name == "calloc" || isCxxNew name
 
+/-- Name `llubi` gives a heap object: the name of the call's result register (empty if unnamed). -/
+def heapObjName : InstructionId → String
+  | .id (.name s) => s
+  | _ => ""
+
 /-- Extract return pointer address space for `malloc`/`calloc` (defaults to 0). -/
 @[simp]
 def retAddrSpace : LlvmRetType → Nat
@@ -163,69 +173,70 @@ def heapAllocAlign (dl : DataLayout) (as : Nat) : Nat :=
 Relational specification for `malloc`, `calloc`, and C++ `operator new` (used in the primary `Step` relation).
 Permits any valid aligned disjoint address via `MemoryState.AllocSpec`, or returning `null` / OOM.
 -/
-inductive AllocLibcallSpec (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState) :
+inductive AllocLibcallSpec (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (objName : String) :
     String → LlvmRetType → List RegisterValue → Except ExecError (RegisterValue × MemoryState) → Prop where
   | malloc_poison (retTy : LlvmRetType) (w : Nat) :
-      AllocLibcallSpec dl cfg mem "malloc" retTy [.bv w .poison]
+      AllocLibcallSpec dl cfg mem objName "malloc" retTy [.bv w .poison]
         (.error (.immediateUB "malloc called with poison size"))
   | malloc_ok (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) (obj : MemoryObject) (mem' : MemoryState) :
       MemoryState.AllocSpec mem dl cfg sz.toNat (heapAllocAlign dl (retAddrSpace retTy))
-        "malloc" (retAddrSpace retTy) .uninitialized .heap false obj mem' →
-      AllocLibcallSpec dl cfg mem "malloc" retTy [.bv w (.value sz)]
+        objName (retAddrSpace retTy) .uninitialized .heap false obj mem' →
+      AllocLibcallSpec dl cfg mem objName "malloc" retTy [.bv w (.value sz)]
         (.ok (.ptr (retAddrSpace retTy) (.value (MemoryState.derivePointer dl obj)), mem'))
   | malloc_oom (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) :
-      AllocLibcallSpec dl cfg mem "malloc" retTy [.bv w (.value sz)]
+      AllocLibcallSpec dl cfg mem objName "malloc" retTy [.bv w (.value sz)]
         (.ok (.ptr (retAddrSpace retTy) (.value (Pointer.null dl (retAddrSpace retTy))), mem))
   | malloc_bad_size (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) (msg : String) :
       MemoryState.exceedsMaxObjectSize dl sz.toNat (retAddrSpace retTy) = true →
-      AllocLibcallSpec dl cfg mem "malloc" retTy [.bv w (.value sz)]
+      AllocLibcallSpec dl cfg mem objName "malloc" retTy [.bv w (.value sz)]
         (.error (.immediateUB msg))
   | malloc_bad_args (retTy : LlvmRetType) (args : List RegisterValue) :
       (∀ w v, args ≠ [.bv w v]) →
-      AllocLibcallSpec dl cfg mem "malloc" retTy args
+      AllocLibcallSpec dl cfg mem objName "malloc" retTy args
         (.error (.staticError "malloc expects 1 integer argument"))
   | calloc_ok (retTy : LlvmRetType) (w1 w2 : Nat) (cnt : BitVec w1) (sz : BitVec w2)
       (obj : MemoryObject) (mem' : MemoryState) :
       cnt.toNat * sz.toNat < (1 <<< max w1 w2) →
       MemoryState.AllocSpec mem dl cfg (cnt.toNat * sz.toNat) (heapAllocAlign dl (retAddrSpace retTy))
-        "calloc" (retAddrSpace retTy) .zeroed .heap false obj mem' →
-      AllocLibcallSpec dl cfg mem "calloc" retTy [.bv w1 (.value cnt), .bv w2 (.value sz)]
+        objName (retAddrSpace retTy) .zeroed .heap false obj mem' →
+      AllocLibcallSpec dl cfg mem objName "calloc" retTy [.bv w1 (.value cnt), .bv w2 (.value sz)]
         (.ok (.ptr (retAddrSpace retTy) (.value (MemoryState.derivePointer dl obj)), mem'))
   | calloc_null (retTy : LlvmRetType) (w1 w2 : Nat) (cnt : BitVec w1) (sz : BitVec w2) :
-      AllocLibcallSpec dl cfg mem "calloc" retTy [.bv w1 (.value cnt), .bv w2 (.value sz)]
+      AllocLibcallSpec dl cfg mem objName "calloc" retTy [.bv w1 (.value cnt), .bv w2 (.value sz)]
         (.ok (.ptr (retAddrSpace retTy) (.value (Pointer.null dl (retAddrSpace retTy))), mem))
   | calloc_bad_size (retTy : LlvmRetType) (w1 w2 : Nat) (cnt : BitVec w1) (sz : BitVec w2) (msg : String) :
       cnt.toNat * sz.toNat < (1 <<< max w1 w2) →
       MemoryState.exceedsMaxObjectSize dl (cnt.toNat * sz.toNat) (retAddrSpace retTy) = true →
-      AllocLibcallSpec dl cfg mem "calloc" retTy [.bv w1 (.value cnt), .bv w2 (.value sz)]
+      AllocLibcallSpec dl cfg mem objName "calloc" retTy [.bv w1 (.value cnt), .bv w2 (.value sz)]
         (.error (.immediateUB msg))
   | calloc_bad_args (retTy : LlvmRetType) (args : List RegisterValue) :
       (∀ w1 w2 c s, args ≠ [.bv w1 (.value c), .bv w2 (.value s)]) →
-      AllocLibcallSpec dl cfg mem "calloc" retTy args
+      AllocLibcallSpec dl cfg mem objName "calloc" retTy args
         (.error (.immediateUB "calloc called with poison/invalid arguments"))
   | cxxNew_poison (name : String) (retTy : LlvmRetType) (w : Nat) :
       isCxxNew name = true →
-      AllocLibcallSpec dl cfg mem name retTy [.bv w .poison]
+      AllocLibcallSpec dl cfg mem objName name retTy [.bv w .poison]
         (.error (.immediateUB "operator new called with poison size"))
   | cxxNew_ok (name : String) (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) (obj : MemoryObject) (mem' : MemoryState) :
       isCxxNew name = true →
       MemoryState.AllocSpec mem dl cfg sz.toNat (heapAllocAlign dl (retAddrSpace retTy))
-        "new" (retAddrSpace retTy) .uninitialized .heap false obj mem' →
-      AllocLibcallSpec dl cfg mem name retTy [.bv w (.value sz)]
+        objName (retAddrSpace retTy) .uninitialized .heap false obj mem' →
+      AllocLibcallSpec dl cfg mem objName name retTy [.bv w (.value sz)]
         (.ok (.ptr (retAddrSpace retTy) (.value (MemoryState.derivePointer dl obj)), mem'))
   | cxxNew_oom (name : String) (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) :
       isCxxNew name = true →
-      AllocLibcallSpec dl cfg mem name retTy [.bv w (.value sz)]
+      AllocLibcallSpec dl cfg mem objName name retTy [.bv w (.value sz)]
         (.error .outOfMemory)
   | cxxNew_bad_args (name : String) (retTy : LlvmRetType) (args : List RegisterValue) :
       isCxxNew name = true →
       (∀ w v, args ≠ [.bv w v]) →
-      AllocLibcallSpec dl cfg mem name retTy args
+      AllocLibcallSpec dl cfg mem objName name retTy args
         (.error (.staticError "operator new expects 1 integer argument"))
 
 /-- Executable `malloc` / `calloc` / `operator new` implementation using deterministic bump allocation. -/
 def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
-    (name : String) (retTy : LlvmRetType) (argVals : List RegisterValue) :
+    (objName : String) (name : String) (retTy : LlvmRetType) (argVals : List RegisterValue) :
     Option (Except ExecError (RegisterValue × MemoryState)) :=
   if name == "malloc" then
     some <| match argVals with
@@ -234,7 +245,7 @@ def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
         | .bv _ (.value sz) =>
           let as := retAddrSpace retTy
           let maxAlign := heapAllocAlign dl as
-          match mem.allocate dl cfg sz.toNat maxAlign "malloc" as .uninitialized .heap false with
+          match mem.allocate dl cfg sz.toNat maxAlign objName as .uninitialized .heap false with
           | .ok (obj, mem') => .ok (.ptr as (.value (MemoryState.derivePointer dl obj)), mem')
           | .error _ => .ok (.ptr as (.value (Pointer.null dl as)), mem)
         | _ => .error (.staticError "malloc expects 1 integer argument")
@@ -249,7 +260,7 @@ def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
           if total ≥ (1 <<< max w1 w2) then
             .ok (.ptr as (.value (Pointer.null dl as)), mem)
           else
-            match mem.allocate dl cfg total maxAlign "calloc" as .zeroed .heap false with
+            match mem.allocate dl cfg total maxAlign objName as .zeroed .heap false with
             | .ok (obj, mem') => .ok (.ptr as (.value (MemoryState.derivePointer dl obj)), mem')
             | .error _ => .ok (.ptr as (.value (Pointer.null dl as)), mem)
         | _, _ => .error (.immediateUB "calloc called with poison/invalid arguments")
@@ -261,7 +272,7 @@ def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
         | .bv _ (.value sz) =>
           let as := retAddrSpace retTy
           let maxAlign := heapAllocAlign dl as
-          match mem.allocate dl cfg sz.toNat maxAlign "new" as .uninitialized .heap false with
+          match mem.allocate dl cfg sz.toNat maxAlign objName as .uninitialized .heap false with
           | .ok (obj, mem') => .ok (.ptr as (.value (MemoryState.derivePointer dl obj)), mem')
           | .error _ => .error .outOfMemory
         | _ => .error (.staticError "operator new expects 1 integer argument")
@@ -287,10 +298,10 @@ private theorem allocate_error_cases {mem : MemoryState} {dl : DataLayout} {cfg 
       · cases h; exact Or.inl rfl
       · cases h
 
-theorem execAllocLibcall_sound {dl cfg mem name retTy argVals res}
+theorem execAllocLibcall_sound {dl cfg mem objName name retTy argVals res}
     (hwf : MemoryState.WellFormed mem)
-    (h : execAllocLibcall dl cfg mem name retTy argVals = some res) :
-    AllocLibcallSpec dl cfg mem name retTy argVals res := by
+    (h : execAllocLibcall dl cfg mem objName name retTy argVals = some res) :
+    AllocLibcallSpec dl cfg mem objName name retTy argVals res := by
   unfold execAllocLibcall at h
   by_cases hm : (name == "malloc") = true
   · have hnm : name = "malloc" := eq_of_beq hm
@@ -308,7 +319,7 @@ theorem execAllocLibcall_sound {dl cfg mem name retTy argVals res}
           | value sz =>
             dsimp only
             cases halloc : mem.allocate dl cfg sz.toNat (heapAllocAlign dl (retAddrSpace retTy))
-                "malloc" (retAddrSpace retTy) .uninitialized .heap false with
+                objName (retAddrSpace retTy) .uninitialized .heap false with
             | ok p =>
               exact AllocLibcallSpec.malloc_ok retTy w sz p.1 p.2
                 (MemoryState.allocate_satisfies_AllocSpec hwf halloc)
@@ -346,7 +357,7 @@ theorem execAllocLibcall_sound {dl cfg mem name retTy argVals res}
                       have hlt : cnt.toNat * sz.toNat < 1 <<< max w1 w2 := by omega
                       cases halloc : mem.allocate dl cfg (cnt.toNat * sz.toNat)
                           (heapAllocAlign dl (retAddrSpace retTy))
-                          "calloc" (retAddrSpace retTy) .zeroed .heap false with
+                          objName (retAddrSpace retTy) .zeroed .heap false with
                       | ok p =>
                         exact AllocLibcallSpec.calloc_ok retTy w1 w2 cnt sz p.1 p.2 hlt
                           (MemoryState.allocate_satisfies_AllocSpec hwf halloc)
@@ -386,7 +397,7 @@ theorem execAllocLibcall_sound {dl cfg mem name retTy argVals res}
               | value sz =>
                 dsimp only
                 cases halloc : mem.allocate dl cfg sz.toNat (heapAllocAlign dl (retAddrSpace retTy))
-                    "new" (retAddrSpace retTy) .uninitialized .heap false with
+                    objName (retAddrSpace retTy) .uninitialized .heap false with
                 | ok p =>
                   exact AllocLibcallSpec.cxxNew_ok name retTy w sz p.1 p.2 hn
                     (MemoryState.allocate_satisfies_AllocSpec hwf halloc)
@@ -399,9 +410,9 @@ theorem execAllocLibcall_sound {dl cfg mem name retTy argVals res}
         simp only [hnf, Bool.false_eq_true, ↓reduceIte] at h
         cases h
 
-theorem AllocLibcallSpec.preserves_wf {dl cfg mem name retTy argVals retVal mem'}
+theorem AllocLibcallSpec.preserves_wf {dl cfg mem objName name retTy argVals retVal mem'}
     (hwf : MemoryState.WellFormed mem)
-    (h : AllocLibcallSpec dl cfg mem name retTy argVals (.ok (retVal, mem'))) :
+    (h : AllocLibcallSpec dl cfg mem objName name retTy argVals (.ok (retVal, mem'))) :
     MemoryState.WellFormed mem' := by
   cases h with
   | malloc_ok _ _ _ _ _ hspec => exact hspec.preserves_wf hwf
@@ -762,8 +773,8 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
   if name == "llvm.assume" then
     some <| match argVals with
       | [.bv 1 (.value b)] =>
-        if b == 0 then .error (.immediateUB "llvm.assume(false) violated") else .ok (.void, o)
-      | [.bv 1 .poison] => .error (.immediateUB "llvm.assume(poison) violated")
+        if b == 0 then .error (.immediateUB "Assume on false or poison condition.") else .ok (.void, o)
+      | [.bv 1 .poison] => .error (.immediateUB "The value poison violates noundef attribute.")
       | _ => .error (.staticError "llvm.assume expects i1 argument")
   else if name == "llvm.donothing" || name == "llvm.experimental.noalias.scope.decl" ||
           name == "llvm.inlineasm.noop" then
@@ -1233,200 +1244,97 @@ def readCStringPure (mem : MemoryState) (p : Pointer) : Except ExecError String 
           | some byte => go (off + 1) fuel' (Char.ofNat byte :: acc)
       go startOff maxFuel []
 
-private def padLeft (s : String) (width : Nat) (padChar : Char) : String :=
-  if s.length ≥ width then s
-  else String.ofList (List.replicate (width - s.length) padChar) ++ s
+/-- Parse a `printf` conversion's flag/width characters (`llubi` accepts `-= #0123456789`). -/
+def parsePrintfChunk (chunk : List Char) : CFormat.Spec :=
+  let rec go (sp : CFormat.Spec) (inWidth : Bool) : List Char → CFormat.Spec
+    | [] => sp
+    | c :: cs =>
+      if c.isDigit && (inWidth || c != '0') then
+        go { sp with width := sp.width * 10 + (c.toNat - '0'.toNat) } true cs
+      else if c == '-' then go { sp with leftAlign := true } inWidth cs
+      else if c == ' ' then go { sp with space := true } inWidth cs
+      else if c == '#' then go { sp with alt := true } inWidth cs
+      else if c == '0' then go { sp with zeroPad := true } inWidth cs
+      else go sp inWidth cs
+  go {} false chunk
 
-private def formatNatBase (n : Nat) (base : Nat) (upper : Bool) : String :=
-  let digits := Nat.toDigits base n
-  String.ofList (digits.map fun c => if upper && 'a' ≤ c && c ≤ 'z' then Char.ofNat (c.toNat - 32) else c)
-
-private def formatSignedDec (x : Int) (width : Nat) (zeroPad : Bool) : String :=
-  if x < 0 then
-    let mag := toString (-x).toNat
-    if zeroPad && width > 1 then "-" ++ padLeft mag (width - 1) '0'
-    else padLeft ("-" ++ mag) width ' '
-  else
-    let mag := toString x.toNat
-    padLeft mag width (if zeroPad then '0' else ' ')
-
-private def formatPrintfFloat (flt : IEEEFloat ft) (spec : Char) : String :=
-  let upper := spec == 'F' || spec == 'E' || spec == 'G' || spec == 'A'
-  if flt.isNaN then
-    let s := if upper then "NAN" else "nan"
-    if flt.sign then "-" ++ s else s
-  else if flt.isInf then
-    let s := if upper then "INF" else "inf"
-    if flt.sign then "-" ++ s else s
-  else
-    -- Standard C `%f`/`%e`/`%g` default 6-digit formatting (exact length for `printf` return value)
-    -- Convert to Lean `Float` for finite display when double/float, using exact IEEE bits.
-    let f64 : Float := (IEEEFloat.convert FloatFormat.double .RNE flt).toLeanFloat
-    let isNeg := flt.sign
-    let absF := if isNeg then -f64 else f64
-    let pfx := if isNeg then "-" else ""
-    if spec == 'g' || spec == 'G' then
-      let s := toString absF
-      let s' :=
-        if s.contains '.' then
-          let trimmed := s.toList.reverse.dropWhile (· == '0')
-          let trimmed := match trimmed with | '.' :: rest => rest | other => other
-          String.ofList trimmed.reverse
-        else s
-      pfx ++ s'
-    else if spec == 'e' || spec == 'E' then
-      -- Scientific notation `d.ddddddE±dd` (always 12 chars for 2-digit exp, plus optional `-`)
-      let eChar := if upper then "E" else "e"
-      if absF == 0.0 then pfx ++ s!"0.000000{eChar}+00"
-      else
-        let rec norm (v : Float) (e : Int) (fuel : Nat) : Float × Int :=
-          match fuel with
-          | 0 => (v, e)
-          | fuel' + 1 =>
-            if v ≥ 10.0 then norm (v / 10.0) (e + 1) fuel'
-            else if v < 1.0 then norm (v * 10.0) (e - 1) fuel'
-            else (v, e)
-        let (m, exp) := norm absF 0 400
-        let scaled : Nat := (m * 1000000.0 + 0.5).toUInt64.toNat
-        let intPart := scaled / 1000000
-        let fracPart := padLeft (toString (scaled % 1000000)) 6 '0'
-        let expSign := if exp < 0 then "-" else "+"
-        let expStr := padLeft (toString exp.natAbs) 2 '0'
-        pfx ++ s!"{intPart}.{fracPart}{eChar}{expSign}{expStr}"
-    else
-      -- Fixed `%f`/`%F` with 6 decimal places
-      let scaled : Nat := (absF * 1000000.0 + 0.5).toUInt64.toNat
-      let intPart := scaled / 1000000
-      let fracPart := padLeft (toString (scaled % 1000000)) 6 '0'
-      pfx ++ s!"{intPart}.{fracPart}"
-
-/-- Parse and handle a single `%...` format specifier in `printf`, returning
-    `(remainingChars, remainingArgs, optionalWritePatch, newWritten)`. -/
-private def evalPrintfSpec (dl : DataLayout) (rest : List Char) (args : List RegisterValue)
-    (mem : MemoryState) (written : Nat) :
-    Except ExecError (List Char × List RegisterValue × Option (AllocId × Nat × Array MemByte) × Nat) :=
-  let rec skipFlags (zeroPad : Bool) : List Char → Bool × List Char
-    | '-' :: cs => skipFlags zeroPad cs
-    | '+' :: cs => skipFlags zeroPad cs
-    | ' ' :: cs => skipFlags zeroPad cs
-    | '#' :: cs => skipFlags zeroPad cs
-    | '0' :: cs => skipFlags true cs
-    | cs => (zeroPad, cs)
-  let (zeroPad, cs1) := skipFlags false rest
-  let rec parseWidth (acc : Nat) : List Char → Nat × List Char
-    | c :: cs => if '0' ≤ c && c ≤ '9' then parseWidth (acc * 10 + (c.toNat - '0'.toNat)) cs else (acc, c :: cs)
-    | [] => (acc, [])
-  let (width, cs2) := parseWidth 0 cs1
-  let cs3 := match cs2 with
-    | '.' :: afterDot => (parseWidth 0 afterDot).2
-    | other => other
-  let (lenMod, cs4) := match cs3 with
-    | 'h' :: 'h' :: cs => ("hh", cs)
-    | 'h' :: cs => ("h", cs)
-    | 'l' :: 'l' :: cs => ("ll", cs)
-    | 'l' :: cs => ("l", cs)
-    | 'j' :: cs => ("j", cs)
-    | 'z' :: cs => ("z", cs)
-    | 't' :: cs => ("t", cs)
-    | 'L' :: cs => ("L", cs)
-    | cs => ("", cs)
-  match cs4 with
-  | [] => .error (.immediateUB "Incomplete format specifier in printf")
+/-- Parse and handle a single `%...` format specifier in `printf` (mirrors `llubi`'s
+`Library::executePrintf`), returning `(remainingChars, remainingArgs, optionalWritePatch,
+formattedText)`. `argPos` is the (1-based) position of the next variadic argument. -/
+def evalPrintfSpec (dl : DataLayout) (rest : List Char) (args : List RegisterValue)
+    (mem : MemoryState) (written : Nat) (argPos : Nat) :
+    Except ExecError (List Char × List RegisterValue × Option (AllocId × Nat × Array MemByte) × String) :=
+  let chunk := rest.takeWhile (fun c => "-= #0123456789".contains c)
+  let cs1 := rest.dropWhile (fun c => "-= #0123456789".contains c)
+  let cs2 := cs1.dropWhile (fun c => "hljzt".contains c)
+  let sp := parsePrintfChunk chunk
+  match cs2 with
+  | [] => .error (.immediateUB "Invalid format string in printf: missing conversion specifier.")
   | spec :: tail =>
-    match spec with
-    | 'd' | 'i' | 'u' | 'o' | 'x' | 'X' | 'c' =>
-      match args with
-      | [] => .error (.immediateUB s!"Not enough arguments provided for the format string. Required argument for '{spec}'.")
-      | arg :: restArgs =>
-        match arg with
-        | .bv _ .poison => .error (.immediateUB "Poison argument passed to printf")
-        | .bv w (.value bv) =>
-          let validW := if lenMod == "h" || lenMod == "hh" then w ≥ 8 && w ≤ 64 else w ≥ 32 && w ≤ 64
-          if !validW then
-            .error (.immediateUB s!"Argument type mismatch in printf for format specifier '{spec}'")
-          else
-            let formatted :=
-              if spec == 'd' || spec == 'i' then formatSignedDec bv.toInt width zeroPad
-              else if spec == 'u' then padLeft (toString bv.toNat) width (if zeroPad then '0' else ' ')
-              else if spec == 'o' then padLeft (formatNatBase bv.toNat 8 false) width (if zeroPad then '0' else ' ')
-              else if spec == 'x' then padLeft (formatNatBase bv.toNat 16 false) width (if zeroPad then '0' else ' ')
-              else if spec == 'X' then padLeft (formatNatBase bv.toNat 16 true) width (if zeroPad then '0' else ' ')
-              else String.singleton (Char.ofNat (bv.toNat % 256))
-            .ok (tail, restArgs, none, written + formatted.length)
-        | _ => .error (.immediateUB s!"Argument type mismatch in printf for format specifier '{spec}'")
-    | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' =>
-      match args with
-      | [] => .error (.immediateUB s!"Not enough arguments provided for the format string. Required argument for '{spec}'.")
-      | arg :: restArgs =>
-        match arg with
-        | .float _ .poison => .error (.immediateUB "Poison argument passed to printf")
-        | .float .double (.value flt) =>
-          let formatted := formatPrintfFloat flt spec
-          .ok (tail, restArgs, none, written + formatted.length)
-        | _ => .error (.immediateUB s!"Argument type mismatch in printf for format specifier '{spec}'")
-    | 'p' =>
-      match args with
-      | [] => .error (.immediateUB "Not enough arguments provided for the format string. Required argument for 'p'.")
-      | arg :: restArgs =>
-        match arg with
-        | .ptr _ .poison => .error (.immediateUB "Poison argument passed to printf")
-        | .ptr _ (.value p) =>
-          if p.addrWidth > 64 then
-            .error (.immediateUB "Argument type mismatch in printf for format specifier 'p' (pointer too wide)")
-          else
-            let formatted := if p.addr.toNat == 0 then "(nil)" else "0x" ++ formatNatBase p.addr.toNat 16 false
-            .ok (tail, restArgs, none, written + formatted.length)
-        | _ => .error (.immediateUB "Argument type mismatch in printf for format specifier 'p'")
-    | 's' =>
-      match args with
-      | [] => .error (.immediateUB "Not enough arguments provided for the format string. Required argument for 's'.")
-      | arg :: restArgs =>
-        match arg with
-        | .ptr _ .poison => .error (.immediateUB "Poison argument passed to printf")
-        | .ptr _ (.value p) =>
-          if p.addrWidth > 64 then
-            .error (.immediateUB "Argument type mismatch in printf for format specifier 's' (pointer too wide)")
-          else
+    match args with
+    | [] => .error (.immediateUB s!"Not enough arguments provided for the format string. Required argument for '{spec}'.")
+    | arg :: restArgs =>
+      let isPoison := match arg with
+        | .bv _ .poison | .float _ .poison | .ptr _ .poison => true
+        | _ => false
+      if isPoison then
+        .error (.immediateUB s!"Poison argument passed to printf for format specifier '{spec}' at argument index {argPos + 1}.")
+      else
+        let mismatch :=
+          ("diuoxXc".contains spec && !(match arg with | .bv w _ => w == 32 || w == 64 | _ => false)) ||
+          ("fFeEgGaA".contains spec && !(match arg with | .float .double _ => true | _ => false)) ||
+          ("nps".contains spec && !(match arg with | .ptr _ (.value p) => p.addrWidth ≤ 64 | _ => false))
+        if mismatch then
+          .error (.immediateUB s!"Argument type mismatch in printf for format specifier '{spec}' at argument index {argPos}.")
+        else
+          match spec, arg with
+          | 'd', .bv _ (.value bv) | 'i', .bv _ (.value bv) =>
+            .ok (tail, restArgs, none, CFormat.fmtSigned sp bv.toInt)
+          | 'u', .bv _ (.value bv) | 'o', .bv _ (.value bv) | 'x', .bv _ (.value bv)
+          | 'X', .bv _ (.value bv) =>
+            .ok (tail, restArgs, none, CFormat.fmtUnsigned sp spec bv.toNat)
+          | 'c', .bv _ (.value bv) =>
+            .ok (tail, restArgs, none, CFormat.pad sp "" (String.singleton (Char.ofNat (bv.toNat % 256))) false)
+          | 'f', .float .double (.value flt) | 'F', .float .double (.value flt)
+          | 'e', .float .double (.value flt) | 'E', .float .double (.value flt)
+          | 'g', .float .double (.value flt) | 'G', .float .double (.value flt)
+          | 'a', .float .double (.value flt) | 'A', .float .double (.value flt) =>
+            .ok (tail, restArgs, none, CFormat.fmtDouble sp spec flt)
+          | 'p', .ptr _ (.value p) =>
+            .ok (tail, restArgs, none, "0x" ++ CFormat.fmtUnsigned sp 'x' p.addr.toNat)
+          | 's', .ptr _ (.value p) =>
             match readCStringPure mem p with
             | .error e => .error e
-            | .ok s => .ok (tail, restArgs, none, written + s.length)
-        | _ => .error (.immediateUB "Argument type mismatch in printf for format specifier 's'")
-    | 'n' =>
-      match args with
-      | [] => .error (.immediateUB "Not enough arguments provided for the format string. Required argument for 'n'.")
-      | arg :: restArgs =>
-        match arg with
-        | .ptr _ .poison => .error (.immediateUB "Poison argument passed to printf")
-        | .ptr _ (.value p) =>
-          match mem.verifyMemAccess p 4 1 true with
-          | .error e => .error e
-          | .ok (mo, off) =>
-            let bytes := valueToBytes dl .modern (.bv 32 (.value (BitVec.ofNat 32 written))) (.int 32)
-            .ok (tail, restArgs, some (mo.allocId, off, bytes), written)
-        | _ => .error (.immediateUB "Argument type mismatch in printf for format specifier 'n'")
-    | _ => .error (.immediateUB s!"Unknown or unsupported format specifier '{spec}' in printf")
+            | .ok str => .ok (tail, restArgs, none, CFormat.pad sp "" str false)
+          | 'n', .ptr _ (.value p) =>
+            match mem.verifyMemAccess p 4 4 true with
+            | .error e => .error e
+            | .ok (mo, off) =>
+              let bytes := valueToBytes dl .modern (.bv 32 (.value (BitVec.ofNat 32 written))) (.int 32)
+              .ok (tail, restArgs, some (mo.allocId, off, bytes), "")
+          | _, _ => .error (.immediateUB s!"Unknown or unsupported format specifier '{spec}' in printf.")
 
 /-- Format-string interpreter for C `printf` (fuel-bounded over format length). -/
-def evalPrintfLoop (dl : DataLayout) :
+def evalPrintfLoop (dl : DataLayout) (nArgs : Nat) :
     Nat → List Char → List RegisterValue → MemoryState → Nat → Except ExecError (Nat × MemoryState)
   | 0, _, _, mem, written => .ok (written, mem)
   | _ + 1, [], _, mem, written => .ok (written, mem)
   | fuel + 1, '%' :: '%' :: rest, args, mem, written =>
-    evalPrintfLoop dl fuel rest args mem (written + 1)
+    evalPrintfLoop dl nArgs fuel rest args mem (written + 1)
   | fuel + 1, '%' :: rest, args, mem, written =>
-    match evalPrintfSpec dl rest args mem written with
+    match evalPrintfSpec dl rest args mem written (nArgs - args.length + 1) with
     | .error e => .error e
-    | .ok (tail, restArgs, patch?, written') =>
+    | .ok (tail, restArgs, patch?, piece) =>
       let mem' := match patch? with
         | none => mem
         | some (aid, off, bytes) => mem.writeObjectBytes aid off bytes
-      evalPrintfLoop dl fuel tail restArgs mem' written'
+      evalPrintfLoop dl nArgs fuel tail restArgs mem' (written + piece.length)
   | fuel + 1, _ :: rest, args, mem, written =>
-    evalPrintfLoop dl fuel rest args mem (written + 1)
+    evalPrintfLoop dl nArgs fuel rest args mem (written + 1)
 
-theorem evalPrintfLoop_preserves_wf {dl fuel cs args mem written n mem'}
+theorem evalPrintfLoop_preserves_wf {dl nArgs fuel cs args mem written n mem'}
     (hwf : MemoryState.WellFormed mem)
-    (h : evalPrintfLoop dl fuel cs args mem written = .ok (n, mem')) :
+    (h : evalPrintfLoop dl nArgs fuel cs args mem written = .ok (n, mem')) :
     MemoryState.WellFormed mem' := by
   induction fuel generalizing cs args mem written with
   | zero => unfold evalPrintfLoop at h; cases h; exact hwf
@@ -1437,7 +1345,7 @@ theorem evalPrintfLoop_preserves_wf {dl fuel cs args mem written n mem'}
     · cases h; exact hwf
     · rename_i _ _ _ _ _ _ _ _ _ heq; cases heq; exact ih hwf h
     · rename_i _ _ _ _ _ _ _ _ _ heq; cases heq
-      cases hs : evalPrintfSpec dl _ _ _ _ with
+      cases hs : evalPrintfSpec dl _ _ _ _ _ with
       | error e => rw [hs] at h; cases h
       | ok p =>
         rw [hs] at h; obtain ⟨t, ra, patch?, w1⟩ := p; dsimp only at h
@@ -1446,24 +1354,41 @@ theorem evalPrintfLoop_preserves_wf {dl fuel cs args mem written n mem'}
         | some w => exact ih (MemoryState.writeObjectBytes_preserves_wf hwf w.1 w.2.1 w.2.2) h
     · rename_i _ _ _ _ _ _ _ _ _ _ _ _ heq; cases heq; exact ih hwf h
 
+/-- Render the text `printf` writes (executable companion of `evalPrintfLoop`, used by frontends
+that need the program's actual output). Returns `none` if formatting raises an error. -/
+def renderPrintf (dl : DataLayout) (nArgs : Nat) :
+    Nat → List Char → List RegisterValue → MemoryState → String → Option String
+  | 0, _, _, _, out => some out
+  | _ + 1, [], _, _, out => some out
+  | fuel + 1, '%' :: '%' :: rest, args, mem, out => renderPrintf dl nArgs fuel rest args mem (out.push '%')
+  | fuel + 1, '%' :: rest, args, mem, out =>
+    match evalPrintfSpec dl rest args mem out.length (nArgs - args.length + 1) with
+    | .error _ => none
+    | .ok (tail, restArgs, patch?, piece) =>
+      let mem' := match patch? with
+        | none => mem
+        | some (aid, off, bytes) => mem.writeObjectBytes aid off bytes
+      renderPrintf dl nArgs fuel tail restArgs mem' (out ++ piece)
+  | fuel + 1, c :: rest, args, mem, out => renderPrintf dl nArgs fuel rest args mem (out.push c)
+
 /-- Non-allocating C/C++ standard library calls (`free`, `_ZdlPv`, `memcpy`, `memmove`, `memset`, `puts`, `putchar`, `printf`, `exit`, `abort`, `_ZSt9terminatev`). -/
 def evalNonAllocLibcall? (dl : DataLayout) (mem : MemoryState)
     (name : String) (argVals : List RegisterValue) :
     Option (Except ExecError (RegisterValue × MemoryState)) :=
   if name == "free" || name == "_ZdlPv" || name == "_ZdaPv" || name == "_ZdlPvm" || name == "_ZdaPvm" then
     some <| match argVals with
-      | .ptr _ .poison :: _ => .error (.immediateUB "free/delete called with poison pointer")
+      | .ptr _ .poison :: _ => .error (.immediateUB "Poison argument passed to a library call at argument index 0.")
       | .ptr as (.value p) :: _ =>
         if p.isNull dl as then .ok (.void, mem)
         else match mem.resolveObject? p with
-          | none => .error (.immediateUB "freeing pointer with invalid/nullary provenance")
+          | none => .error (.immediateUB "freeing a pointer with nullary provenance.")
           | some mo =>
             if p.addr.toNat != mo.baseAddr then
-              .error (.immediateUB s!"freeing non-base pointer {p} (base=0x{String.ofList (Nat.toDigits 16 mo.baseAddr)})")
+              .error (.immediateUB s!"freeing a pointer that does not point to the start of an allocation. Pointer address: 0x{MemoryState.hexStr p.addr.toNat}, allocation base: 0x{MemoryState.hexStr mo.baseAddr}.")
             else if mo.state == .freed then
-              .error (.immediateUB s!"double-free of allocation '{mo.name}'")
+              .error (.immediateUB s!"double-freeing a memory object allocated at 0x{MemoryState.hexStr mo.baseAddr}.")
             else if !mo.isHeap then
-              .error (.immediateUB s!"freeing non-heap allocation '{mo.name}'")
+              .error (.immediateUB s!"freeing a non-heap allocation at 0x{MemoryState.hexStr mo.baseAddr}.")
             else
               .ok (.void, mem.freeObject mo.allocId)
       | _ => .error (.staticError "free/delete expects pointer argument")
@@ -1499,7 +1424,7 @@ def evalNonAllocLibcall? (dl : DataLayout) (mem : MemoryState)
         match readCStringPure mem fmtPtr with
         | .error e => .error e
         | .ok fmtStr =>
-          match evalPrintfLoop dl fmtStr.length fmtStr.toList restArgs mem 0 with
+          match evalPrintfLoop dl restArgs.length fmtStr.length fmtStr.toList restArgs mem 0 with
           | .error e => .error e
           | .ok (written, mem') => .ok (.bv 32 (.value (BitVec.ofNat 32 written)), mem')
       | _ => .error (.staticError "printf expects at least 1 pointer argument")
@@ -1578,7 +1503,7 @@ theorem evalNonAllocLibcall?_preserves_wf {dl mem name argVals res mem'}
                   | error e => rw [hr] at h; cases h
                   | ok fmtStr =>
                     rw [hr] at h; dsimp only at h
-                    cases hp : evalPrintfLoop dl fmtStr.length fmtStr.toList _ mem 0 with
+                    cases hp : evalPrintfLoop dl _ fmtStr.length fmtStr.toList _ mem 0 with
                     | error e => rw [hp] at h; cases h
                     | ok p =>
                       rw [hp] at h; cases h
@@ -1733,7 +1658,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
     some <| match argVals, retTy with
       | [ptrVal, .vector _ mask, .vector elemTy passthru], .ret (.vector len _) =>
         if dl.typeSizeInBits elemTy % 8 != 0 then
-          .error (.staticError s!"{name} with non-byte-sized element type is not supported")
+          .error (.staticError s!"{name} with element type {elemTy.print} is not supported.")
         else
           let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
           let rec goLoad (i : Nat) (o0 : OracleState) (acc : List RegisterValue) :
@@ -1747,7 +1672,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                     match loadElemFromPtr dl cfg mem (ptrAddBytes dl p (Int.ofNat i * stride)) elemTy 1 o0 with
                     | .error e => .error e
                     | .ok (v, o1) => goLoad (i + 1) o1 (v :: acc)
-                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.load")
+                  | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
                 else goLoad (i + 1) o0 (passthru.getD i (poisonOf elemTy) :: acc)
               | _ => .error (.immediateUB "poison mask lane in llvm.masked.load")
           termination_by len - i
@@ -1757,7 +1682,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
     some <| match argVals, retTy with
       | [ptrVal, .vector _ mask, .vector elemTy passthru], .ret (.vector len _) =>
         if dl.typeSizeInBits elemTy % 8 != 0 then
-          .error (.staticError s!"{name} with non-byte-sized element type is not supported")
+          .error (.staticError s!"{name} with element type {elemTy.print} is not supported.")
         else
           let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
           let rec goExpand (i memIdx : Nat) (o0 : OracleState) (acc : List RegisterValue) :
@@ -1771,7 +1696,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                     match loadElemFromPtr dl cfg mem (ptrAddBytes dl p (Int.ofNat memIdx * stride)) elemTy 1 o0 with
                     | .error e => .error e
                     | .ok (v, o1) => goExpand (i + 1) (memIdx + 1) o1 (v :: acc)
-                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.expandload")
+                  | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
                 else goExpand (i + 1) memIdx o0 (passthru.getD i (poisonOf elemTy) :: acc)
               | _ => .error (.immediateUB "poison mask lane in llvm.masked.expandload")
           termination_by len - i
@@ -1791,7 +1716,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                   match loadElemFromPtr dl cfg mem p elemTy 1 o0 with
                   | .error e => .error e
                   | .ok (v, o1) => goGather (i + 1) o1 (v :: acc)
-                | _ => .error (.immediateUB "poison/invalid pointer in llvm.masked.gather")
+                | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
               else goGather (i + 1) o0 (passthru.getD i (poisonOf elemTy) :: acc)
             | _ => .error (.immediateUB "poison mask lane in llvm.masked.gather")
         termination_by len - i
@@ -1815,12 +1740,12 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                   match ptrVal with
                   | .ptr _ (.value p) =>
                     if baseReqAlign > 1 && p.addr.toNat % baseReqAlign != 0 then
-                      .error (.immediateUB "Misaligned pointer in llvm.vp.load")
+                      .error (.immediateUB "Invalid memory access with a poison pointer.")
                     else
                       match loadElemFromPtr dl cfg mem (ptrAddBytes dl p (Int.ofNat i * stride)) elemTy 1 o0 with
                       | .error e => .error e
                       | .ok (v, o1) => goVpLoad (i + 1) o1 (v :: acc)
-                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.vp.load")
+                  | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
                 else goVpLoad (i + 1) o0 (poisonOf elemTy :: acc)
               | _ => .error (.immediateUB "poison mask lane in llvm.vp.load")
           termination_by len - i
@@ -1846,7 +1771,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                     match loadElemFromPtr dl cfg mem p elemTy laneReqAlign o0 with
                     | .error e => .error e
                     | .ok (v, o1) => goVpGather (i + 1) o1 (v :: acc)
-                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.vp.gather")
+                  | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
                 else goVpGather (i + 1) o0 (poisonOf elemTy :: acc)
               | _ => .error (.immediateUB "poison mask lane in llvm.vp.gather")
           termination_by len - i
@@ -1873,7 +1798,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                   match ptrVal with
                   | .ptr _ (.value p) =>
                     if baseReqAlign > 1 && p.addr.toNat % baseReqAlign != 0 then
-                      .error (.immediateUB "Misaligned pointer in llvm.experimental.vp.strided.load")
+                      .error (.immediateUB "Invalid memory access with a poison pointer.")
                     else
                       let lanePtr? : Except ExecError Pointer :=
                         if i == 0 then .ok p
@@ -1886,7 +1811,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
                         match loadElemFromPtr dl cfg mem lp elemTy 1 o0 with
                         | .error e => .error e
                         | .ok (v, o1) => goVpStrided (i + 1) o1 (v :: acc)
-                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.experimental.vp.strided.load")
+                  | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
                 else goVpStrided (i + 1) o0 (poisonOf elemTy :: acc)
               | _ => .error (.immediateUB "poison mask lane in llvm.experimental.vp.strided.load")
           termination_by len - i
@@ -1901,7 +1826,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
         let isRev := revBV == 1#1
         let boundRes : Except ExecError Nat := match optBound with
           | [] => .ok totalSz
-          | .bv _ .poison :: _ => .error (.immediateUB "poison bound in llvm.speculative.load")
+          | .bv _ .poison :: _ => .error (.immediateUB "llvm.speculative.load with poison number of accessible bytes.")
           | .bv _ (.value bBV) :: _ => .ok (min totalSz bBV.toNat)
           | _ => .error (.immediateUB "invalid bound in llvm.speculative.load")
         match boundRes with
@@ -1927,7 +1852,7 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
               let (v, _, o') := bytesToValue dl cfg bytes ty o
               .ok (v, o')
       | .ptr _ .poison :: _, _ | _ :: .bv 1 .poison :: _, _ =>
-        .error (.immediateUB "poison pointer or flag in llvm.speculative.load")
+        .error (.immediateUB "llvm.speculative.load with poison pointer.")
       | _, _ => .error (.staticError "llvm.speculative.load expects (ptr, i1, ...)")
   else
     none
@@ -1957,12 +1882,12 @@ private def collectMaskedWrites (dl : DataLayout) (elemTy : LlvmType) (ptrVal : 
           match ptrVal with
           | .ptr _ (.value p) =>
             if baseReqAlign > 1 && p.addr.toNat % baseReqAlign != 0 then
-              .error (.immediateUB "Misaligned pointer in masked/vp store")
+              .error (.immediateUB "Invalid memory access with a poison pointer.")
             else
               let idx := if compress then memIdx else i
               let p' := ptrAddBytes dl p (Int.ofNat idx * stride)
               go (i + 1) (memIdx + 1) ((p', vals.getD i (poisonOf elemTy)) :: acc)
-          | _ => .error (.immediateUB "poison/invalid pointer in masked/vp store")
+          | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
         else go (i + 1) memIdx acc
       | _ => .error (.immediateUB "poison mask lane in masked/vp store")
   termination_by evl - i
@@ -1980,7 +1905,7 @@ private def collectScatterWrites (elemTy : LlvmType) (vals ptrs mask : List Regi
           match ptrs.getD i (.ptr 0 .poison) with
           | .ptr _ (.value p) =>
             go (i + 1) ((p, vals.getD i (poisonOf elemTy)) :: acc)
-          | _ => .error (.immediateUB "poison/invalid pointer in masked/vp scatter")
+          | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
         else go (i + 1) acc
       | _ => .error (.immediateUB "poison mask lane in masked/vp scatter")
   termination_by evl - i
@@ -1994,7 +1919,7 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
     some <| match argVals with
       | [.vector elemTy vals, ptrVal, .vector _ mask] =>
         if dl.typeSizeInBits elemTy % 8 != 0 then
-          .error (.staticError s!"{name} with non-byte-sized element type is not supported")
+          .error (.staticError s!"{name} with element type {elemTy.print} is not supported.")
         else
           let compress := strHasPrefix name "llvm.masked.compressstore"
           let stride : Int := Int.ofNat (dl.typeStoreSize elemTy)
@@ -2053,7 +1978,7 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
                   match ptrVal with
                   | .ptr _ (.value p) =>
                     if baseReqAlign > 1 && p.addr.toNat % baseReqAlign != 0 then
-                      .error (.immediateUB "Misaligned pointer in llvm.experimental.vp.strided.store")
+                      .error (.immediateUB "Invalid memory access with a poison pointer.")
                     else
                       let lanePtr? : Except ExecError Pointer :=
                         if i == 0 then .ok p
@@ -2063,7 +1988,7 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
                       match lanePtr? with
                       | .error e => .error e
                       | .ok lp => collectStrided (i + 1) ((lp, vals.getD i (poisonOf elemTy)) :: acc)
-                  | _ => .error (.immediateUB "poison/invalid pointer in llvm.experimental.vp.strided.store")
+                  | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
                 else collectStrided (i + 1) acc
               | _ => .error (.immediateUB "poison mask lane in llvm.experimental.vp.strided.store")
           termination_by evl - i
@@ -2079,7 +2004,7 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
         let rows := rowsBV.toNat
         let cols := colsBV.toNat
         let stride := strideBV.toNat
-        if stride < rows then .error (.immediateUB "stride < rows in llvm.matrix.column.major.store")
+        if stride < rows then .error (.immediateUB (matrixStrideMsg stride rows))
         else if rows * cols == 0 then .ok mem
         else match ptrVal with
           | .ptr _ (.value p) =>
@@ -2091,7 +2016,7 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
               let colByteOff := c * strideIdx * elemSz
               c > 0 && (colByteOff ≥ idxLimit || (p.addr.truncate idxW).toNat + colByteOff ≥ idxLimit)
             if overflowed then
-              .error (.immediateUB "Invalid memory access with a poison pointer in llvm.matrix.column.major.store")
+              .error (.immediateUB "Invalid memory access with a poison pointer.")
             else
               let colTy := LlvmType.vector rows elemTy
               let ws := (List.range cols).map fun c =>
@@ -2100,7 +2025,7 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
                 (ptrAddBytes dl p (Int.ofNat (c * strideIdx * elemSz)),
                  RegisterValue.vector elemTy colVals)
               execStoreList dl cfg colTy 1 mem ws
-          | _ => .error (.immediateUB "poison/invalid pointer in llvm.matrix.column.major.store")
+          | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
       | [_, _, .bv _ .poison, _, _, _] | [_, _, _, .bv 1 .poison, _, _] =>
         .error (.immediateUB "poison stride/volatile in llvm.matrix.column.major.store")
       | _ => .error (.staticError "llvm.matrix.column.major.store expects 6 arguments")
@@ -2119,7 +2044,7 @@ def evalVecMemWrite? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
               if b == 1#1 then
                 match ptrs.getD i (.ptr 0 .poison) with
                 | .ptr _ (.value p) => collectPtrs (i + 1) (p :: acc)
-                | _ => .error (.immediateUB "poison/invalid pointer in vector.histogram")
+                | _ => .error (.immediateUB "Invalid memory access with a poison pointer.")
               else collectPtrs (i + 1) acc
             | _ => .error (.immediateUB "poison mask lane in vector.histogram")
         termination_by ptrs.length - i
@@ -2389,62 +2314,69 @@ def evalAssumeBundlePure (dl : DataLayout) (mem : MemoryState)
   match tag with
   | "nonnull" =>
     match vals with
-    | [.ptr _ .poison] => .error (.immediateUB "llvm.assume nonnull violated (poison)")
+    | [.ptr _ .poison] => .error (.immediateUB "Assume on poison pointer.")
     | [.ptr as (.value p)] =>
-      if p.isNull dl as then .error (.immediateUB "llvm.assume nonnull violated (null)")
+      if p.isNull dl as then .error (.immediateUB s!"The pointer {mem.ptrString p} violates nonnull assumption.")
       else .ok ()
     | _ => .ok ()
   | "noundef" =>
     match vals with
     | [v] =>
-      if v.containsPoison then .error (.immediateUB "llvm.assume noundef violated (poison)")
+      if v.containsPoison then .error (.immediateUB s!"The value {v.llubiString mem dl} violates noundef assumption.")
       else .ok ()
     | _ => .ok ()
   | "dereferenceable" =>
     match vals with
+    | [.ptr _ .poison, _] => .error (.immediateUB "Assume on poison pointer.")
     | [pVal, .bv _ (.value sz)] =>
+      if sz.toNat == 0 then .ok () else
       match applySingleAttrPure dl mem (.ptr 0) pVal (.dereferenceable sz.toNat) with
       | .ok _ => .ok ()
-      | .error e => .error e
+      | .error _ => .error (.immediateUB s!"The pointer {pVal.llubiString mem dl} violates dereferenceable({sz.toNat}) assumption.")
     | [_, .bv _ .poison] => .error (.immediateUB "llvm.assume dereferenceable size is poison")
     | _ => .ok ()
   | "dereferenceable_or_null" =>
     match vals with
+    | [.ptr _ .poison, _] => .error (.immediateUB "Assume on poison pointer.")
     | [pVal, .bv _ (.value sz)] =>
+      if sz.toNat == 0 then .ok () else
       match applySingleAttrPure dl mem (.ptr 0) pVal (.dereferenceableOrNull sz.toNat) with
       | .ok _ => .ok ()
-      | .error e => .error e
+      | .error _ => .error (.immediateUB s!"The pointer {pVal.llubiString mem dl} violates dereferenceable_or_null({sz.toNat}) assumption.")
     | [_, .bv _ .poison] => .error (.immediateUB "llvm.assume dereferenceable_or_null size is poison")
     | _ => .ok ()
   | "align" =>
     match vals with
-    | .ptr _ .poison :: _ => .error (.immediateUB "llvm.assume align pointer is poison")
+    | .ptr _ .poison :: _ => .error (.immediateUB "Assume on poison pointer.")
     | .ptr _ (.value p) :: aVal :: rest =>
-      if p.addr.toNat == 0 then .ok ()
-      else
-        match aVal with
-        | .bv _ .poison => .error (.immediateUB "llvm.assume align value is poison")
-        | .bv _ (.value abv) =>
-          let a := abv.toNat
+      match aVal with
+      | .bv _ .poison => .error (.immediateUB "Unexpected poison integer value.")
+      | .bv _ (.value abv) =>
+        let a := abv.toNat
+        let off? : Except ExecError Int := match rest with
+          | [] => .ok 0
+          | .bv _ .poison :: _ => .error (.immediateUB "Unexpected poison integer value.")
+          | .bv _ (.value obv) :: _ => .ok obv.toInt
+          | _ => .ok 0
+        match off? with
+        | .error e => .error e
+        | .ok off =>
+          let w := p.addrWidth
+          let checked : Nat := (((p.addr.toNat : Int) - off) % (2 ^ w : Int)).toNat
           if a == 0 || (a &&& (a - 1)) != 0 then
-            .error (.immediateUB s!"llvm.assume align({a}) is not a power of 2")
-          else
-            let off? : Except ExecError Nat := match rest with
-              | [] => .ok 0
-              | .bv _ .poison :: _ => .error (.immediateUB "llvm.assume align offset is poison")
-              | .bv _ (.value obv) :: _ => .ok obv.toNat
-              | _ => .ok 0
-            match off? with
-            | .error e => .error e
-            | .ok off =>
-              if (p.addr.toNat + a - (off % a)) % a != 0 then
-                .error (.immediateUB s!"llvm.assume align({a}) violated for pointer")
-              else .ok ()
-        | _ => .ok ()
+            if checked != 0 then
+              .error (.immediateUB s!"Assume on pointer {mem.ptrString p} with a nonzero adjusted address and a non-power-of-two alignment {a}.")
+            else .ok ()
+          else if checked % a != 0 then
+            .error (.immediateUB s!"The pointer {mem.ptrString p} violates align({a}) assumption.")
+          else .ok ()
+      | _ => .ok ()
     | _ => .ok ()
   | "range" =>
     match vals with
-    | [.bv _ .poison, _, _] => .error (.immediateUB "llvm.assume range value is poison")
+    | [.bv _ .poison, .bv _ (.value lbv), .bv _ (.value hbv)] =>
+      .error (.immediateUB s!"The value poison violates range({lbv.toInt}, {hbv.toInt}) assumption.")
+    | [.bv _ .poison, _, _] => .error (.immediateUB "The value poison violates range assumption.")
     | [.bv _ (.value vbv), .bv _ (.value lbv), .bv _ (.value hbv)] =>
       let v := vbv.toNat
       let lo := lbv.toNat
@@ -2453,7 +2385,7 @@ def evalAssumeBundlePure (dl : DataLayout) (mem : MemoryState)
         if lo ≤ hi then lo ≤ v && v < hi
         else v ≥ lo || v < hi
       if inRange then .ok ()
-      else .error (.immediateUB "llvm.assume range violated")
+      else .error (.immediateUB s!"The value {(RegisterValue.bv _ (.value vbv)).llubiString mem dl} violates range({lbv.toInt}, {hbv.toInt}) assumption.")
     | [_, .bv _ .poison, _] | [_, _, .bv _ .poison] =>
       .error (.immediateUB "llvm.assume range bound is poison")
     | _ => .ok ()

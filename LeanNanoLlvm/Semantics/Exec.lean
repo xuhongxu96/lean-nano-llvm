@@ -727,7 +727,7 @@ def execCallee (dl : DataLayout) (cfg : SemanticsConfig)
       | .ptr _ (.value p) =>
         match m1.addrToFunc.get? p.addr.toNat with
         | some fid => .ok (fid, m1, o1)
-        | none => .error (.immediateUB s!"Indirect call through invalid function pointer {p}")
+        | none => .error (.immediateUB "Indirect call through invalid function pointer.")
       | _ => .error (.staticError "Invalid callee expression in call")
 
 theorem execCallee_sound (dl : DataLayout) (cfg : SemanticsConfig)
@@ -744,7 +744,7 @@ theorem execCallee_sound (dl : DataLayout) (cfg : SemanticsConfig)
             | .ptr _ (.value p) =>
               match m1.addrToFunc.get? p.addr.toNat with
               | some fid => .ok (fid, m1, o1)
-              | none => .error (.immediateUB s!"Indirect call through invalid function pointer {p}")
+              | none => .error (.immediateUB "Indirect call through invalid function pointer.")
             | _ => .error (.staticError "Invalid callee expression in call"))) := by
     intro hnot
     have ih := execExp_sound dl cfg regs mem (.ptr dl.programAddrSpace) e o
@@ -983,7 +983,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
         | .error err => .error err
         | .ok (nVal, m1, o1) =>
           match nVal with
-          | .bv _ .poison => .error (.immediateUB "alloca with poison array size")
+          | .bv _ .poison => .error (.immediateUB "Alloca with poison array size.")
           | .bv _ (.value bv) => .ok (bv.toNat, m1, o1)
           | _ => .error (.staticError "alloca array size must be an integer")
     match cntRes with
@@ -1003,7 +1003,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     | .error err => (none, Config.ofError err, o)
     | .ok (ptrVal, m1, o1) =>
       match ptrVal with
-      | .ptr _ .poison => (none, .ub "load through poison pointer", o1)
+      | .ptr _ .poison => (none, .ub "Invalid memory access with a poison pointer.", o1)
       | .ptr _ (.value p) =>
         let effAlign := align?.getD (dl.typeABIAlign ty)
         let storeSize := dl.typeStoreSize ty
@@ -1018,7 +1018,8 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
             | .error err => (ev, Config.ofError err, o2)
             | .ok val =>
               if noundef && (hasUndef || val.containsPoison) then
-                (ev, .ub "Loaded value violates !noundef (contains poison or undef bits)", o2)
+                (ev, .ub (if hasUndef || rawVal.containsPoison then "The value loaded contains undefined bits."
+                          else s!"The value {val.llubiString m1 dl} violates !noundef metadata."), o2)
               else
                 (ev, finishRegInstr st frame callers rest iid val (m1.bindWildcard p.prov mo.allocId), o2)
       | _ => (none, .staticError s!"Expected pointer in load, got {ptrVal}", o1)
@@ -1030,7 +1031,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       | .error err => (none, Config.ofError err, o1)
       | .ok (ptrVal, m2, o2) =>
         match ptrVal with
-        | .ptr _ .poison => (none, .ub "store through poison pointer", o2)
+        | .ptr _ .poison => (none, .ub "Invalid memory access with a poison pointer.", o2)
         | .ptr _ (.value p) =>
           let effAlign := align?.getD (dl.typeABIAlign valTy)
           let storeSize := dl.typeStoreSize valTy
@@ -1140,7 +1141,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
         let fname := fid.ToString
         let allowLib := st.allowLibcallsFor fid
         if allowLib && isAllocLibcall fname then
-          match execAllocLibcall dl cfg m2 fname retTy argVals with
+          match execAllocLibcall dl cfg m2 (heapObjName iid) fname retTy argVals with
           | some (.ok (rawRet, m3)) =>
             match applyRetFMFAndAttrsPure dl m3 retTy fmf retAttrs rawRet with
             | .ok finalRet => (none, finishCallResult st frame callers rest iid retTy finalRet m3, o2)
@@ -1234,10 +1235,10 @@ def execTerm (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       | .ptr _ (.value p) =>
         match dests.find? (fun d => m1.addrToFunc.get? p.addr.toNat == some (blockAddrKey frame.defn.prototype.name d)) with
         | some dest => execJump st frame callers m1 dest o1
-        | none => (.ub "Indirect branch on unlisted or invalid target BB", o1)
+        | none => (.ub (if (m1.addrToFunc.get? p.addr.toNat).isSome then "Indirect branch on unlisted target BB." else "Indirect branch on invalid target BB."), o1)
       | other => (.staticError s!"Expected pointer in indirectbr, got {other}", o1)
   | .unreachable =>
-    (.ub "Executed unreachable instruction", o)
+    (.ub "Unreachable code.", o)
 
 /-- Kernel-reducible single small-step transition (mirroring `Step`). -/
 def execStep (o : OracleState) (c : Config) : Option TraceEvent × Config × OracleState :=
@@ -1257,9 +1258,9 @@ def execStep (o : OracleState) (c : Config) : Option TraceEvent × Config × Ora
 
 /-! ### Full Soundness Theorems (`execInstr_sound`, `execTerm_sound`, `execStep_sound`, `runSteps_sound`) -/
 
-private theorem execAllocLibcall_isSome_of_isAlloc {dl cfg mem name retTy argVals}
+private theorem execAllocLibcall_isSome_of_isAlloc {dl cfg mem objName name retTy argVals}
     (h : isAllocLibcall name = true) :
-    ∃ res, execAllocLibcall dl cfg mem name retTy argVals = some res := by
+    ∃ res, execAllocLibcall dl cfg mem objName name retTy argVals = some res := by
   unfold isAllocLibcall at h
   simp only [Bool.or_eq_true] at h
   unfold execAllocLibcall
@@ -1668,7 +1669,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
         · rw [if_pos halloc] at h
           have hisAlloc : isAllocLibcall fid.ToString = true := (Bool.and_eq_true _ _ |>.mp halloc).2
           obtain ⟨res, hres⟩ := execAllocLibcall_isSome_of_isAlloc (dl := st.dataLayout)
-            (cfg := st.config) (mem := m2) (retTy := retTy) (argVals := argVals) hisAlloc
+            (cfg := st.config) (mem := m2) (objName := heapObjName iid) (retTy := retTy) (argVals := argVals) hisAlloc
           rw [hres] at h
           have hspec := execAllocLibcall_sound hwf2 hres
           cases res with
@@ -2074,6 +2075,11 @@ private theorem registerBlockAddrs_wf {dl cfg takenBlks fnName blks mem mem'}
         exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
     · exact ih hwf h
 
+/-- Module-initialization order of `llubi::Context::initGlobalValues`: function (and block)
+address objects for all functions first, then global variables. -/
+def functionsFirst (ents : List TopLevelEntity) : List TopLevelEntity :=
+  ents.filter (fun | .global _ => false | _ => true) ++ ents.filter (fun | .global _ => true | _ => false)
+
 private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
     (takenFns takenBlks : List GlobalId) :
     List TopLevelEntity → MemoryState → AssocMap FunctionId Definition → AssocMap FunctionId Declaration →
@@ -2083,7 +2089,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
     match ent with
     | .declaration decl =>
       if takenFns.contains decl.name then
-        match mem.allocate dl cfg 0 8 decl.name.ToString dl.programAddrSpace .zeroed .func true with
+        match mem.allocate dl cfg 0 1 decl.name.ToString dl.programAddrSpace .zeroed .func true with
         | .error e => .error e
         | .ok (obj, mem') =>
           let ptr := MemoryState.derivePointer dl obj
@@ -2094,7 +2100,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
     | .definition defn =>
       let afterFn : Except ExecError MemoryState :=
         if takenFns.contains defn.prototype.name then
-          match mem.allocate dl cfg 0 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+          match mem.allocate dl cfg 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
           | .error e => .error e
           | .ok (obj, mem') =>
             let ptr := MemoryState.derivePointer dl obj
@@ -2108,7 +2114,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
         | .ok mem''' => initModulePass1 dl cfg takenFns takenBlks rest mem''' (fns.insert defn.prototype.name defn) decls
     | .global gv =>
       let size := dl.typeAllocSize gv.ty
-      let effAlign := gv.align.getD (dl.typePrefAlign gv.ty)
+      let effAlign := dl.globalAlign gv.ty gv.align gv.initializer.isSome
       let initKind := if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized
       match mem.allocate dl cfg size effAlign gv.name.ToString gv.addrSpace initKind .global gv.isConstant with
       | .error e => .error e
@@ -2149,7 +2155,7 @@ def initModuleExec (mod : TopLevel) (cfg : SemanticsConfig := .modern)
   | .error msg => .error (.staticError msg)
   | .ok resolvedMod =>
     let (takenFns, takenBlks) := collectAddrTaken resolvedMod.entities
-    match initModulePass1 dl cfg takenFns takenBlks resolvedMod.entities {} ∅ ∅ with
+    match initModulePass1 dl cfg takenFns takenBlks (functionsFirst resolvedMod.entities) {} ∅ ∅ with
     | .error e => .error e
     | .ok (mem1, fns, decls) =>
       match initModulePass2 dl cfg resolvedMod.entities mem1 oracle with
@@ -2168,7 +2174,7 @@ private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls
     | declaration decl =>
       dsimp only at h
       split at h
-      · cases ha : mem.allocate dl cfg 0 8 decl.name.ToString dl.programAddrSpace .zeroed .func true with
+      · cases ha : mem.allocate dl cfg 0 1 decl.name.ToString dl.programAddrSpace .zeroed .func true with
         | error e => rw [ha] at h; cases h
         | ok p =>
           rw [ha] at h; obtain ⟨obj, m1⟩ := p
@@ -2177,13 +2183,13 @@ private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls
     | definition defn =>
       dsimp only at h
       have hwfAfter : ∀ m2, ((if takenFns.contains defn.prototype.name then
-            match mem.allocate dl cfg 0 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+            match mem.allocate dl cfg 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
             | .error e => .error e
             | .ok (obj, mem') => .ok (mem'.insertFuncAddr defn.prototype.name obj.baseAddr (MemoryState.derivePointer dl obj))
           else .ok mem) : Except ExecError MemoryState) = .ok m2 → MemoryState.WellFormed m2 := by
         intro m2 hm2
         split at hm2
-        · cases ha : mem.allocate dl cfg 0 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+        · cases ha : mem.allocate dl cfg 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
           | error e => rw [ha] at hm2; cases hm2
           | ok p =>
             rw [ha] at hm2; obtain ⟨obj, m1⟩ := p; cases hm2
@@ -2198,7 +2204,7 @@ private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls
         | ok m3 => rw [hb] at h; exact ih (registerBlockAddrs_wf hwf1 hb) h
     | global gv =>
       dsimp only at h
-      cases ha : mem.allocate dl cfg (dl.typeAllocSize gv.ty) (gv.align.getD (dl.typePrefAlign gv.ty))
+      cases ha : mem.allocate dl cfg (dl.typeAllocSize gv.ty) (dl.globalAlign gv.ty gv.align gv.initializer.isSome)
           gv.name.ToString gv.addrSpace
           (if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized)
           .global gv.isConstant with
@@ -2252,7 +2258,7 @@ theorem initModuleExec_wf {mod cfg dl oracle mem fns decls o'}
   | error msg => rw [hres] at h; cases h
   | ok rmod =>
     rw [hres] at h; dsimp only at h
-    cases h1 : initModulePass1 dl cfg (collectAddrTaken rmod.entities).1 (collectAddrTaken rmod.entities).2 rmod.entities {} ∅ ∅ with
+    cases h1 : initModulePass1 dl cfg (collectAddrTaken rmod.entities).1 (collectAddrTaken rmod.entities).2 (functionsFirst rmod.entities) {} ∅ ∅ with
     | error e => rw [h1] at h; cases h
     | ok p1 =>
       rw [h1] at h; obtain ⟨m1, fns1, decls1⟩ := p1; dsimp only at h
