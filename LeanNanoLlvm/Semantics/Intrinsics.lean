@@ -139,9 +139,13 @@ theorem execMemSetPure_preserves_wf {mem dst fill len mem'}
         | _ => cases h
   | _ => cases h
 
-/-- Predicate identifying heap-allocating C library calls handled relationally via `AllocSpec`. -/
+/-- Predicate identifying C++ `operator new` / `operator new[]` mangled names. -/
+def isCxxNew (name : String) : Bool :=
+  name == "_Znwm" || name == "_Znam" || name == "_Znwj" || name == "_Znaj"
+
+/-- Predicate identifying heap-allocating C/C++ library calls handled relationally via `AllocSpec`. -/
 def isAllocLibcall (name : String) : Bool :=
-  name == "malloc" || name == "calloc"
+  name == "malloc" || name == "calloc" || isCxxNew name
 
 /-- Extract return pointer address space for `malloc`/`calloc` (defaults to 0). -/
 @[simp]
@@ -155,8 +159,8 @@ def heapAllocAlign (dl : DataLayout) (as : Nat) : Nat :=
   if dl.getPointerABIAlign as ≥ 8 then 16 else 8
 
 /--
-Relational specification for `malloc` and `calloc` (used in the primary `Step` relation).
-Permits any valid aligned disjoint address via `MemoryState.AllocSpec`, or returning `null` on OOM/overflow.
+Relational specification for `malloc`, `calloc`, and C++ `operator new` (used in the primary `Step` relation).
+Permits any valid aligned disjoint address via `MemoryState.AllocSpec`, or returning `null` / OOM.
 -/
 inductive AllocLibcallSpec (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState) :
     String → LlvmRetType → List RegisterValue → Except ExecError (RegisterValue × MemoryState) → Prop where
@@ -198,8 +202,27 @@ inductive AllocLibcallSpec (dl : DataLayout) (cfg : SemanticsConfig) (mem : Memo
       (∀ w1 w2 c s, args ≠ [.bv w1 (.value c), .bv w2 (.value s)]) →
       AllocLibcallSpec dl cfg mem "calloc" retTy args
         (.error (.immediateUB "calloc called with poison/invalid arguments"))
+  | cxxNew_poison (name : String) (retTy : LlvmRetType) (w : Nat) :
+      isCxxNew name = true →
+      AllocLibcallSpec dl cfg mem name retTy [.bv w .poison]
+        (.error (.immediateUB "operator new called with poison size"))
+  | cxxNew_ok (name : String) (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) (obj : MemoryObject) (mem' : MemoryState) :
+      isCxxNew name = true →
+      MemoryState.AllocSpec mem dl cfg sz.toNat (heapAllocAlign dl (retAddrSpace retTy))
+        "new" (retAddrSpace retTy) .uninitialized .heap false obj mem' →
+      AllocLibcallSpec dl cfg mem name retTy [.bv w (.value sz)]
+        (.ok (.ptr (retAddrSpace retTy) (.value (MemoryState.derivePointer dl obj)), mem'))
+  | cxxNew_oom (name : String) (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) :
+      isCxxNew name = true →
+      AllocLibcallSpec dl cfg mem name retTy [.bv w (.value sz)]
+        (.error .outOfMemory)
+  | cxxNew_bad_args (name : String) (retTy : LlvmRetType) (args : List RegisterValue) :
+      isCxxNew name = true →
+      (∀ w v, args ≠ [.bv w v]) →
+      AllocLibcallSpec dl cfg mem name retTy args
+        (.error (.staticError "operator new expects 1 integer argument"))
 
-/-- Executable `malloc` / `calloc` implementation using deterministic bump allocation. -/
+/-- Executable `malloc` / `calloc` / `operator new` implementation using deterministic bump allocation. -/
 def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
     (name : String) (retTy : LlvmRetType) (argVals : List RegisterValue) :
     Option (Except ExecError (RegisterValue × MemoryState)) :=
@@ -230,6 +253,18 @@ def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
             | .error _ => .ok (.ptr as (.value (Pointer.null dl as)), mem)
         | _, _ => .error (.immediateUB "calloc called with poison/invalid arguments")
       | _ => .error (.immediateUB "calloc called with poison/invalid arguments")
+  else if isCxxNew name then
+    some <| match argVals with
+      | [a] => match a with
+        | .bv _ .poison => .error (.immediateUB "operator new called with poison size")
+        | .bv _ (.value sz) =>
+          let as := retAddrSpace retTy
+          let maxAlign := heapAllocAlign dl as
+          match mem.allocate dl cfg sz.toNat maxAlign "new" as .uninitialized .heap false with
+          | .ok (obj, mem') => .ok (.ptr as (.value (MemoryState.derivePointer dl obj)), mem')
+          | .error _ => .error .outOfMemory
+        | _ => .error (.staticError "operator new expects 1 integer argument")
+      | _ => .error (.staticError "operator new expects 1 integer argument")
   else
     none
 
@@ -336,7 +371,32 @@ theorem execAllocLibcall_sound {dl cfg mem name retTy argVals res}
       | nil => exact AllocLibcallSpec.calloc_bad_args retTy [] (by intro _ _ _ _ heq; cases heq)
     · have hcf : (name == "calloc") = false := Bool.eq_false_iff.mpr hc
       simp only [hcf, Bool.false_eq_true, ↓reduceIte] at h
-      cases h
+      by_cases hn : isCxxNew name = true
+      · simp only [hn, ↓reduceIte, Option.some.injEq] at h
+        subst h
+        cases argVals with
+        | cons a rest =>
+          cases rest with
+          | nil =>
+            cases a with
+            | bv w v =>
+              cases v using PoisonOr.casesOn' with
+              | poison => exact AllocLibcallSpec.cxxNew_poison name retTy w hn
+              | value sz =>
+                dsimp only
+                cases halloc : mem.allocate dl cfg sz.toNat (heapAllocAlign dl (retAddrSpace retTy))
+                    "new" (retAddrSpace retTy) .uninitialized .heap false with
+                | ok p =>
+                  exact AllocLibcallSpec.cxxNew_ok name retTy w sz p.1 p.2 hn
+                    (MemoryState.allocate_satisfies_AllocSpec hwf halloc)
+                | error _ =>
+                  exact AllocLibcallSpec.cxxNew_oom name retTy w sz hn
+            | _ => exact AllocLibcallSpec.cxxNew_bad_args name retTy _ hn (by intro w v heq; simp at heq)
+          | cons b bs => exact AllocLibcallSpec.cxxNew_bad_args name retTy (a :: b :: bs) hn (by intro w v heq; cases heq)
+        | nil => exact AllocLibcallSpec.cxxNew_bad_args name retTy [] hn (by intro w v heq; cases heq)
+      · have hnf : isCxxNew name = false := Bool.eq_false_iff.mpr hn
+        simp only [hnf, Bool.false_eq_true, ↓reduceIte] at h
+        cases h
 
 theorem AllocLibcallSpec.preserves_wf {dl cfg mem name retTy argVals retVal mem'}
     (hwf : MemoryState.WellFormed mem)
@@ -347,6 +407,7 @@ theorem AllocLibcallSpec.preserves_wf {dl cfg mem name retTy argVals retVal mem'
   | malloc_oom _ _ _ => exact hwf
   | calloc_ok _ _ _ _ _ _ _ _ hspec => exact hspec.preserves_wf hwf
   | calloc_null _ _ _ _ _ => exact hwf
+  | cxxNew_ok _ _ _ _ _ _ _ hspec => exact hspec.preserves_wf hwf
 
 /-- Pure non-memory LLVM intrinsics (integer, bit-manipulation, saturating, overflow, FP, assume). -/
 def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : LlvmRetType)
@@ -358,7 +419,8 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
         if b == 0 then .error (.immediateUB "llvm.assume(false) violated") else .ok (.void, o)
       | [.bv 1 .poison] => .error (.immediateUB "llvm.assume(poison) violated")
       | _ => .error (.staticError "llvm.assume expects i1 argument")
-  else if name == "llvm.donothing" then
+  else if name == "llvm.donothing" || name == "llvm.experimental.noalias.scope.decl" ||
+          name == "llvm.inlineasm.noop" then
     some (.ok (.void, o))
   else if strHasPrefix name "llvm.ssa.copy" || strHasPrefix name "llvm.expect" then
     some <| match argVals with
@@ -735,10 +797,401 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
   else
     none
 
+/-- Decode a concrete `MemByte` into a `Nat` in `0..255`, returning `none` if any bit is poison/undef. -/
+private def memByteToConcreteNat? (mb : MemByte) : Option Nat :=
+  match mb.b0, mb.b1, mb.b2, mb.b3, mb.b4, mb.b5, mb.b6, mb.b7 with
+  | .concrete k0 _, .concrete k1 _, .concrete k2 _, .concrete k3 _,
+    .concrete k4 _, .concrete k5 _, .concrete k6 _, .concrete k7 _ =>
+    let b (k : Bool) (sh : Nat) : Nat := if k then (1 <<< sh) else 0
+    some (b k0 0 + b k1 1 + b k2 2 + b k3 3 + b k4 4 + b k5 5 + b k6 6 + b k7 7)
+  | _, _, _, _, _, _, _, _ => none
+
+/-- Read a null-terminated C string from memory, raising Immediate UB on invalid/OOB/uninit/poison reads. -/
+def readCStringPure (mem : MemoryState) (p : Pointer) : Except ExecError String :=
+  match mem.resolveObject? p with
+  | none => .error (.immediateUB "Invalid memory access via a pointer with nullary provenance")
+  | some mo =>
+    if mo.state == .freed || mo.state == .dead then
+      .error (.immediateUB s!"Use-after-free while reading C-string from '{mo.name}'")
+    else if p.addr.toNat < mo.baseAddr || p.addr.toNat ≥ mo.baseAddr + mo.size then
+      .error (.immediateUB s!"Out-of-bounds read while parsing C-string in '{mo.name}'")
+    else
+      let startOff := p.addr.toNat - mo.baseAddr
+      let maxFuel := mo.size - startOff
+      let rec go (off : Nat) (fuel : Nat) (acc : List Char) : Except ExecError String :=
+        match fuel with
+        | 0 => .error (.immediateUB "Out-of-bounds read while parsing C-string (missing null terminator)")
+        | fuel' + 1 =>
+          match memByteToConcreteNat? (mo.bytes.getD off MemByte.poison) with
+          | none => .error (.immediateUB s!"Read uninitialized or poison memory while parsing C-string at offset {off - startOff}")
+          | some 0 => .ok (String.ofList acc.reverse)
+          | some byte => go (off + 1) fuel' (Char.ofNat byte :: acc)
+      go startOff maxFuel []
+
+private def padLeft (s : String) (width : Nat) (padChar : Char) : String :=
+  if s.length ≥ width then s
+  else String.ofList (List.replicate (width - s.length) padChar) ++ s
+
+private def formatNatBase (n : Nat) (base : Nat) (upper : Bool) : String :=
+  let digits := Nat.toDigits base n
+  String.ofList (digits.map fun c => if upper && 'a' ≤ c && c ≤ 'z' then Char.ofNat (c.toNat - 32) else c)
+
+private def formatSignedDec (x : Int) (width : Nat) (zeroPad : Bool) : String :=
+  if x < 0 then
+    let mag := toString (-x).toNat
+    if zeroPad && width > 1 then "-" ++ padLeft mag (width - 1) '0'
+    else padLeft ("-" ++ mag) width ' '
+  else
+    let mag := toString x.toNat
+    padLeft mag width (if zeroPad then '0' else ' ')
+
+private def formatPrintfFloat (flt : IEEEFloat ft) (spec : Char) : String :=
+  let upper := spec == 'F' || spec == 'E' || spec == 'G' || spec == 'A'
+  if flt.isNaN then
+    let s := if upper then "NAN" else "nan"
+    if flt.sign then "-" ++ s else s
+  else if flt.isInf then
+    let s := if upper then "INF" else "inf"
+    if flt.sign then "-" ++ s else s
+  else
+    -- Standard C `%f`/`%e`/`%g` default 6-digit formatting (exact length for `printf` return value)
+    -- Convert to Lean `Float` for finite display when double/float, using exact IEEE bits.
+    let f64 : Float := (IEEEFloat.convert FloatFormat.double .RNE flt).toLeanFloat
+    let isNeg := flt.sign
+    let absF := if isNeg then -f64 else f64
+    let pfx := if isNeg then "-" else ""
+    if spec == 'g' || spec == 'G' then
+      let s := toString absF
+      let s' :=
+        if s.contains '.' then
+          let trimmed := s.toList.reverse.dropWhile (· == '0')
+          let trimmed := match trimmed with | '.' :: rest => rest | other => other
+          String.ofList trimmed.reverse
+        else s
+      pfx ++ s'
+    else if spec == 'e' || spec == 'E' then
+      -- Scientific notation `d.ddddddE±dd` (always 12 chars for 2-digit exp, plus optional `-`)
+      let eChar := if upper then "E" else "e"
+      if absF == 0.0 then pfx ++ s!"0.000000{eChar}+00"
+      else
+        let rec norm (v : Float) (e : Int) (fuel : Nat) : Float × Int :=
+          match fuel with
+          | 0 => (v, e)
+          | fuel' + 1 =>
+            if v ≥ 10.0 then norm (v / 10.0) (e + 1) fuel'
+            else if v < 1.0 then norm (v * 10.0) (e - 1) fuel'
+            else (v, e)
+        let (m, exp) := norm absF 0 400
+        let scaled : Nat := (m * 1000000.0 + 0.5).toUInt64.toNat
+        let intPart := scaled / 1000000
+        let fracPart := padLeft (toString (scaled % 1000000)) 6 '0'
+        let expSign := if exp < 0 then "-" else "+"
+        let expStr := padLeft (toString exp.natAbs) 2 '0'
+        pfx ++ s!"{intPart}.{fracPart}{eChar}{expSign}{expStr}"
+    else
+      -- Fixed `%f`/`%F` with 6 decimal places
+      let scaled : Nat := (absF * 1000000.0 + 0.5).toUInt64.toNat
+      let intPart := scaled / 1000000
+      let fracPart := padLeft (toString (scaled % 1000000)) 6 '0'
+      pfx ++ s!"{intPart}.{fracPart}"
+
+/-- Parse and handle a single `%...` format specifier in `printf`, returning
+    `(remainingChars, remainingArgs, optionalWritePatch, newWritten)`. -/
+private def evalPrintfSpec (dl : DataLayout) (rest : List Char) (args : List RegisterValue)
+    (mem : MemoryState) (written : Nat) :
+    Except ExecError (List Char × List RegisterValue × Option (AllocId × Nat × Array MemByte) × Nat) :=
+  let rec skipFlags (zeroPad : Bool) : List Char → Bool × List Char
+    | '-' :: cs => skipFlags zeroPad cs
+    | '+' :: cs => skipFlags zeroPad cs
+    | ' ' :: cs => skipFlags zeroPad cs
+    | '#' :: cs => skipFlags zeroPad cs
+    | '0' :: cs => skipFlags true cs
+    | cs => (zeroPad, cs)
+  let (zeroPad, cs1) := skipFlags false rest
+  let rec parseWidth (acc : Nat) : List Char → Nat × List Char
+    | c :: cs => if '0' ≤ c && c ≤ '9' then parseWidth (acc * 10 + (c.toNat - '0'.toNat)) cs else (acc, c :: cs)
+    | [] => (acc, [])
+  let (width, cs2) := parseWidth 0 cs1
+  let cs3 := match cs2 with
+    | '.' :: afterDot => (parseWidth 0 afterDot).2
+    | other => other
+  let (lenMod, cs4) := match cs3 with
+    | 'h' :: 'h' :: cs => ("hh", cs)
+    | 'h' :: cs => ("h", cs)
+    | 'l' :: 'l' :: cs => ("ll", cs)
+    | 'l' :: cs => ("l", cs)
+    | 'j' :: cs => ("j", cs)
+    | 'z' :: cs => ("z", cs)
+    | 't' :: cs => ("t", cs)
+    | 'L' :: cs => ("L", cs)
+    | cs => ("", cs)
+  match cs4 with
+  | [] => .error (.immediateUB "Incomplete format specifier in printf")
+  | spec :: tail =>
+    match spec with
+    | 'd' | 'i' | 'u' | 'o' | 'x' | 'X' | 'c' =>
+      match args with
+      | [] => .error (.immediateUB s!"Not enough arguments provided for the format string. Required argument for '{spec}'.")
+      | arg :: restArgs =>
+        match arg with
+        | .bv _ .poison => .error (.immediateUB "Poison argument passed to printf")
+        | .bv w (.value bv) =>
+          let validW := if lenMod == "h" || lenMod == "hh" then w ≥ 8 && w ≤ 64 else w ≥ 32 && w ≤ 64
+          if !validW then
+            .error (.immediateUB s!"Argument type mismatch in printf for format specifier '{spec}'")
+          else
+            let formatted :=
+              if spec == 'd' || spec == 'i' then formatSignedDec bv.toInt width zeroPad
+              else if spec == 'u' then padLeft (toString bv.toNat) width (if zeroPad then '0' else ' ')
+              else if spec == 'o' then padLeft (formatNatBase bv.toNat 8 false) width (if zeroPad then '0' else ' ')
+              else if spec == 'x' then padLeft (formatNatBase bv.toNat 16 false) width (if zeroPad then '0' else ' ')
+              else if spec == 'X' then padLeft (formatNatBase bv.toNat 16 true) width (if zeroPad then '0' else ' ')
+              else String.singleton (Char.ofNat (bv.toNat % 256))
+            .ok (tail, restArgs, none, written + formatted.length)
+        | _ => .error (.immediateUB s!"Argument type mismatch in printf for format specifier '{spec}'")
+    | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' =>
+      match args with
+      | [] => .error (.immediateUB s!"Not enough arguments provided for the format string. Required argument for '{spec}'.")
+      | arg :: restArgs =>
+        match arg with
+        | .float _ .poison => .error (.immediateUB "Poison argument passed to printf")
+        | .float _ (.value flt) =>
+          let formatted := formatPrintfFloat flt spec
+          .ok (tail, restArgs, none, written + formatted.length)
+        | _ => .error (.immediateUB s!"Argument type mismatch in printf for format specifier '{spec}'")
+    | 'p' =>
+      match args with
+      | [] => .error (.immediateUB "Not enough arguments provided for the format string. Required argument for 'p'.")
+      | arg :: restArgs =>
+        match arg with
+        | .ptr _ .poison => .error (.immediateUB "Poison argument passed to printf")
+        | .ptr _ (.value p) =>
+          if p.addrWidth > 64 then
+            .error (.immediateUB "Argument type mismatch in printf for format specifier 'p' (pointer too wide)")
+          else
+            let formatted := if p.addr.toNat == 0 then "(nil)" else "0x" ++ formatNatBase p.addr.toNat 16 false
+            .ok (tail, restArgs, none, written + formatted.length)
+        | _ => .error (.immediateUB "Argument type mismatch in printf for format specifier 'p'")
+    | 's' =>
+      match args with
+      | [] => .error (.immediateUB "Not enough arguments provided for the format string. Required argument for 's'.")
+      | arg :: restArgs =>
+        match arg with
+        | .ptr _ .poison => .error (.immediateUB "Poison argument passed to printf")
+        | .ptr _ (.value p) =>
+          if p.addrWidth > 64 then
+            .error (.immediateUB "Argument type mismatch in printf for format specifier 's' (pointer too wide)")
+          else
+            match readCStringPure mem p with
+            | .error e => .error e
+            | .ok s => .ok (tail, restArgs, none, written + s.length)
+        | _ => .error (.immediateUB "Argument type mismatch in printf for format specifier 's'")
+    | 'n' =>
+      match args with
+      | [] => .error (.immediateUB "Not enough arguments provided for the format string. Required argument for 'n'.")
+      | arg :: restArgs =>
+        match arg with
+        | .ptr _ .poison => .error (.immediateUB "Poison argument passed to printf")
+        | .ptr _ (.value p) =>
+          match mem.verifyMemAccess p 4 1 true with
+          | .error e => .error e
+          | .ok (mo, off) =>
+            let bytes := valueToBytes dl .modern (.bv 32 (.value (BitVec.ofNat 32 written))) (.int 32)
+            .ok (tail, restArgs, some (mo.allocId, off, bytes), written)
+        | _ => .error (.immediateUB "Argument type mismatch in printf for format specifier 'n'")
+    | _ => .error (.immediateUB s!"Unknown or unsupported format specifier '{spec}' in printf")
+
+/-- Format-string interpreter for C `printf` (fuel-bounded over format length). -/
+def evalPrintfLoop (dl : DataLayout) :
+    Nat → List Char → List RegisterValue → MemoryState → Nat → Except ExecError (Nat × MemoryState)
+  | 0, _, _, mem, written => .ok (written, mem)
+  | _ + 1, [], _, mem, written => .ok (written, mem)
+  | fuel + 1, '%' :: '%' :: rest, args, mem, written =>
+    evalPrintfLoop dl fuel rest args mem (written + 1)
+  | fuel + 1, '%' :: rest, args, mem, written =>
+    match evalPrintfSpec dl rest args mem written with
+    | .error e => .error e
+    | .ok (tail, restArgs, patch?, written') =>
+      let mem' := match patch? with
+        | none => mem
+        | some (aid, off, bytes) => mem.writeObjectBytes aid off bytes
+      evalPrintfLoop dl fuel tail restArgs mem' written'
+  | fuel + 1, _ :: rest, args, mem, written =>
+    evalPrintfLoop dl fuel rest args mem (written + 1)
+
+theorem evalPrintfLoop_preserves_wf {dl fuel cs args mem written n mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : evalPrintfLoop dl fuel cs args mem written = .ok (n, mem')) :
+    MemoryState.WellFormed mem' := by
+  induction fuel generalizing cs args mem written with
+  | zero => unfold evalPrintfLoop at h; cases h; exact hwf
+  | succ fuel ih =>
+    unfold evalPrintfLoop at h
+    split at h
+    · cases h; exact hwf
+    · cases h; exact hwf
+    · rename_i _ _ _ _ _ _ _ _ _ heq; cases heq; exact ih hwf h
+    · rename_i _ _ _ _ _ _ _ _ _ heq; cases heq
+      cases hs : evalPrintfSpec dl _ _ _ _ with
+      | error e => rw [hs] at h; cases h
+      | ok p =>
+        rw [hs] at h; obtain ⟨t, ra, patch?, w1⟩ := p; dsimp only at h
+        cases patch? with
+        | none => exact ih hwf h
+        | some w => exact ih (MemoryState.writeObjectBytes_preserves_wf hwf w.1 w.2.1 w.2.2) h
+    · rename_i _ _ _ _ _ _ _ _ _ _ _ _ heq; cases heq; exact ih hwf h
+
+/-- Non-allocating C/C++ standard library calls (`free`, `_ZdlPv`, `memcpy`, `memmove`, `memset`, `puts`, `putchar`, `printf`, `exit`, `abort`, `_ZSt9terminatev`). -/
+def evalNonAllocLibcall? (dl : DataLayout) (mem : MemoryState)
+    (name : String) (argVals : List RegisterValue) :
+    Option (Except ExecError (RegisterValue × MemoryState)) :=
+  if name == "free" || name == "_ZdlPv" || name == "_ZdaPv" || name == "_ZdlPvm" || name == "_ZdaPvm" then
+    some <| match argVals with
+      | .ptr _ .poison :: _ => .error (.immediateUB "free/delete called with poison pointer")
+      | .ptr as (.value p) :: _ =>
+        if p.isNull dl as then .ok (.void, mem)
+        else match mem.resolveObject? p with
+          | none => .error (.immediateUB "freeing pointer with invalid/nullary provenance")
+          | some mo =>
+            if p.addr.toNat != mo.baseAddr then
+              .error (.immediateUB s!"freeing non-base pointer {p} (base=0x{String.ofList (Nat.toDigits 16 mo.baseAddr)})")
+            else if mo.state == .freed then
+              .error (.immediateUB s!"double-free of allocation '{mo.name}'")
+            else if !mo.isHeap then
+              .error (.immediateUB s!"freeing non-heap allocation '{mo.name}'")
+            else
+              .ok (.void, mem.freeObject mo.allocId)
+      | _ => .error (.staticError "free/delete expects pointer argument")
+  else if name == "memcpy" then
+    some <| match argVals with
+      | [dst, src, len] => (execMemTransferPure mem dst src len false true).map (fun m' => (dst, m'))
+      | _ => .error (.staticError "memcpy expects 3 arguments")
+  else if name == "memmove" then
+    some <| match argVals with
+      | [dst, src, len] => (execMemTransferPure mem dst src len true true).map (fun m' => (dst, m'))
+      | _ => .error (.staticError "memmove expects 3 arguments")
+  else if name == "memset" then
+    some <| match argVals with
+      | [dst, val, len] => (execMemSetPure mem dst val len).map (fun m' => (dst, m'))
+      | _ => .error (.staticError "memset expects 3 arguments")
+  else if name == "puts" then
+    some <| match argVals with
+      | [.ptr _ .poison] => .error (.immediateUB "Poison argument passed to a library call at argument index 0")
+      | [.ptr _ (.value p)] =>
+        match readCStringPure mem p with
+        | .error e => .error e
+        | .ok _ => .ok (.bv 32 (.value (BitVec.ofNat 32 1)), mem)
+      | _ => .error (.staticError "puts expects 1 pointer argument")
+  else if name == "putchar" then
+    some <| match argVals with
+      | [.bv _ .poison] => .error (.immediateUB "Poison argument passed to putchar")
+      | [.bv _ (.value bv)] => .ok (.bv 32 (.value (BitVec.ofNat 32 (bv.toNat % 256))), mem)
+      | _ => .error (.staticError "putchar expects 1 integer argument")
+  else if name == "printf" then
+    some <| match argVals with
+      | .ptr _ .poison :: _ => .error (.immediateUB "Poison argument passed to a library call at argument index 0")
+      | .ptr _ (.value fmtPtr) :: restArgs =>
+        match readCStringPure mem fmtPtr with
+        | .error e => .error e
+        | .ok fmtStr =>
+          match evalPrintfLoop dl fmtStr.length fmtStr.toList restArgs mem 0 with
+          | .error e => .error e
+          | .ok (written, mem') => .ok (.bv 32 (.value (BitVec.ofNat 32 written)), mem')
+      | _ => .error (.staticError "printf expects at least 1 pointer argument")
+  else if name == "exit" then
+    some <| match argVals with
+      | [.bv _ .poison] => .error (.immediateUB "Poison argument passed to exit")
+      | [.bv _ (.value bv)] => .error (.staticError s!"Program exited with code {bv.toInt}")
+      | _ => .error (.staticError "exit expects 1 integer argument")
+  else if name == "abort" then
+    some (.error (.staticError "Program aborted."))
+  else if name == "_ZSt9terminatev" then
+    some (.error (.staticError "Program terminated."))
+  else
+    none
+
+theorem evalNonAllocLibcall?_preserves_wf {dl mem name argVals res mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : evalNonAllocLibcall? dl mem name argVals = some (.ok (res, mem'))) :
+    MemoryState.WellFormed mem' := by
+  unfold evalNonAllocLibcall? at h
+  split at h
+  · match argVals, h with
+    | .ptr _ .poison :: _, h => cases h
+    | .ptr as (.value p) :: _, h =>
+      dsimp only at h
+      split at h
+      · cases h; exact hwf
+      · cases hres : mem.resolveObject? p with
+        | none => rw [hres] at h; cases h
+        | some mo =>
+          rw [hres] at h; dsimp only at h
+          split at h
+          · cases h
+          · split at h
+            · cases h
+            · split at h
+              · cases h
+              · cases h; exact MemoryState.freeObject_preserves_wf hwf mo.allocId
+  · split at h
+    · match argVals, h with
+      | [dst, src, len], h =>
+        dsimp only at h
+        cases ht : execMemTransferPure mem dst src len false true with
+        | error e => rw [ht] at h; cases h
+        | ok m1 => rw [ht] at h; cases h; exact execMemTransferPure_preserves_wf hwf ht
+    · split at h
+      · match argVals, h with
+        | [dst, src, len], h =>
+          dsimp only at h
+          cases ht : execMemTransferPure mem dst src len true true with
+          | error e => rw [ht] at h; cases h
+          | ok m1 => rw [ht] at h; cases h; exact execMemTransferPure_preserves_wf hwf ht
+      · split at h
+        · match argVals, h with
+          | [dst, val, len], h =>
+            dsimp only at h
+            cases ht : execMemSetPure mem dst val len with
+            | error e => rw [ht] at h; cases h
+            | ok m1 => rw [ht] at h; cases h; exact execMemSetPure_preserves_wf hwf ht
+        · split at h
+          · split at h
+            · cases h
+            · cases hr : readCStringPure mem _ with
+              | error e => rw [hr] at h; cases h
+              | ok s => rw [hr] at h; cases h; exact hwf
+            · cases h
+          · split at h
+            · split at h
+              · cases h
+              · cases h; exact hwf
+              · cases h
+            · split at h
+              · split at h
+                · cases h
+                · cases hr : readCStringPure mem _ with
+                  | error e => rw [hr] at h; cases h
+                  | ok fmtStr =>
+                    rw [hr] at h; dsimp only at h
+                    cases hp : evalPrintfLoop dl fmtStr.length fmtStr.toList _ mem 0 with
+                    | error e => rw [hp] at h; cases h
+                    | ok p =>
+                      rw [hp] at h; cases h
+                      exact evalPrintfLoop_preserves_wf hwf hp
+                · cases h
+              · split at h
+                · split at h <;> cases h
+                · split at h
+                  · cases h
+                  · split at h
+                    · cases h
+                    · cases h
+
 /-- Non-allocating memory & pure intrinsics/libcalls (shared between `Step` and `Exec`). -/
 def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
     (name : String) (retTy : LlvmRetType) (fmf : FastMathFlags) (argVals : List RegisterValue)
-    (o : OracleState) : Option (Except ExecError (RegisterValue × MemoryState × OracleState)) :=
+    (o : OracleState) (allowLibcalls : Bool := true) :
+    Option (Except ExecError (RegisterValue × MemoryState × OracleState)) :=
   if strHasPrefix name "llvm.lifetime.start" then
     let mem' := match argVals.getLast? with
       | some (.ptr _ (.value p)) => mem.lifetimeStart cfg p
@@ -761,42 +1214,16 @@ def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : 
     some <| match argVals with
       | dst :: val :: len :: _ => (execMemSetPure mem dst val len).map (fun m' => (.void, m', o))
       | _ => .error (.staticError "llvm.memset requires at least 3 arguments")
-  else if name == "free" then
-    some <| match argVals with
-      | [.ptr _ .poison] => .error (.immediateUB "free called with poison pointer")
-      | [.ptr as (.value p)] =>
-        if p.isNull dl as then .ok (.void, mem, o)
-        else match mem.resolveObject? p with
-          | none => .error (.immediateUB "freeing pointer with invalid/nullary provenance")
-          | some mo =>
-            if p.addr.toNat != mo.baseAddr then
-              .error (.immediateUB s!"freeing non-base pointer {p} (base=0x{String.ofList (Nat.toDigits 16 mo.baseAddr)})")
-            else if mo.state == .freed then
-              .error (.immediateUB s!"double-free of allocation '{mo.name}'")
-            else if !mo.isHeap then
-              .error (.immediateUB s!"freeing non-heap allocation '{mo.name}'")
-            else
-              .ok (.void, mem.freeObject mo.allocId, o)
-      | _ => .error (.staticError "free expects 1 pointer argument")
-  else if name == "memcpy" then
-    some <| match argVals with
-      | [dst, src, len] => (execMemTransferPure mem dst src len false true).map (fun m' => (dst, m', o))
-      | _ => .error (.staticError "memcpy expects 3 arguments")
-  else if name == "memmove" then
-    some <| match argVals with
-      | [dst, src, len] => (execMemTransferPure mem dst src len true true).map (fun m' => (dst, m', o))
-      | _ => .error (.staticError "memmove expects 3 arguments")
-  else if name == "memset" then
-    some <| match argVals with
-      | [dst, val, len] => (execMemSetPure mem dst val len).map (fun m' => (dst, m', o))
-      | _ => .error (.staticError "memset expects 3 arguments")
   else
-    (evalPureIntrinsicExec? cfg name retTy fmf argVals o).map fun r =>
-      r.map fun (v, o') => (v, mem, o')
+    match (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
+    | some r => some (r.map fun (v, m') => (v, m', o))
+    | none =>
+      (evalPureIntrinsicExec? cfg name retTy fmf argVals o).map fun r =>
+        r.map fun (v, o') => (v, mem, o')
 
-theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVals o res mem' o'}
+theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVals o allowLibcalls res mem' o'}
     (hwf : MemoryState.WellFormed mem)
-    (h : evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o = some (.ok (res, mem', o'))) :
+    (h : evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o allowLibcalls = some (.ok (res, mem', o'))) :
     MemoryState.WellFormed mem' := by
   unfold evalNonAllocIntrinsicExec? at h
   by_cases h1 : strHasPrefix name "llvm.lifetime.start" = true
@@ -852,65 +1279,26 @@ theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVa
               | error e => rw [ht] at h; cases h
               | ok m1 => rw [ht] at h; cases h; exact execMemSetPure_preserves_wf hwf ht
           · rw [if_neg h5] at h
-            by_cases h6 : (name == "free") = true
-            · rw [if_pos h6] at h
-              match argVals, h with
-              | [.ptr _ .poison], h => cases h
-              | [.ptr as (.value p)], h =>
+            cases hl : (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
+            | some r =>
+              rw [hl] at h
+              cases r with
+              | error e => cases h
+              | ok p =>
+                cases h
+                by_cases ha : allowLibcalls = true
+                · rw [if_pos ha] at hl; exact evalNonAllocLibcall?_preserves_wf hwf hl
+                · rw [if_neg ha] at hl; cases hl
+            | none =>
+              rw [hl] at h
+              cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
+              | none => rw [hp] at h; cases h
+              | some r =>
+                rw [hp] at h
                 dsimp only at h
-                by_cases hnull : p.isNull dl as = true
-                · rw [if_pos hnull] at h; cases h; exact hwf
-                · rw [if_neg hnull] at h
-                  cases hres : mem.resolveObject? p with
-                  | none => rw [hres] at h; cases h
-                  | some mo =>
-                    rw [hres] at h; dsimp only at h
-                    by_cases ha : (p.addr.toNat != mo.baseAddr) = true
-                    · rw [if_pos ha] at h; cases h
-                    · rw [if_neg ha] at h
-                      by_cases hf : (mo.state == .freed) = true
-                      · rw [if_pos hf] at h; cases h
-                      · rw [if_neg hf] at h
-                        by_cases hh : (!mo.isHeap) = true
-                        · rw [if_pos hh] at h; cases h
-                        · rw [if_neg hh] at h; cases h
-                          exact MemoryState.freeObject_preserves_wf hwf mo.allocId
-            · rw [if_neg h6] at h
-              by_cases h7 : (name == "memcpy") = true
-              · rw [if_pos h7] at h
-                match argVals, h with
-                | [dst, src, len], h =>
-                  dsimp only at h
-                  cases ht : execMemTransferPure mem dst src len false true with
-                  | error e => rw [ht] at h; cases h
-                  | ok m1 => rw [ht] at h; cases h; exact execMemTransferPure_preserves_wf hwf ht
-              · rw [if_neg h7] at h
-                by_cases h8 : (name == "memmove") = true
-                · rw [if_pos h8] at h
-                  match argVals, h with
-                  | [dst, src, len], h =>
-                    dsimp only at h
-                    cases ht : execMemTransferPure mem dst src len true true with
-                    | error e => rw [ht] at h; cases h
-                    | ok m1 => rw [ht] at h; cases h; exact execMemTransferPure_preserves_wf hwf ht
-                · rw [if_neg h8] at h
-                  by_cases h9 : (name == "memset") = true
-                  · rw [if_pos h9] at h
-                    match argVals, h with
-                    | [dst, val, len], h =>
-                      dsimp only at h
-                      cases ht : execMemSetPure mem dst val len with
-                      | error e => rw [ht] at h; cases h
-                      | ok m1 => rw [ht] at h; cases h; exact execMemSetPure_preserves_wf hwf ht
-                  · rw [if_neg h9] at h
-                    cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
-                    | none => rw [hp] at h; cases h
-                    | some r =>
-                      rw [hp] at h
-                      dsimp only at h
-                      cases r with
-                      | error e => cases h
-                      | ok p => cases h; exact hwf
+                cases r with
+                | error e => cases h
+                | ok p => cases h; exact hwf
 
 private theorem ite_some_eq_none {α : Type} {c : Prop} [Decidable c] {a : α} {b : Option α}
     (h : (if c then some a else b) = none) : ¬ c ∧ b = none := by
@@ -926,16 +1314,23 @@ theorem evalPureIntrinsicExec?_none_indep {cfg name retTy fmf argVals o o'}
   repeat (obtain ⟨hc, h⟩ := ite_some_eq_none h; rw [if_neg hc])
 
 /-- Whether `evalNonAllocIntrinsicExec?` recognizes a name is independent of the oracle. -/
-theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals o o'}
-    (h : evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o = none) :
-    evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o' = none := by
+theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals o o' allowLibcalls}
+    (h : evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o allowLibcalls = none) :
+    evalNonAllocIntrinsicExec? dl cfg mem name retTy fmf argVals o' allowLibcalls = none := by
   unfold evalNonAllocIntrinsicExec? at h ⊢
-  repeat (obtain ⟨hc, h⟩ := ite_some_eq_none h; rw [if_neg hc])
-  cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
-  | some r => rw [hp] at h; cases h
+  obtain ⟨hc1, h⟩ := ite_some_eq_none h; rw [if_neg hc1]
+  obtain ⟨hc2, h⟩ := ite_some_eq_none h; rw [if_neg hc2]
+  obtain ⟨hc3, h⟩ := ite_some_eq_none h; rw [if_neg hc3]
+  obtain ⟨hc4, h⟩ := ite_some_eq_none h; rw [if_neg hc4]
+  obtain ⟨hc5, h⟩ := ite_some_eq_none h; rw [if_neg hc5]
+  cases hl : (if allowLibcalls = true then evalNonAllocLibcall? dl mem name argVals else none) with
+  | some r => simp [hl] at h
   | none =>
-    rw [evalPureIntrinsicExec?_none_indep (o' := o') hp]
-    rfl
+    cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
+    | some r => simp [hl, hp] at h
+    | none =>
+      have hp' := evalPureIntrinsicExec?_none_indep (o' := o') hp
+      simp [hp']
 
 /-- Check whether an `llvm.assume` operand bundle tag requires evaluating its operand arguments. -/
 def assumeBundleShouldEval (tag : String) : Bool :=
@@ -978,8 +1373,8 @@ def evalAssumeBundlePure (dl : DataLayout) (mem : MemoryState)
   | "align" =>
     match vals with
     | .ptr _ .poison :: _ => .error (.immediateUB "llvm.assume align pointer is poison")
-    | .ptr as (.value p) :: aVal :: rest =>
-      if p.isNull dl as then .ok ()
+    | .ptr _ (.value p) :: aVal :: rest =>
+      if p.addr.toNat == 0 then .ok ()
       else
         match aVal with
         | .bv _ .poison => .error (.immediateUB "llvm.assume align value is poison")

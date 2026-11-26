@@ -1358,8 +1358,21 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
   | .range lo hi =>
     liftUnaryPure ty.scalarType val fun
       | .bv w (.value bv) =>
-        let iv := bv.toInt
-        if lo ≤ iv && iv < hi then .ok (.bv w (.value bv)) else .ok (.bv w .poison)
+        let v := bv.toNat
+        let loN := (BitVec.ofInt w lo).toNat
+        let hiN := (BitVec.ofInt w hi).toNat
+        let ok := if loN ≤ hiN then loN ≤ v && v < hiN else v ≥ loN || v < hiN
+        if ok then .ok (.bv w (.value bv)) else .ok (.bv w .poison)
+      | other => .ok other
+  | .rangeList rs =>
+    liftUnaryPure ty.scalarType val fun
+      | .bv w (.value bv) =>
+        let v := bv.toNat
+        let ok := rs.any fun (lo, hi) =>
+          let loN := (BitVec.ofInt w lo).toNat
+          let hiN := (BitVec.ofInt w hi).toNat
+          if loN ≤ hiN then loN ≤ v && v < hiN else v ≥ loN || v < hiN
+        if ok then .ok (.bv w (.value bv)) else .ok (.bv w .poison)
       | other => .ok other
   | .nofpclass mask =>
     liftUnaryPure ty.scalarType val fun
@@ -1459,7 +1472,7 @@ def evalIntBinaryScalarPure (op : IntBinaryOp) (v1 v2 : RegisterValue) :
       .error (.staticError s!"Mismatched integer widths in binary op: {w1} vs {w2}")
   | _, _ => .error (.staticError s!"Expected integer values for int binary op, got {v1}, {v2}")
 
-def evalICmpScalarPure (samesign : Bool) (pred : ICmpPred) (v1 v2 : RegisterValue) :
+def evalICmpScalarPure (dl : DataLayout) (samesign : Bool) (pred : ICmpPred) (v1 v2 : RegisterValue) :
     Except ExecError RegisterValue :=
   match v1, v2 with
   | .bv w1 b1, .bv w2 b2 =>
@@ -1467,11 +1480,14 @@ def evalICmpScalarPure (samesign : Bool) (pred : ICmpPred) (v1 v2 : RegisterValu
       .ok (.bv 1 (icmp samesign pred (h ▸ b1) b2))
     else
       .error (.staticError s!"Mismatched integer widths in icmp: {w1} vs {w2}")
-  | .ptr _ p1, .ptr _ p2 =>
+  | .ptr as1 p1, .ptr _ p2 =>
     match p1, p2 with
     | .value a, .value b =>
       if h : a.addrWidth = b.addrWidth then
-        .ok (.bv 1 (icmp samesign pred (.value (h ▸ a.addr)) (.value b.addr)))
+        let idxW := dl.getIndexSizeInBits as1
+        let aAddr := (h ▸ a.addr).truncate idxW
+        let bAddr := b.addr.truncate idxW
+        .ok (.bv 1 (icmp samesign pred (.value aAddr) (.value bAddr)))
       else
         .error (.staticError s!"Mismatched pointer widths in icmp: {a.addrWidth} vs {b.addrWidth}")
     | _, _ => .ok (.bv 1 .poison)

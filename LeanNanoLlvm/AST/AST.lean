@@ -404,6 +404,7 @@ inductive ValueAttr : Type where
   | dereferenceable (bytes : Nat)
   | dereferenceableOrNull (bytes : Nat)
   | range (lo hi : Int)
+  | rangeList (ranges : List (Int × Int))
   | nofpclass (mask : Nat)
   | byval (ty : LlvmType)
   | sret (ty : LlvmType)
@@ -418,6 +419,8 @@ inductive Exp : Type where
   | int             (x : Int)
   | floatBits       (bits : Nat)
   | floatDec        (neg : Bool) (mantissa : Nat) (exp10 : Int)
+  | floatSpecial    (neg : Bool) (isInf : Bool) (quiet : Bool) (payload : Nat := 0)
+  | blockAddress    (fn : FunctionId) (blk : BlockId)
   | null
   | zeroinitializer
   | undef
@@ -430,6 +433,8 @@ inductive Exp : Type where
                     (ptr : LlvmType × Exp) (indices : List (LlvmType × Exp))
   | convConst       (op : ConversionOp) (fromTy : LlvmType) (val : Exp) (toTy : LlvmType)
   | binConst        (op : IntBinaryOp) (ty : LlvmType) (v1 v2 : Exp)
+  | insertElemConst (vecTy : LlvmType) (vec : Exp) (elemTy : LlvmType) (elem : Exp)
+                    (idxTy : LlvmType) (idx : Exp)
 deriving Repr
 
 abbrev TypedExp := LlvmType × Exp
@@ -476,6 +481,7 @@ inductive Terminator : Type where
   | br          (dest : BlockId)
   | condBr      (cond : Exp) (trueDest : BlockId) (falseDest : BlockId)
   | switch      (ty : LlvmType) (cond : Exp) (defaultDest : BlockId) (cases : List (Int × BlockId))
+  | indirectBr  (addr : Exp) (dests : List BlockId)
   | unreachable
 deriving Repr
 
@@ -484,7 +490,8 @@ structure Declaration where
   type       : LlvmType
   argAttrs   : List (List ValueAttr) := []
   retAttrs   : List ValueAttr := []
-  isNoReturn : Bool := false
+  isNoReturn  : Bool := false
+  isNoBuiltin : Bool := false
 deriving Repr
 
 abbrev Code := List (InstructionId × Instruction)
@@ -590,6 +597,10 @@ private def resolveExp (defs : List (LocalId × LlvmType)) (fuel : Nat) :
     .ok (.convConst op (← resolveType defs fuel fTy) (← resolveExp defs fuel e) (← resolveType defs fuel tTy))
   | .binConst op ty e1 e2 => do
     .ok (.binConst op (← resolveType defs fuel ty) (← resolveExp defs fuel e1) (← resolveExp defs fuel e2))
+  | .insertElemConst vecTy vec elemTy elem idxTy idx => do
+    .ok (.insertElemConst (← resolveType defs fuel vecTy) (← resolveExp defs fuel vec)
+      (← resolveType defs fuel elemTy) (← resolveExp defs fuel elem)
+      (← resolveType defs fuel idxTy) (← resolveExp defs fuel idx))
   | e => .ok e
 
 private def resolveTypedExpList (defs : List (LocalId × LlvmType)) (fuel : Nat) :
@@ -660,6 +671,7 @@ private def resolveTerm (defs : List (LocalId × LlvmType)) (fuel : Nat) :
   | .br d => .ok (.br d)
   | .condBr c t f => do .ok (.condBr (← resolveExp defs fuel c) t f)
   | .switch ty c d cs => do .ok (.switch (← resolveType defs fuel ty) (← resolveExp defs fuel c) d cs)
+  | .indirectBr a ds => do .ok (.indirectBr (← resolveExp defs fuel a) ds)
   | .unreachable => .ok .unreachable
 
 private def resolveDecl (defs : List (LocalId × LlvmType)) (fuel : Nat) (d : Declaration) :

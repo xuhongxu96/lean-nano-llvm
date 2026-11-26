@@ -185,6 +185,11 @@ def withFrames : MachineState → List CallFrame → MachineState
   | ⟨_, mem, cfg, dl, fns, decls⟩, frames' =>
     ⟨frames', mem, cfg, dl, fns, decls⟩
 
+/-- Returns `false` if `fid` is declared `nobuiltin`, disabling C/C++ library call interception. -/
+@[simp, simp_step]
+def allowLibcallsFor (st : MachineState) (fid : FunctionId) : Bool :=
+  !(((st.declarations.get? fid).map (·.isNoBuiltin)).getD false)
+
 @[simp, simp_step]
 def withFramesAndMemory : MachineState → List CallFrame → MemoryState → MachineState
   | ⟨_, _, cfg, dl, fns, decls⟩, frames', mem' =>
@@ -228,9 +233,9 @@ end Config
 @[simp_step]
 def splitPhis : Code → Code × Code
   | [] => ([], [])
-  | (iid, .phi ty fmf inc) :: rest =>
+  | (iid, .phi ty fmf inc md) :: rest =>
     match splitPhis rest with
-    | (phis, body) => ((iid, .phi ty fmf inc) :: phis, body)
+    | (phis, body) => ((iid, .phi ty fmf inc md) :: phis, body)
   | code => ([], code)
 
 /-- Free all stack `alloca` allocations belonging to a departing call frame. -/

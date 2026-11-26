@@ -219,7 +219,7 @@ def tokenize (input : String) : Array Tok :=
               let n := (parseNatStr (String.ofList intDs)).getD 0
               let v : Int := if neg then - (Int.ofNat n) else Int.ofNat n
               go fuel' (acc.push (.intLit v)) rest1
-          else if isIdentStart c then
+          else if isIdentStart c || ((c == '+' || c == '-') && match rest with | d :: _ => d.isAlpha | [] => false) then
             let (s, rest2) := readIdent [c] rest
             go fuel' (acc.push (.ident s)) rest2
           else
@@ -375,6 +375,7 @@ def parseType : Nat → ParseM LlvmType
     | .ident "float" => return .float .float
     | .ident "double" => return .float .double
     | .ident "fp128" => return .float .fp128
+    | .ident "metadata" => return .ptr 0
     | .ident "ptr" =>
       if ← tryEatIdent "addrspace" then
         expect .lparen "ptr addrspace"
@@ -768,6 +769,130 @@ def parseExp : Nat → ParseM Exp
       let v2 ← parseExp fuel
       expect .rparen "sub constexpr"
       return .binConst (.sub (nuw || nuw2) nsw) ty v1 v2
+    | .ident "trunc" =>
+      let _ ← tryEatIdent "nuw"; let _ ← tryEatIdent "nsw"
+      expect .lparen "trunc constexpr"
+      let fromTy ← parseType fuel
+      let e ← parseExp fuel
+      expectIdent "to" "trunc constexpr"
+      let toTy ← parseType fuel
+      expect .rparen "trunc constexpr"
+      return .convConst (.trunc false false) fromTy e toTy
+    | .ident "zext" =>
+      let _ ← tryEatIdent "nneg"
+      expect .lparen "zext constexpr"
+      let fromTy ← parseType fuel
+      let e ← parseExp fuel
+      expectIdent "to" "zext constexpr"
+      let toTy ← parseType fuel
+      expect .rparen "zext constexpr"
+      return .convConst (.zext false) fromTy e toTy
+    | .ident "sext" =>
+      expect .lparen "sext constexpr"
+      let fromTy ← parseType fuel
+      let e ← parseExp fuel
+      expectIdent "to" "sext constexpr"
+      let toTy ← parseType fuel
+      expect .rparen "sext constexpr"
+      return .convConst .sext fromTy e toTy
+    | .ident "addrspacecast" =>
+      expect .lparen "addrspacecast constexpr"
+      let fromTy ← parseType fuel
+      let e ← parseExp fuel
+      expectIdent "to" "addrspacecast constexpr"
+      let toTy ← parseType fuel
+      expect .rparen "addrspacecast constexpr"
+      return .convConst .addrspacecast fromTy e toTy
+    | .ident "blockaddress" =>
+      expect .lparen "blockaddress"
+      let fn ← parseRawGlobalId "blockaddress fn"
+      expect .comma "blockaddress"
+      let blk ← parseRawLocalId "blockaddress blk"
+      expect .rparen "blockaddress"
+      return .blockAddress fn blk
+    | .ident "insertelement" =>
+      expect .lparen "insertelement constexpr"
+      let vecTy ← parseType fuel
+      let vecE ← parseExp fuel
+      expect .comma "insertelement constexpr"
+      let elemTy ← parseType fuel
+      let elemE ← parseExp fuel
+      expect .comma "insertelement constexpr"
+      let idxTy ← parseType fuel
+      let idxE ← parseExp fuel
+      expect .rparen "insertelement constexpr"
+      return .insertElemConst vecTy vecE elemTy elemE idxTy idxE
+    | .ident "asm" =>
+      -- Inline asm callee: `asm [sideeffect|alignstack|inteldialect|unwind]* "asm", "constraints"`
+      let mut gAsm := 8
+      while gAsm > 0 do
+        gAsm := gAsm - 1
+        match ← peek with
+        | .ident "sideeffect" | .ident "alignstack" | .ident "inteldialect" | .ident "unwind" =>
+          let _ ← bump
+        | _ => gAsm := 0
+      let _ ← bump -- asm string
+      expect .comma "inline asm"
+      let _ ← bump -- constraints string
+      return .identifier (.global_id (.name "llvm.inlineasm.noop"))
+    | .metaId _ =>
+      -- Metadata operand like `!0` (used in e.g. `llvm.experimental.noalias.scope.decl(metadata !0)`)
+      return .int 0
+    | .bang =>
+      -- Inline metadata node `!{...}`
+      if ← tryEat .lbrace then
+        let mut depth : Nat := 1
+        let mut g := fuel
+        while depth > 0 && g > 0 do
+          g := g - 1
+          match ← bump with
+          | .lbrace => depth := depth + 1
+          | .rbrace => depth := depth - 1
+          | .eof => depth := 0
+          | _ => pure ()
+      return .int 0
+    | .ident "c" =>
+      match ← bump with
+      | .strLit s =>
+        -- Decode LLVM `c"..."` byte string with `\XX` hex escapes into `[N x i8]` array
+        let rec decodeBytes : List Char → List (LlvmType × Exp)
+          | [] => []
+          | '\\' :: h1 :: h2 :: rest =>
+            if isHexDigit h1 && isHexDigit h2 then
+              (.i8, .int (Int.ofNat (hexVal h1 * 16 + hexVal h2))) :: decodeBytes rest
+            else
+              (.i8, .int (Int.ofNat '\\'.toNat)) :: decodeBytes (h1 :: h2 :: rest)
+          | ch :: rest =>
+            (.i8, .int (Int.ofNat ch.toNat)) :: decodeBytes rest
+        return .array (decodeBytes s.toList)
+      | tok => throw s!"parse error: expected string after 'c', got {repr tok}"
+    | .ident s =>
+      -- Handle `u0x...` / `s0x...` hex integer literals
+      if s.startsWith "u0x" || s.startsWith "s0x" then
+        let hexChars := (s.drop 3).toString.toList
+        return .int (Int.ofNat (parseHexNat hexChars))
+      -- Handle special float literals: `[+|-](inf|qnan|snan|nan)` with optional `(0x...)` payload
+      else
+        let (neg, body) :=
+          if s.startsWith "-" then (true, (s.drop 1).toString)
+          else if s.startsWith "+" then (false, (s.drop 1).toString)
+          else (false, s)
+        if body == "inf" then
+          return .floatSpecial neg true false 0
+        else if body == "qnan" || body == "nan" || body == "snan" then
+          let quiet := body != "snan"
+          let payload ←
+            if ← tryEat .lparen then
+              let p ← match ← bump with
+                | .hexLit _ v => pure v
+                | .intLit n => pure n.toNat
+                | _ => pure 0
+              expect .rparen "nan payload"
+              pure p
+            else pure 0
+          return .floatSpecial neg false quiet payload
+        else
+          throw s!"parse error: unexpected token {repr (Tok.ident s)} in expression"
     | tok => throw s!"parse error: unexpected token {repr tok} in expression"
 
 private def parseWrapFlags : ParseM (Bool × Bool) := do
@@ -803,6 +928,110 @@ private def skipTrailingMetadata (fuel : Nat) : ParseM Unit := do
             | _ => pure ()
       | _ => pure ()
     | _, _ => guard := 0
+
+/-- Parse the payload of a single `, !tag <payload>` metadata attachment into an optional `ValueAttr`. -/
+private def parseSingleMetaAttr (fuel : Nat) (tag : String) : ParseM (Option ValueAttr) := do
+  let skipBraceGroup : ParseM Unit := do
+    if ← tryEat .lbrace then
+      let mut depth : Nat := 1
+      let mut g := fuel
+      while depth > 0 && g > 0 do
+        g := g - 1
+        match ← bump with
+        | .lbrace => depth := depth + 1
+        | .rbrace => depth := depth - 1
+        | .eof => depth := 0
+        | _ => pure ()
+  match tag with
+  | "noundef" =>
+    match ← peek with
+    | .metaId _ => let _ ← bump
+    | .bang => let _ ← bump; skipBraceGroup
+    | _ => pure ()
+    return some .noundef
+  | "nonnull" =>
+    match ← peek with
+    | .metaId _ => let _ ← bump
+    | .bang => let _ ← bump; skipBraceGroup
+    | _ => pure ()
+    return some .nonnull
+  | "dereferenceable" | "dereferenceable_or_null" | "align" | "nofpclass" =>
+    let n? ← match ← peek with
+      | .metaId nodeId =>
+        let _ ← bump
+        let st ← get
+        pure ((st.intMeta.find? (fun p => p.1 == nodeId)).map Prod.snd)
+      | .bang =>
+        let _ ← bump
+        if ← tryEat .lbrace then
+          let _ ← parseType fuel
+          let n ← parseNatTok "meta int"
+          let _ ← tryEat .rbrace
+          pure (some n)
+        else pure none
+      | _ => pure none
+    match n? with
+    | some n =>
+      if tag == "dereferenceable" then return some (.dereferenceable n)
+      else if tag == "dereferenceable_or_null" then return some (.dereferenceableOrNull n)
+      else if tag == "nofpclass" then return some (.nofpclass n)
+      else return some (.align n)
+    | none => return none
+  | "range" =>
+    match ← peek with
+    | .lparen =>
+      let _ ← bump
+      let lo ← parseIntTok "!range lo"
+      expect .comma "!range"
+      let hi ← parseIntTok "!range hi"
+      expect .rparen "!range"
+      return some (.range lo hi)
+    | .metaId nodeId =>
+      let _ ← bump
+      let st ← get
+      match st.rangeMeta.find? (fun p => p.1 == nodeId) with
+      | some (_, lo, hi) => return some (.range lo hi)
+      | none => return none
+    | .bang =>
+      let _ ← bump
+      if ← tryEat .lbrace then
+        let mut pairs : List (Int × Int) := []
+        let mut gR := 64
+        while !(← tryEat .rbrace) && gR > 0 do
+          gR := gR - 1
+          let _ ← parseType fuel
+          let lo ← parseIntTok "!range lo"
+          expect .comma "!range"
+          let _ ← parseType fuel
+          let hi ← parseIntTok "!range hi"
+          pairs := (lo, hi) :: pairs
+          let _ ← tryEat .comma
+        match pairs.reverse with
+        | [(lo, hi)] => return some (.range lo hi)
+        | ps => return some (.rangeList ps)
+      else return none
+    | _ => return none
+  | _ =>
+    match ← peek with
+    | .metaId _ => let _ ← bump
+    | .bang => let _ ← bump; skipBraceGroup
+    | _ => pure ()
+    return none
+
+/-- Parse all trailing `, !tag <payload>` metadata attachments into `List ValueAttr`. -/
+private def parseTrailingValueAttrs (fuel : Nat) : ParseM (List ValueAttr) := do
+  let mut md : List ValueAttr := []
+  let mut guard := 16
+  while guard > 0 do
+    guard := guard - 1
+    match (← peek), (← peekAt 1) with
+    | .comma, .metaId tag =>
+      let _ ← bump -- `,`
+      let _ ← bump -- `!tag`
+      if let some attr ← parseSingleMetaAttr fuel tag then
+        md := attr :: md
+    | _, _ => guard := 0
+  return md.reverse
 
 /-- Parse a single non-terminator LLVM instruction. -/
 def parseInstruction (fuel : Nat) : ParseM Instruction := do
@@ -984,84 +1213,8 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
           modify fun st => { st with pos := st.pos - 1 }
           go := false
         | _ => pure ()
-    let mut md : List ValueAttr := []
-    let mut gM := 16
-    while gM > 0 do
-      gM := gM - 1
-      match (← peek), (← peekAt 1) with
-      | .comma, .metaId tag =>
-        let _ ← bump; let _ ← bump
-        match tag with
-        | "noundef" =>
-          md := .noundef :: md
-          match ← peek with
-          | .metaId _ => let _ ← bump
-          | .bang => let _ ← bump; if ← tryEat .lbrace then let _ ← tryEat .rbrace
-          | _ => pure ()
-        | "nonnull" =>
-          md := .nonnull :: md
-          match ← peek with
-          | .metaId _ => let _ ← bump
-          | .bang => let _ ← bump; if ← tryEat .lbrace then let _ ← tryEat .rbrace
-          | _ => pure ()
-        | "dereferenceable" | "dereferenceable_or_null" | "align" =>
-          let n? ← match ← peek with
-            | .metaId nodeId =>
-              let _ ← bump
-              let st ← get
-              pure ((st.intMeta.find? (fun p => p.1 == nodeId)).map Prod.snd)
-            | .bang =>
-              let _ ← bump
-              if ← tryEat .lbrace then
-                let _ ← parseType fuel
-                let n ← parseNatTok "meta int"
-                let _ ← tryEat .rbrace
-                pure (some n)
-              else pure none
-            | _ => pure none
-          match n? with
-          | some n =>
-            if tag == "dereferenceable" then md := .dereferenceable n :: md
-            else if tag == "dereferenceable_or_null" then md := .dereferenceableOrNull n :: md
-            else md := .align n :: md
-          | none => pure ()
-        | "range" =>
-          match ← peek with
-          | .metaId nodeId =>
-            let _ ← bump
-            let st ← get
-            match st.rangeMeta.find? (fun p => p.1 == nodeId) with
-            | some (_, lo, hi) => md := .range lo hi :: md
-            | none => pure ()
-          | .bang =>
-            let _ ← bump
-            if ← tryEat .lbrace then
-              let _ ← parseType fuel
-              let lo ← parseIntTok "range lo"
-              expect .comma "range"
-              let _ ← parseType fuel
-              let hi ← parseIntTok "range hi"
-              let _ ← tryEat .rbrace
-              md := .range lo hi :: md
-          | _ => pure ()
-        | _ =>
-          match ← peek with
-          | .metaId _ => let _ ← bump
-          | .bang =>
-            let _ ← bump
-            if ← tryEat .lbrace then
-              let mut depth : Nat := 1
-              let mut g := fuel
-              while depth > 0 && g > 0 do
-                g := g - 1
-                match ← bump with
-                | .lbrace => depth := depth + 1
-                | .rbrace => depth := depth - 1
-                | .eof => depth := 0
-                | _ => pure ()
-          | _ => pure ()
-      | _, _ => gM := 0
-    return .phi ty fmf incoming.reverse md.reverse
+    let md ← parseTrailingValueAttrs fuel
+    return .phi ty fmf incoming.reverse md
   | .ident "freeze" =>
     let ty ← parseType fuel
     let e ← parseExp fuel
@@ -1112,59 +1265,11 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
       | .ident "align" =>
         let _ ← bump
         align? := some (← parseNatTok "load align")
-      | .metaId "noundef" =>
+      | .metaId tag =>
         let _ ← bump
-        noundef := true
-        -- Optional `!{}` or `!N`
-        match ← peek with
-        | .metaId _ => let _ ← bump
-        | .bang =>
-          let _ ← bump
-          if ← tryEat .lbrace then let _ ← tryEat .rbrace
-        | _ => pure ()
-      | .metaId "nonnull" =>
-        let _ ← bump
-        md := .nonnull :: md
-        match ← peek with
-        | .metaId _ => let _ ← bump
-        | .bang =>
-          let _ ← bump
-          if ← tryEat .lbrace then let _ ← tryEat .rbrace
-        | _ => pure ()
-      | .metaId "range" =>
-        let _ ← bump
-        match ← peek with
-        | .lparen =>
-          let _ ← bump
-          let lo ← parseIntTok "load !range lo"
-          expect .comma "load !range"
-          let hi ← parseIntTok "load !range hi"
-          expect .rparen "load !range"
-          md := .range lo hi :: md
-        | .metaId nodeId =>
-          let _ ← bump
-          let st ← get
-          match st.rangeMeta.find? (fun p => p.1 == nodeId) with
-          | some (_, lo, hi) => md := .range lo hi :: md
-          | none => pure ()
-        | _ => pure ()
-      | .metaId _ =>
-        let _ ← bump
-        match ← peek with
-        | .metaId _ => let _ ← bump
-        | .bang =>
-          let _ ← bump
-          if ← tryEat .lbrace then
-            let mut depth : Nat := 1
-            let mut g := fuel
-            while depth > 0 && g > 0 do
-              g := g - 1
-              match ← bump with
-              | .lbrace => depth := depth + 1
-              | .rbrace => depth := depth - 1
-              | .eof => depth := 0
-              | _ => pure ()
-        | _ => pure ()
+        if let some attr ← parseSingleMetaAttr fuel tag then
+          if attr == .noundef then noundef := true
+          else md := attr :: md
       | _ => guard := 0
     return .load ty ptrTy ptrExp align? isVol noundef md.reverse
   | .ident "store" =>
@@ -1337,15 +1442,16 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
         let _ ← bump
         isNoRet := true
       | .ident "nounwind" | .ident "readonly" | .ident "readnone" | .ident "willreturn"
-      | .ident "memory" | .ident "convergent" | .ident "cold" =>
+      | .ident "memory" | .ident "convergent" | .ident "cold" | .ident "nobuiltin" =>
         let _ ← bump; skipParenGroup fuel
       | _ => g2 := 0
-    skipTrailingMetadata fuel
-    return .call retTy fmf callee args.reverse retAttrs bundles.reverse isNoRet
+    let callMd ← parseTrailingValueAttrs fuel
+    return .call retTy fmf callee args.reverse (retAttrs ++ callMd) bundles.reverse isNoRet
   | tok => throw s!"parse error: unsupported instruction opcode {repr tok}"
 
 private def isTerminatorStart : Tok → Bool
-  | .ident "ret" | .ident "br" | .ident "switch" | .ident "unreachable" => true
+  | .ident "ret" | .ident "br" | .ident "switch" | .ident "indirectbr"
+  | .ident "unreachable" | .ident "resume" => true
   | _ => false
 
 /-- Parse a block terminator. -/
@@ -1395,6 +1501,29 @@ def parseTerminator (fuel : Nat) : ParseM Terminator := do
       cases := (v, lbl) :: cases
     skipTrailingMetadata fuel
     return .switch ty cond dflt cases.reverse
+  | .ident "indirectbr" =>
+    let _ ← parseType fuel -- `ptr`
+    let addr ← parseExp fuel
+    expect .comma "indirectbr"
+    expect .lbrack "indirectbr dests"
+    let mut dests : List BlockId := []
+    if !(← tryEat .rbrack) then
+      let mut go := true
+      let mut guard := fuel
+      while go && guard > 0 do
+        guard := guard - 1
+        expectIdent "label" "indirectbr label"
+        let lbl ← parseRawLocalId "indirectbr label"
+        dests := lbl :: dests
+        if ← tryEat .comma then go := true
+        else expect .rbrack "indirectbr dests"; go := false
+    skipTrailingMetadata fuel
+    return .indirectBr addr dests.reverse
+  | .ident "resume" =>
+    let _ ← parseType fuel
+    let _ ← parseExp fuel
+    skipTrailingMetadata fuel
+    return .unreachable
   | .ident "unreachable" =>
     skipTrailingMetadata fuel
     return .unreachable
@@ -1415,6 +1544,65 @@ private def parseBlockLabel : ParseM BlockId := do
   | .intLit n => return .anonymous n.toNat
   | _ => throw s!"parse error: invalid block label {repr t}"
 
+/-- Parse an `invoke` or `callbr` terminator, desugaring into a `call` instruction + `br label %normal`. -/
+private def parseInvoke (fuel : Nat) (iid? : Option InstructionId) :
+    ParseM ((InstructionId × Instruction) × Terminator) := do
+  let isCallBr ← tryEatIdent "callbr"
+  if !isCallBr then expectIdent "invoke" "invoke"
+  let fmf ← parseFMF
+  let _ ← tryEatIdent "ccc"
+  let _ ← tryEatIdent "fastcc"
+  let _ ← tryEatIdent "coldcc"
+  let retAttrs ← parseValueAttrs fuel
+  let retTy ← parseRetType fuel
+  if (← peek) == .lparen then skipParenGroup fuel
+  let callee ← parseExp fuel
+  expect .lparen "invoke args"
+  let mut args : List (LlvmType × Exp × List ValueAttr) := []
+  if !(← tryEat .rparen) then
+    let mut go := true
+    let mut guard := fuel
+    while go && guard > 0 do
+      guard := guard - 1
+      let ty ← parseType fuel
+      let attrs ← parseValueAttrs fuel
+      let e ← parseExp fuel
+      args := (ty, e, attrs) :: args
+      if ← tryEat .comma then go := true
+      else expect .rparen "invoke args"; go := false
+  let mut isNoRet := false
+  let mut gA := 16
+  while gA > 0 do
+    gA := gA - 1
+    match ← peek with
+    | .attrGrp n =>
+      let _ ← bump
+      let st ← get
+      if st.noReturnGrps.contains n then isNoRet := true
+    | .ident "noreturn" => let _ ← bump; isNoRet := true
+    | .ident "nounwind" | .ident "readonly" | .ident "readnone" | .ident "willreturn" | .ident "nobuiltin"
+    | .ident "memory" | .ident "convergent" | .ident "cold" => let _ ← bump; skipParenGroup fuel
+    | _ => gA := 0
+  expectIdent "to" "invoke to"
+  expectIdent "label" "invoke normal label"
+  let normalLbl ← parseRawLocalId "invoke normal label"
+  if isCallBr then
+    -- `callbr ... to label %normal [label %indirect1, ...]`
+    if ← tryEat .lbrack then
+      let mut gCB := fuel
+      while !(← tryEat .rbrack) && gCB > 0 do
+        gCB := gCB - 1
+        let _ ← bump
+  else
+    expectIdent "unwind" "invoke unwind"
+    expectIdent "label" "invoke unwind label"
+    let _ ← parseRawLocalId "invoke unwind label"
+  skipTrailingMetadata fuel
+  let iid ← match iid? with
+    | some id => pure id
+    | none => match retTy with | .void => freshVoidId | .ret _ => pure (InstructionId.id (← freshAnonId))
+  return ((iid, .call retTy fmf callee args.reverse retAttrs [] isNoRet), .br normalLbl)
+
 /-- Parse a single basic block (with explicit or implicit label). -/
 def parseBlock (fuel : Nat) (isFirst : Bool) : ParseM Block := do
   let bid ←
@@ -1434,13 +1622,50 @@ def parseBlock (fuel : Nat) (isFirst : Bool) : ParseM Block := do
       let term ← parseTerminator fuel
       let vid ← freshVoidId
       term? := some (vid, term)
+    else if t0 == .ident "invoke" || t0 == .ident "callbr" then
+      let (callPair, brTerm) ← parseInvoke fuel none
+      code := callPair :: code
+      let vid ← freshVoidId
+      term? := some (vid, brTerm)
+    else if t0 == .ident "landingpad" then
+      let _ ← bump
+      let lpTy ← parseType fuel
+      let mut gLP := 16
+      while gLP > 0 do
+        gLP := gLP - 1
+        match ← peek with
+        | .ident "cleanup" => let _ ← bump
+        | .ident "catch" | .ident "filter" =>
+          let _ ← bump; let _ ← parseType fuel; let _ ← parseExp fuel
+        | _ => gLP := 0
+      let iid ← pure (InstructionId.id (← freshAnonId))
+      code := (iid, .freeze (lpTy, .poison)) :: code
     else
       match t0, (← peekAt 1) with
       | .localId id, .eq =>
         let _ ← bump -- `%id`
         let _ ← bump -- `=`
-        let instr ← parseInstruction fuel
-        code := (.id id, instr) :: code
+        if (← peek) == .ident "invoke" || (← peek) == .ident "callbr" then
+          let (callPair, brTerm) ← parseInvoke fuel (some (.id id))
+          code := callPair :: code
+          let vid ← freshVoidId
+          term? := some (vid, brTerm)
+        else if (← peek) == .ident "landingpad" then
+          let _ ← bump
+          let lpTy ← parseType fuel
+          -- Skip `cleanup` / `catch <ty> <val>` / `filter <ty> <val>` clauses
+          let mut gLP := 16
+          while gLP > 0 do
+            gLP := gLP - 1
+            match ← peek with
+            | .ident "cleanup" => let _ ← bump
+            | .ident "catch" | .ident "filter" =>
+              let _ ← bump; let _ ← parseType fuel; let _ ← parseExp fuel
+            | _ => gLP := 0
+          code := (.id id, .freeze (lpTy, .poison)) :: code
+        else
+          let instr ← parseInstruction fuel
+          code := (.id id, instr) :: code
       | _, _ =>
         let instr ← parseInstruction fuel
         let iid ← match instr with
@@ -1468,9 +1693,11 @@ private def skipLinkageAndCC : ParseM Unit := do
       let _ ← bump
     | _ => guard := 0
 
-/-- Parse/skip optional function-level attributes (`#0`, `nounwind`, `noreturn`, etc.), returning `isNoReturn`. -/
-private def skipFnAttrs (fuel : Nat) : ParseM Bool := do
+/-- Parse/skip optional function-level attributes (`#0`, `nounwind`, `noreturn`, `nobuiltin`, etc.),
+    returning `(isNoReturn, isNoBuiltin)`. -/
+private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool) := do
   let mut isNoRet := false
+  let mut isNoBuiltin := false
   let mut guard := 32
   while guard > 0 do
     guard := guard - 1
@@ -1482,24 +1709,36 @@ private def skipFnAttrs (fuel : Nat) : ParseM Bool := do
     | .ident "noreturn" =>
       let _ ← bump
       isNoRet := true
+    | .ident "nobuiltin" =>
+      let _ ← bump
+      isNoBuiltin := true
     | .ident "unnamed_addr" | .ident "local_unnamed_addr" | .ident "nounwind"
     | .ident "readonly" | .ident "readnone" | .ident "willreturn"
     | .ident "alwaysinline" | .ident "noinline" | .ident "optnone" | .ident "optsize"
     | .ident "memory" | .ident "convergent" | .ident "cold" | .ident "hot"
-    | .ident "nofree" | .ident "nosync" | .ident "uwtable" | .ident "ssp" =>
+    | .ident "nofree" | .ident "nosync" | .ident "uwtable" | .ident "ssp"
+    | .ident "denormal_fpenv" | .ident "speculatable" | .ident "mustprogress"
+    | .ident "argmemonly" | .ident "inaccessiblememonly" | .ident "presplitcoroutine" =>
       let _ ← bump
       skipParenGroup fuel
     | .ident "align" =>
       let _ ← bump
       let _ ← parseNatTok "fn align"
-    | .ident "section" | .ident "comdat" | .ident "personality" =>
+    | .ident "section" | .ident "comdat" =>
       let _ ← bump
       let _ ← bump
+    | .ident "personality" =>
+      let _ ← bump
+      let _ ← parseType fuel
+      let _ ← parseExp fuel
     | .ident "addrspace" =>
       let _ ← bump
       skipParenGroup fuel
+    | .strLit _ =>
+      let _ ← bump
+      if ← tryEat .eq then let _ ← bump
     | _ => guard := 0
-  return isNoRet
+  return (isNoRet, isNoBuiltin)
 
 /-- Parse a `declare` or `define` header returning `(Declaration, paramNames)`. -/
 private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) := do
@@ -1537,13 +1776,14 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
         argNames := nm :: argNames
         if ← tryEat .comma then go := true
         else expect .rparen "function params"; go := false
-  let isNoRet ← skipFnAttrs fuel
+  let (isNoRet, isNoBuiltin) ← skipFnAttrs fuel
   let decl : Declaration := {
     name := fnName
     type := .function retTy argTys.reverse isVarArg
     argAttrs := argAttrs.reverse
     retAttrs := retAttrs
     isNoReturn := isNoRet
+    isNoBuiltin := isNoBuiltin
   }
   return (decl, argNames.reverse)
 
@@ -1703,9 +1943,11 @@ def parseLlvmModule (input : String) : Except String ParsedModule := do
           | t => throw s!"parse error: expected 'global' or 'constant', got {repr t}"
         let ty ← parseType fuel
         let initExp? ←
-          match ← peek with
-          | .comma | .eof | .ident "define" | .ident "declare" | .globalId _ | .localId _ => pure none
-          | _ => pure (some (← parseExp fuel))
+          match (← peek), (← peekAt 1) with
+          | .comma, _ | .eof, _ | .ident "define", _ | .ident "declare", _
+          | .ident "attributes", _ | .metaId _, _
+          | .globalId _, .eq | .localId _, .eq => pure none
+          | _, _ => pure (some (← parseExp fuel))
         let mut align? : Option Nat := none
         let mut g2 := 8
         while (← tryEat .comma) && g2 > 0 do

@@ -52,6 +52,7 @@ private def applyNanBehavior (cfg : SemanticsConfig) (v : String) : Except Strin
   match v with
   | "preferred" => .ok { cfg with nanMode := .preferred }
   | "quieting" => .ok { cfg with nanMode := .quieting }
+  | "unchanged" => .ok { cfg with nanMode := .quieting }
   | "target-specific" => .ok { cfg with nanMode := .preferred }
   | "nondet" => .ok { cfg with nanMode := .nondet }
   | _ => .error s!"invalid --nan-behavior value: {v}"
@@ -263,12 +264,27 @@ def main (args : List String) : IO UInt32 := do
             IO.eprintln s!"STATIC_ERROR: Function @{opts.entry} not found in module"
             return 2
           | some defn =>
-            let initCfg := initCallConfig opts.cfg parsed.dataLayout mem fns decls defn []
+            let (mem', entryArgs) : MemoryState × List RegisterValue :=
+              match defn.prototype.type with
+              | .function _ [.int w, .ptr as] _ =>
+                let ptrSz := (parsed.dataLayout.getPointerSizeInBits as + 7) / 8
+                let ptrAlign := parsed.dataLayout.getPointerABIAlign as
+                match mem.allocate parsed.dataLayout opts.cfg (ptrSz * 2) ptrAlign "argv" as .zeroed .global false with
+                | .ok (argvObj, m1) =>
+                  (m1, [.bv w (.value (BitVec.ofNat w 1)), .ptr as (.value (MemoryState.derivePointer parsed.dataLayout argvObj))])
+                | .error _ =>
+                  (mem, [.bv w (.value (BitVec.ofNat w 1)), .ptr as (.value (Pointer.null parsed.dataLayout as))])
+              | _ => (mem, [])
+            let initCfg := initCallConfig opts.cfg parsed.dataLayout mem' fns decls defn entryArgs
             let finalCfg ← runStepsVerbose opts.cfg.maxSteps opts.verbose o1 initCfg
             match finalCfg.toExcept with
             | .ok val =>
-              IO.println s!"OK: {formatRegisterValue val}"
-              return 0
+              if opts.entry == "main" && val.containsPoison then
+                IO.eprintln s!"STATIC_ERROR: Execution of function 'main' resulted in poison return value."
+                return 2
+              else
+                IO.println s!"OK: {formatRegisterValue val}"
+                return 0
             | .error (.immediateUB msg) =>
               IO.eprintln s!"UB: {msg}"
               return 1

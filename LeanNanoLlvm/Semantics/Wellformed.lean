@@ -13,6 +13,8 @@ def Exp.WellFormedFor (cfg : SemanticsConfig := .modern) (ty : LlvmType) : Exp �
   | .int _ => ty.asInt?.isSome = true
   | .floatBits _ => ty.asFloat?.isSome = true
   | .floatDec _ _ _ => ty.asFloat?.isSome = true
+  | .floatSpecial _ _ _ _ => ty.asFloat?.isSome = true
+  | .blockAddress _ _ => ty.asPtr?.isSome = true
   | .null => ty.asPtr?.isSome = true
   | .zeroinitializer => ty.isFirstClass = true
   | .undef => cfg.allowUndef = true ∧ ty.isFirstClass = true
@@ -36,6 +38,7 @@ def Exp.WellFormedFor (cfg : SemanticsConfig := .modern) (ty : LlvmType) : Exp �
   | .gepConst _ _ _ _ => ty.isPtrOrPtrVector = true
   | .convConst _ _ _ toTy => ty = toTy
   | .binConst _ cTy _ _ => ty = cTy
+  | .insertElemConst vecTy _ _ _ _ _ => ty = vecTy
 
 mutual
 @[simp_wellform]
@@ -49,6 +52,8 @@ def Exp.WellScopedTo (locals : List LocalId) : Exp → Prop
   | .gepConst _ _ (_, p) idxs => p.WellScopedTo locals ∧ Exp.TypedListWellScopedTo locals idxs
   | .convConst _ _ v _ => v.WellScopedTo locals
   | .binConst _ _ v1 v2 => v1.WellScopedTo locals ∧ v2.WellScopedTo locals
+  | .insertElemConst _ v _ e _ idx =>
+      v.WellScopedTo locals ∧ e.WellScopedTo locals ∧ idx.WellScopedTo locals
   | _ => True
 
 @[simp_wellform]
@@ -248,6 +253,10 @@ def Terminator.WellFormedWith (cfg : SemanticsConfig) (retTy : LlvmRetType)
       ∧ cond.WellScopedTo locals
       ∧ defDest ∈ labels
       ∧ ∀ c ∈ cases, c.2 ∈ labels
+  | (.void _, .indirectBr addr dests) =>
+      addr.WellFormedFor cfg (.ptr 0)
+      ∧ addr.WellScopedTo locals
+      ∧ ∀ d ∈ dests, d ∈ labels
   | (.void _, .unreachable) => True
   | _ => False
 

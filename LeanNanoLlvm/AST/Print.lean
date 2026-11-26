@@ -80,6 +80,9 @@ def ValueAttr.print : ValueAttr → String
   | .dereferenceable b => s!"dereferenceable({b})"
   | .dereferenceableOrNull b => s!"dereferenceable_or_null({b})"
   | .range lo hi => s!"range({lo}, {hi})"
+  | .rangeList rs =>
+    let ps := rs.map (fun (lo, hi) => s!"{lo}, {hi}")
+    s!"range({", ".intercalate ps})"
   | .nofpclass m => s!"nofpclass({m})"
   | .byval ty => s!"byval({ty.print})"
   | .sret ty => s!"sret({ty.print})"
@@ -130,6 +133,13 @@ def Exp.print : Exp → String
   | .floatDec neg m e =>
       let sgn := if neg then "-" else ""
       if e == 0 then s!"{sgn}{m}.0" else s!"{sgn}{m}e{e}"
+  | .floatSpecial neg isInf quiet payload =>
+      let sgn := if neg then "-" else "+"
+      if isInf then s!"{sgn}inf"
+      else if quiet then if payload == 0 then s!"{sgn}qnan" else s!"{sgn}qnan(0x{String.ofList (Nat.toDigits 16 payload)})"
+      else if payload == 0 then s!"{sgn}snan" else s!"{sgn}snan(0x{String.ofList (Nat.toDigits 16 payload)})"
+  | .blockAddress fn blk =>
+      s!"blockaddress(@{fn.ToString}, %{blk.ToString})"
   | .null => "null"
   | .zeroinitializer => "zeroinitializer"
   | .undef => "undef"
@@ -153,6 +163,8 @@ def Exp.print : Exp → String
   | .binConst op ty v1 v2 =>
       let (name, flags) := op.printNameAndFlags
       s!"{name}{formatFlags flags} ({ty.print} {v1.print}, {ty.print} {v2.print})"
+  | .insertElemConst vecTy vec elemTy elem idxTy idx =>
+      s!"insertelement ({vecTy.print} {vec.print}, {elemTy.print} {elem.print}, {idxTy.print} {idx.print})"
 
 def Exp.printTypedList : List (LlvmType × Exp) → List String
   | [] => []
@@ -253,6 +265,9 @@ def Terminator.print : Terminator → String
   | .switch ty cond defDest cases =>
       let caseStr := String.intercalate " " (cases.map fun (v, lbl) => s!"{ty.print} {v}, label %{lbl.ToString}")
       s!"switch {ty.print} {cond.print}, label %{defDest.ToString} [ {caseStr} ]"
+  | .indirectBr addr dests =>
+      let dStr := String.intercalate ", " (dests.map fun lbl => s!"label %{lbl.ToString}")
+      s!"indirectbr ptr {addr.print}, [ {dStr} ]"
   | .unreachable => "unreachable"
 
 def printInstructionWithId (id : InstructionId) (instruction : Instruction ⊕ Terminator) : String :=

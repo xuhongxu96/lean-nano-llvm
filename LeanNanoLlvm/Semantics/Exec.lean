@@ -60,6 +60,22 @@ def execExp (dl : DataLayout) (cfg : SemanticsConfig)
     match ty with
     | .float ft => .ok (.float ft (.value (IEEEFloat.ofDecimal ft.format cfg.roundingMode neg m e10)), mem, o)
     | _ => .error (.staticError s!"invalid type for float decimal literal: found {ty.print}")
+  | .floatSpecial neg isInf quiet payload =>
+    match ty with
+    | .float ft =>
+      let flt :=
+        if isInf then IEEEFloat.inf ft.format neg
+        else if quiet then IEEEFloat.qNaN ft.format neg payload
+        else IEEEFloat.sNaN ft.format neg (if payload == 0 then 1 else payload)
+      .ok (.float ft (.value flt), mem, o)
+    | _ => .error (.staticError s!"invalid type for special float literal: found {ty.print}")
+  | .blockAddress fn blk =>
+    match ty with
+    | .ptr as =>
+      match mem.funcAddrs.get? (blockAddrKey fn blk) with
+      | some p => .ok (.ptr as (.value p), mem, o)
+      | none => .ok (.ptr as (.value (Pointer.null dl as)), mem, o)
+    | _ => .error (.staticError s!"`blockaddress` requires pointer type, found {ty.print}")
   | .null =>
     match ty with
     | .ptr as => .ok (.ptr as (.value (Pointer.null dl as)), mem, o)
@@ -131,6 +147,19 @@ def execExp (dl : DataLayout) (cfg : SemanticsConfig)
         match liftBinaryPure cTy.scalarType v1 v2 (evalIntBinaryScalarPure op) with
         | .ok res => .ok (res, m2, o2)
         | .error err => .error err
+  | .insertElemConst vecTy vecE elemTy elemE idxTy idxE =>
+    match execExp dl cfg regs mem vecTy vecE o with
+    | .error err => .error err
+    | .ok (vecV, m1, o1) =>
+      match execExp dl cfg regs m1 elemTy elemE o1 with
+      | .error err => .error err
+      | .ok (elemV, m2, o2) =>
+        match execExp dl cfg regs m2 idxTy idxE o2 with
+        | .error err => .error err
+        | .ok (idxV, m3, o3) =>
+          match evalInsertElementPure vecV elemV idxV with
+          | .ok res => .ok (res, m3, o3)
+          | .error err => .error err
 
 /-- Kernel-reducible list expression evaluator (mirroring `EvalExpList`). -/
 def execExpList (dl : DataLayout) (cfg : SemanticsConfig)
@@ -327,6 +356,19 @@ theorem execExp_sound (dl : DataLayout) (cfg : SemanticsConfig)
     cases ty with
     | float ft => exact EvalExp.leaf_ok (by simp [evalPureLeafExp?])
     | _ => exact EvalExp.leaf_err (by simp [evalPureLeafExp?])
+  | mem, ty, .floatSpecial neg isInf quiet payload, o => by
+    unfold execExp
+    cases ty with
+    | float ft => exact EvalExp.leaf_ok (by simp [evalPureLeafExp?])
+    | _ => exact EvalExp.leaf_err (by simp [evalPureLeafExp?])
+  | mem, ty, .blockAddress fn blk, o => by
+    unfold execExp
+    cases ty with
+    | ptr as =>
+      cases hfa : mem.funcAddrs.get? (blockAddrKey fn blk) with
+      | some p => exact EvalExp.leaf_ok (by simp [evalPureLeafExp?, blockAddrKey] at hfa ⊢; rw [hfa])
+      | none => exact EvalExp.leaf_ok (by simp [evalPureLeafExp?, blockAddrKey] at hfa ⊢; rw [hfa])
+    | _ => exact EvalExp.leaf_err (by simp [evalPureLeafExp?])
   | mem, ty, .null, o => by
     unfold execExp
     cases ty with
@@ -459,6 +501,26 @@ theorem execExp_sound (dl : DataLayout) (cfg : SemanticsConfig)
         cases hbin : liftBinaryPure cTy.scalarType v1 v2 (evalIntBinaryScalarPure op) with
         | ok res => exact EvalExp.binConst_ok ih1 ih2 hbin
         | error err => exact EvalExp.binConst_eval_err ih1 ih2 hbin
+  | mem, ty, .insertElemConst vecTy vecE elemTy elemE idxTy idxE, o => by
+    unfold execExp
+    have ih1 := execExp_sound dl cfg regs mem vecTy vecE o
+    cases h1 : execExp dl cfg regs mem vecTy vecE o with
+    | error err => rw [h1] at ih1; exact EvalExp.insertElemConst_vec_err ih1
+    | ok p1 =>
+      rw [h1] at ih1; obtain ⟨vecV, m1, o1⟩ := p1; dsimp only at ih1 ⊢
+      have ih2 := execExp_sound dl cfg regs m1 elemTy elemE o1
+      cases h2 : execExp dl cfg regs m1 elemTy elemE o1 with
+      | error err => rw [h2] at ih2; exact EvalExp.insertElemConst_elem_err ih1 ih2
+      | ok p2 =>
+        rw [h2] at ih2; obtain ⟨elemV, m2, o2⟩ := p2; dsimp only at ih2 ⊢
+        have ih3 := execExp_sound dl cfg regs m2 idxTy idxE o2
+        cases h3 : execExp dl cfg regs m2 idxTy idxE o2 with
+        | error err => rw [h3] at ih3; exact EvalExp.insertElemConst_idx_err ih1 ih2 ih3
+        | ok p3 =>
+          rw [h3] at ih3; obtain ⟨idxV, m3, o3⟩ := p3; dsimp only at ih3 ⊢
+          cases hins : evalInsertElementPure vecV elemV idxV with
+          | ok res => exact EvalExp.insertElemConst_ok ih1 ih2 ih3 hins
+          | error err => exact EvalExp.insertElemConst_eval_err ih1 ih2 ih3 hins
 
 /-- Soundness of executable `execExpList` with respect to relational `EvalExpList`. -/
 theorem execExpList_sound (dl : DataLayout) (cfg : SemanticsConfig)
@@ -810,7 +872,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       match execExp dl cfg regs m1 ty e2 o1 with
       | .error err => (none, Config.ofError err, o1)
       | .ok (v2, m2, o2) =>
-        match liftBinaryPure .i1 v1 v2 (evalICmpScalarPure ss pred) with
+        match liftBinaryPure .i1 v1 v2 (evalICmpScalarPure dl ss pred) with
         | .ok res => (none, finishRegInstr st frame callers rest iid res m2, o2)
         | .error err => (none, Config.ofError err, o2)
   | .fcmp fmf pred ty e1 e2 =>
@@ -989,7 +1051,8 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       | .error err => (none, Config.ofError err, o1)
       | .ok (fid, m2, o2) =>
         let fname := fid.ToString
-        if isAllocLibcall fname then
+        let allowLib := st.allowLibcallsFor fid
+        if allowLib && isAllocLibcall fname then
           match execAllocLibcall dl cfg m2 fname retTy argVals with
           | some (.ok (rawRet, m3)) =>
             match applyRetFMFAndAttrsPure dl m3 retTy fmf retAttrs rawRet with
@@ -998,7 +1061,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           | some (.error err) => (none, Config.ofError err, o2)
           | none => (none, .staticError s!"Internal error: alloc libcall {fname}", o2)
         else
-          match evalNonAllocIntrinsicExec? dl cfg m2 fname retTy fmf argVals o2 with
+          match evalNonAllocIntrinsicExec? dl cfg m2 fname retTy fmf argVals o2 allowLib with
           | some (.ok (rawRet, m3, o3)) =>
             let effBundles := if fname == "llvm.assume" then bundles else []
             match execAssumeBundles dl cfg regs m3 effBundles o3 with
@@ -1063,6 +1126,17 @@ def execTerm (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           | none => defDest
         execJump st frame callers m1 dest o1
       | other => (.staticError s!"Expected integer condition in switch, got {other}", o1)
+  | .indirectBr addrExp dests =>
+    match execExp dl cfg regs st.memory (.ptr dl.programAddrSpace) addrExp o with
+    | .error err => (Config.ofError err, o)
+    | .ok (addrVal, m1, o1) =>
+      match addrVal with
+      | .ptr _ .poison => (.ub "Indirect branch on poison", o1)
+      | .ptr _ (.value p) =>
+        match dests.find? (fun d => m1.addrToFunc.get? p.addr.toNat == some (blockAddrKey frame.defn.prototype.name d)) with
+        | some dest => execJump st frame callers m1 dest o1
+        | none => (.ub "Indirect branch on unlisted or invalid target BB", o1)
+      | other => (.staticError s!"Expected pointer in indirectbr, got {other}", o1)
   | .unreachable =>
     (.ub "Executed unreachable instruction", o)
 
@@ -1090,11 +1164,17 @@ private theorem execAllocLibcall_isSome_of_isAlloc {dl cfg mem name retTy argVal
   unfold isAllocLibcall at h
   simp only [Bool.or_eq_true] at h
   unfold execAllocLibcall
-  rcases h with hm | hc
+  rcases h with (hm | hc) | hn
   · rw [if_pos hm]; exact ⟨_, rfl⟩
   · by_cases hm : (name == "malloc") = true
     · rw [if_pos hm]; exact ⟨_, rfl⟩
     · rw [if_neg hm, if_pos hc]; exact ⟨_, rfl⟩
+  · by_cases hm : (name == "malloc") = true
+    · rw [if_pos hm]; exact ⟨_, rfl⟩
+    · rw [if_neg hm]
+      by_cases hc : (name == "calloc") = true
+      · rw [if_pos hc]; exact ⟨_, rfl⟩
+      · rw [if_neg hc, if_pos hn]; exact ⟨_, rfl⟩
 
 /-- Soundness of executable `execInstr` with respect to relational `StepInstr`. -/
 theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
@@ -1156,7 +1236,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       | error err => rw [h2] at ih2 h; cases h; exact StepInstr.icmp_e2_err ih1 ih2
       | ok p2 =>
         rw [h2] at ih2 h; obtain ⟨v2, m2, o2⟩ := p2; dsimp only at ih2 h
-        cases hc : liftBinaryPure .i1 v1 v2 (evalICmpScalarPure ss pred) with
+        cases hc : liftBinaryPure .i1 v1 v2 (evalICmpScalarPure st.dataLayout ss pred) with
         | ok res => rw [hc] at h; cases h; exact StepInstr.icmp_ok ih1 ih2 hc
         | error err => rw [hc] at h; cases h; exact StepInstr.icmp_eval_err ih1 ih2 hc
   | fcmp fmf pred ty e1 e2 =>
@@ -1450,10 +1530,11 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       | ok pc =>
         rw [hc] at ihc h; obtain ⟨fid, m2, o2⟩ := pc; dsimp only at ihc h
         have hwf2 := EvalCallee.preserves_wf hwf1 ihc
-        by_cases halloc : isAllocLibcall fid.ToString = true
+        by_cases halloc : (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = true
         · rw [if_pos halloc] at h
+          have hisAlloc : isAllocLibcall fid.ToString = true := (Bool.and_eq_true _ _ |>.mp halloc).2
           obtain ⟨res, hres⟩ := execAllocLibcall_isSome_of_isAlloc (dl := st.dataLayout)
-            (cfg := st.config) (mem := m2) (retTy := retTy) (argVals := argVals) halloc
+            (cfg := st.config) (mem := m2) (retTy := retTy) (argVals := argVals) hisAlloc
           rw [hres] at h
           have hspec := execAllocLibcall_sound hwf2 hres
           cases res with
@@ -1463,9 +1544,9 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
             cases hattr : applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet with
             | error err => rw [hattr] at h; cases h; exact StepInstr.call_alloc_retattr_err iha ihc halloc hspec hattr
             | ok finalRet => rw [hattr] at h; cases h; exact StepInstr.call_alloc_ok iha ihc halloc hspec hattr
-        · have hallocF : isAllocLibcall fid.ToString = false := Bool.eq_false_iff.mpr halloc
+        · have hallocF : (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false := Bool.eq_false_iff.mpr halloc
           rw [if_neg halloc] at h
-          cases hint : evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o2 with
+          cases hint : evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o2 (st.allowLibcallsFor fid) with
           | some r =>
             rw [hint] at h
             cases r with
@@ -1489,7 +1570,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                   exact StepInstr.call_intrinsic_ok iha ihc hallocF ⟨_, _, hint⟩ ihb hattr
           | none =>
             rw [hint] at h; dsimp only at h
-            have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o0 = none :=
+            have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o0 (st.allowLibcallsFor fid) = none :=
               fun o0 => evalNonAllocIntrinsicExec?_none_indep hint
             cases hfn : st.functions.get? fid with
             | none => rw [hfn] at h; cases h; exact StepInstr.call_external_err iha ihc hallocF hnoneAll hfn
@@ -1577,6 +1658,33 @@ theorem execTerm_sound {st frame callers tid term o c' o'}
         | poison => cases h; exact StepTerm.switch_poison ih
         | value bv => exact StepTerm.switch_ok ih (execJump_sound h)
       | _ => cases h; exact StepTerm.switch_nonint ih (by intro _ _ heq; cases heq)
+  | indirectBr addrExp dests =>
+    dsimp only at h
+    have ih := execExp_sound st.dataLayout st.config frame.registers st.memory (.ptr st.dataLayout.programAddrSpace) addrExp o
+    cases he : execExp st.dataLayout st.config frame.registers st.memory (.ptr st.dataLayout.programAddrSpace) addrExp o with
+    | error err => rw [he] at ih h; cases h; exact StepTerm.indirectBr_err ih
+    | ok p1 =>
+      rw [he] at ih h; obtain ⟨addrVal, m1, o1⟩ := p1; dsimp only at ih h
+      cases addrVal with
+      | ptr as pv =>
+        cases pv using PoisonOr.casesOn' with
+        | poison => cases h; exact StepTerm.indirectBr_poison ih
+        | value p =>
+          dsimp only at h
+          cases hfind : dests.find? (fun d => m1.addrToFunc.get? p.addr.toNat == some (blockAddrKey frame.defn.prototype.name d)) with
+          | none =>
+            rw [hfind] at h; cases h
+            refine StepTerm.indirectBr_invalid ih ?_
+            intro d hd heq
+            have := List.find?_eq_none.mp hfind d hd
+            simp [heq] at this
+          | some dest =>
+            rw [hfind] at h
+            have hmem := List.mem_of_find?_eq_some hfind
+            have hpred := List.find?_some hfind
+            simp only [beq_iff_eq] at hpred
+            exact StepTerm.indirectBr_ok ih hpred hmem (execJump_sound h)
+      | _ => cases h; exact StepTerm.indirectBr_nonptr ih (by intro _ _ heq; cases heq)
   | unreachable =>
     dsimp only at h
     cases h; exact StepTerm.unreachable_ub
@@ -1692,6 +1800,32 @@ theorem runSteps_sound (fuel : Nat) (o : OracleState) (c : Config)
 
 /-! ### Module Initialization & Top-Level Runners -/
 
+private def registerBlockAddrs (dl : DataLayout) (cfg : SemanticsConfig) (fnName : FunctionId) :
+    List Block → MemoryState → Except ExecError MemoryState
+  | [], mem => .ok mem
+  | blk :: rest, mem =>
+    let key := blockAddrKey fnName blk.id
+    match mem.allocate dl cfg 7 8 key.ToString dl.programAddrSpace .zeroed .func true with
+    | .error e => .error e
+    | .ok (obj, mem') =>
+      let ptr := MemoryState.derivePointer dl obj
+      registerBlockAddrs dl cfg fnName rest (mem'.insertFuncAddr key obj.baseAddr ptr)
+
+private theorem registerBlockAddrs_wf {dl cfg fnName blks mem mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : registerBlockAddrs dl cfg fnName blks mem = .ok mem') :
+    MemoryState.WellFormed mem' := by
+  induction blks generalizing mem with
+  | nil => unfold registerBlockAddrs at h; cases h; exact hwf
+  | cons blk rest ih =>
+    unfold registerBlockAddrs at h
+    dsimp only at h
+    cases ha : mem.allocate dl cfg 7 8 (blockAddrKey fnName blk.id).ToString dl.programAddrSpace .zeroed .func true with
+    | error e => rw [ha] at h; cases h
+    | ok p =>
+      rw [ha] at h; obtain ⟨obj, m1⟩ := p
+      exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
+
 private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig) :
     List TopLevelEntity → MemoryState → AssocMap FunctionId Definition → AssocMap FunctionId Declaration →
     Except ExecError (MemoryState × AssocMap FunctionId Definition × AssocMap FunctionId Declaration)
@@ -1711,7 +1845,9 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig) :
       | .ok (obj, mem') =>
         let ptr := MemoryState.derivePointer dl obj
         let mem'' := mem'.insertFuncAddr defn.prototype.name obj.baseAddr ptr
-        initModulePass1 dl cfg rest mem'' (fns.insert defn.prototype.name defn) decls
+        match registerBlockAddrs dl cfg defn.prototype.name defn.blocks mem'' with
+        | .error e => .error e
+        | .ok mem''' => initModulePass1 dl cfg rest mem''' (fns.insert defn.prototype.name defn) decls
     | .global gv =>
       let size := dl.typeAllocSize gv.ty
       let effAlign := max 8 (gv.align.getD (dl.typeABIAlign gv.ty))
@@ -1782,8 +1918,13 @@ private theorem initModulePass1_wf {dl cfg ents mem fns decls mem' fns' decls'}
       cases ha : mem.allocate dl cfg 7 8 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
       | error e => rw [ha] at h; cases h
       | ok p =>
-        rw [ha] at h; obtain ⟨obj, m1⟩ := p
-        exact ih (MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
+        rw [ha] at h; obtain ⟨obj, m1⟩ := p; dsimp only at h
+        have hwf1 := MemoryState.insertFuncAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha)
+          defn.prototype.name obj.baseAddr (MemoryState.derivePointer dl obj)
+        cases hb : registerBlockAddrs dl cfg defn.prototype.name defn.blocks
+            (m1.insertFuncAddr defn.prototype.name obj.baseAddr (MemoryState.derivePointer dl obj)) with
+        | error e => rw [hb] at h; cases h
+        | ok m2 => rw [hb] at h; exact ih (registerBlockAddrs_wf hwf1 hb) h
     | global gv =>
       dsimp only at h
       cases ha : mem.allocate dl cfg (dl.typeAllocSize gv.ty) (max 8 (gv.align.getD (dl.typeABIAlign gv.ty)))

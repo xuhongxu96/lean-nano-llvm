@@ -1790,9 +1790,9 @@ theorem caller_add0_is_refined_by_direct_in_module :
              registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
                (.local_id (.name "v")) (.bv 32 v) }, initMem) := rfl
     -- Source execution: `add` → `call @id32` → callee `ret` → caller `ret`
-    have hnoIntr : ∀ o, evalNonAllocIntrinsicExec? .default64LE .modern initMem
-        (AST.RawId.name "id32").ToString (.ret (.int 32)) {} [.bv 32 v] o = none :=
-      fun _ => rfl
+    have hnoIntr : ∀ o b, evalNonAllocIntrinsicExec? .default64LE .modern initMem
+        (AST.RawId.name "id32").ToString (.ret (.int 32)) {} [.bv 32 v] o b = none :=
+      fun _ b => by cases b <;> rfl
     have hX_term : Terminates (.running {
         frames := [{ defn := callerWithAdd0Def, curBlock := .name "entry",
                      remainingCode := entryCode callerWithAdd0Def,
@@ -1812,7 +1812,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
           (Step.instr rfl rfl
             (StepInstr.call_user_ok
               (EvalCallArgs.cons_ok (EvalExp.leaf_ok (by llvm_step; rfl)) (by llvm_step) EvalCallArgs.nil)
-              EvalCallee.direct rfl hnoIntr hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
+              EvalCallee.direct rfl (fun o => hnoIntr o _) hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
           (StarStep.step (ev := none)
             (Step.term rfl rfl rfl
               (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
@@ -1935,7 +1935,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
                 injection he with hpair; cases hpair
                 simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
-                obtain ⟨o, _, h⟩ := hintr; rw [hnoIntr o] at h; cases h
+                obtain ⟨o, _, h⟩ := hintr; rw [hnoIntr o _] at h; cases h
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_intrinsic_err hargsEv hcallee _ hintr =>
             cases hcallee with
@@ -1946,7 +1946,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
                 injection he with hpair; cases hpair
                 simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
-                obtain ⟨o, h⟩ := hintr; rw [hnoIntr o] at h; cases h
+                obtain ⟨o, h⟩ := hintr; rw [hnoIntr o _] at h; cases h
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_user_ok hargsEv hcallee _ _ hfn _ hmk =>
             cases hcallee with
@@ -1984,7 +1984,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
           exact Step.instr rfl rfl
             (StepInstr.call_user_ok
               (EvalCallArgs.cons_ok (EvalExp.leaf_ok (by llvm_step; rfl)) (by llvm_step) EvalCallArgs.nil)
-              EvalCallee.direct rfl hnoIntr hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
+              EvalCallee.direct rfl (fun o => hnoIntr o _) hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
       hY2
     exact Config.IsRefinedBy.of_det_halted hY1 hX_term
       (RegisterValue.IsRefinedBy.refl _)
