@@ -618,7 +618,7 @@ def execCallArgs (dl : DataLayout) (cfg : SemanticsConfig)
     match execExp dl cfg regs mem ty e o with
     | .error err => .error err
     | .ok (rawV, m1, o1) =>
-      match applyValueAttrsPure dl m1 ty rawV attrs with
+      match applyValueAttrsPure dl m1 ty rawV (byvalDeferredAttrs attrs) with
       | .error err => .error err
       | .ok v =>
         match execCallArgs dl cfg regs m1 rest o1 with
@@ -637,7 +637,7 @@ theorem execCallArgs_sound (dl : DataLayout) (cfg : SemanticsConfig)
     | error err => rw [h1] at ih1; exact EvalCallArgs.cons_exp_err ih1
     | ok p1 =>
       rw [h1] at ih1; obtain ⟨rawV, m1, o1⟩ := p1; dsimp only at ih1 ⊢
-      cases hattr : applyValueAttrsPure dl m1 ty rawV attrs with
+      cases hattr : applyValueAttrsPure dl m1 ty rawV (byvalDeferredAttrs attrs) with
       | error err => exact EvalCallArgs.cons_attr_err ih1 hattr
       | ok v =>
         have ih2 := execCallArgs_sound dl cfg regs m1 rest o1
@@ -864,7 +864,7 @@ def execRet (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
             let regs' := match rd.retTy, rd.destId with
               | .ret _, .id rid => caller.registers.insert (.local_id rid) retVal2
               | _, _ => caller.registers
-            .running (st.withFramesAndMemory (((caller.withRegisters regs').withReturnDest none) :: restCallers) m2)
+            .running (st.withFramesAndMemory (((caller.withRegisters regs').withReturnDest none) :: restCallers) (m2.unhide rd.hidden))
 
 theorem execRet_sound (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (retTy : LlvmRetType) (retVal : RegisterValue) (m1 : MemoryState) :
@@ -1040,7 +1040,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           | .ok (mo, offset) =>
             let rawBytes := valueToBytes dl cfg val valTy
             let ev := if isVol then some (.volatileStore mo.addrSpace p.addr.toNat rawBytes) else none
-            (ev, finishVoidInstr st frame callers rest ((m2.bindWildcard p.prov mo.allocId).writeObjectBytes mo.allocId offset rawBytes), o2)
+            (ev, finishVoidInstr st frame callers rest ((m2.bindWildcard p.prov mo.allocId).writeObjectBytes mo.allocId offset rawBytes), drawPtrTags val o2)
         | _ => (none, .staticError s!"Expected pointer in store, got {ptrVal}", o2)
   | .getelementptr flags baseTy ptrTy ptrExp idxs =>
     match execExp dl cfg regs st.memory ptrTy ptrExp o with
@@ -1119,7 +1119,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
         | .error err => (none, Config.ofError err, o2)
         | .ok (vOff, m3, o3) =>
           match evalBitInsertPure dl baseTy valTy vBase vVal vOff with
-          | .ok res => (none, finishRegInstr st frame callers rest iid res m3, o3)
+          | .ok res => (none, finishRegInstr st frame callers rest iid res m3, drawPtrTags vVal o3)
           | .error err => (none, Config.ofError err, o3)
   | .bitextract retTy srcTy src offTy off =>
     match execExp dl cfg regs st.memory srcTy src o with
@@ -1131,8 +1131,8 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
         match evalBitExtractPure dl retTy vSrc vOff with
         | .ok res => (none, finishRegInstr st frame callers rest iid res m2, o2)
         | .error err => (none, Config.ofError err, o2)
-  | .call retTy fmf calleeExp args retAttrs bundles isNoRet =>
-    match execCallArgs dl cfg regs st.memory args o with
+  | .call retTy fmf calleeExp args retAttrs bundles isNoRet site =>
+    match execCallArgs dl cfg regs (st.memory.hide (tailHidden site frame)) args o with
     | .error err => (none, Config.ofError err, o)
     | .ok (argVals, m1, o1) =>
       match execCallee dl cfg regs m1 calleeExp o1 with
@@ -1144,7 +1144,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           match execAllocLibcall dl cfg m2 (heapObjName iid) fname retTy argVals with
           | some (.ok (rawRet, m3)) =>
             match applyRetFMFAndAttrsPure dl m3 retTy fmf retAttrs rawRet with
-            | .ok finalRet => (none, finishCallResult st frame callers rest iid retTy finalRet m3, o2)
+            | .ok finalRet => (none, finishCallResult st frame callers rest iid retTy finalRet (m3.unhide (tailHidden site frame)), o2)
             | .error err => (none, Config.ofError err, o2)
           | some (.error err) => (none, Config.ofError err, o2)
           | none => (none, .staticError s!"Internal error: alloc libcall {fname}", o2)
@@ -1154,21 +1154,21 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
             if cfg.maxStackDepth != 0 && st.frames.length ≥ cfg.maxStackDepth then
               (none, .resourceError .stackOverflow, o2)
             else
-              match mkCallEntryFrameWithMem dl cfg m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs with
+              match mkCallEntryFrameWithMem dl cfg m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs oracleDef.prototype.callingConv (tailHidden site frame) with
               | .error err => (none, Config.ofError err, o2)
               | .ok (calleeFrame, m3) =>
                 let caller' := (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
-                  (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet, specLoad? := some (ptrVal, revVal) })
+                  (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet, specLoad? := some (ptrVal, revVal), hidden := tailHidden site frame })
                 (none, .running (st.withFramesAndMemory (calleeFrame :: caller' :: callers) m3), o2)
           | none =>
-          match evalNonAllocIntrinsicExec? dl cfg m2 fname retTy fmf argVals o2 allowLib (args.map (fun a => a.2.2)) with
+          match evalNonAllocIntrinsicExec? dl (frameDenormalCfg st frame) m2 fname retTy fmf argVals o2 allowLib (args.map (fun a => a.2.2)) with
           | some (.ok (rawRet, m3, o3)) =>
             let effBundles := if fname == "llvm.assume" then bundles else []
             match execAssumeBundles dl cfg regs m3 effBundles o3 with
             | .error err => (none, Config.ofError err, o3)
             | .ok (m4, o4) =>
               match applyRetFMFAndAttrsPure dl m4 retTy fmf retAttrs rawRet with
-              | .ok finalRet => (none, finishCallResult st frame callers rest iid retTy finalRet m4, o4)
+              | .ok finalRet => (none, finishCallResult st frame callers rest iid retTy finalRet (m4.unhide (tailHidden site frame)), o4)
               | .error err => (none, Config.ofError err, o4)
           | some (.error err) => (none, Config.ofError err, o2)
           | none =>
@@ -1178,11 +1178,11 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
               if cfg.maxStackDepth != 0 && st.frames.length ≥ cfg.maxStackDepth then
                 (none, .resourceError .stackOverflow, o2)
               else
-                match mkCallEntryFrameWithMem dl cfg m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals with
+                match mkCallEntryFrameWithMem dl cfg m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) with
                 | .error err => (none, Config.ofError err, o2)
                 | .ok (calleeFrame, m3) =>
                   let caller' := (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
-                    (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet })
+                    (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet, hidden := tailHidden site frame })
                   (none, .running (st.withFramesAndMemory (calleeFrame :: caller' :: callers) m3), o2)
 
 /-- Kernel-reducible block-terminator step (mirroring `StepTerm`). -/
@@ -1651,14 +1651,14 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
         cases hev : evalBitExtractPure st.dataLayout retTy vSrc vOff with
         | ok res => rw [hev] at h; cases h; exact StepInstr.bitextract_ok ih1 ih2 hev
         | error err => rw [hev] at h; cases h; exact StepInstr.bitextract_eval_err ih1 ih2 hev
-  | call retTy fmf calleeExp args retAttrs bundles isNoRet =>
+  | call retTy fmf calleeExp args retAttrs bundles isNoRet site =>
     dsimp only at h
-    have iha := execCallArgs_sound st.dataLayout st.config frame.registers st.memory args o
-    cases ha : execCallArgs st.dataLayout st.config frame.registers st.memory args o with
+    have iha := execCallArgs_sound st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args o
+    cases ha : execCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args o with
     | error err => rw [ha] at iha h; cases h; exact StepInstr.call_args_err iha
     | ok pa =>
       rw [ha] at iha h; obtain ⟨argVals, m1, o1⟩ := pa; dsimp only at iha h
-      have hwf1 := EvalCallArgs.preserves_wf hwf iha
+      have hwf1 := EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) iha
       have ihc := execCallee_sound st.dataLayout st.config frame.registers m1 calleeExp o1
       cases hc : execCallee st.dataLayout st.config frame.registers m1 calleeExp o1 with
       | error err => rw [hc] at ihc h; cases h; exact StepInstr.call_callee_err iha ihc
@@ -1695,14 +1695,14 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                 · exact Or.inl (beq_iff_eq.mpr hz)
                 · simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq, not_and] at hov
                   exact Or.inr (Nat.lt_of_not_ge (hov hz))
-              cases hmk : mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs with
+              cases hmk : mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs oracleDef.prototype.callingConv (tailHidden site frame) with
               | error err => rw [hmk] at h; cases h; exact StepInstr.call_spec_oracle_entry_err iha ihc hallocF hspec hdepth hmk
               | ok pm =>
                 rw [hmk] at h; obtain ⟨calleeFrame, m3⟩ := pm; cases h
                 exact StepInstr.call_spec_oracle_ok iha ihc hallocF hspec hdepth hmk
           | none =>
           rw [hspec] at h; dsimp only at h
-          cases hint : evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o2 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) with
+          cases hint : evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o2 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) with
           | some r =>
             rw [hint] at h
             cases r with
@@ -1726,7 +1726,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                   exact StepInstr.call_intrinsic_ok iha ihc hallocF ⟨_, _, hint⟩ ihb hattr
           | none =>
             rw [hint] at h; dsimp only at h
-            have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o0 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none :=
+            have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o0 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none :=
               fun o0 => evalNonAllocIntrinsicExec?_none_indep hint
             cases hfn : st.functions.get? fid with
             | none => rw [hfn] at h; cases h; exact StepInstr.call_external_err iha ihc hallocF hnoneAll hfn
@@ -1743,7 +1743,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                   · simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq, not_and] at hov
                     have := hov hz
                     exact Or.inr (by omega)
-                cases hentry : mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals with
+                cases hentry : mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) with
                 | error err =>
                   rw [hentry] at h; cases h
                   exact StepInstr.call_user_entry_err iha ihc hallocF hnoneAll hfn hdepth hentry
@@ -1896,10 +1896,10 @@ def runSteps (fuel : Nat) : OracleState → Config → List TraceEvent × Config
       match c with
       | .running ⟨frames, mem, cfg, dl, fns, decls⟩ =>
         match o with
-        | ⟨ora, idx⟩ =>
-          match execStep ⟨ora, idx⟩ (.running ⟨frames, mem, cfg, dl, fns, decls⟩) with
-          | (ev, c1, ⟨ora1, idx1⟩) =>
-            match rec ⟨ora1, idx1⟩ c1 with
+        | ⟨ora, idx, nid, tg⟩ =>
+          match execStep ⟨ora, idx, nid, tg⟩ (.running ⟨frames, mem, cfg, dl, fns, decls⟩) with
+          | (ev, c1, ⟨ora1, idx1, nid1, tg1⟩) =>
+            match rec ⟨ora1, idx1, nid1, tg1⟩ c1 with
             | (tr, cFinal, oFinal) =>
               match ev with
               | none => (tr, cFinal, oFinal)
@@ -1907,13 +1907,13 @@ def runSteps (fuel : Nat) : OracleState → Config → List TraceEvent × Config
       | cTerm => ([], cTerm, o))
     fuel
 
-private theorem runSteps_succ_running (n : Nat) (ora : NondetOracle) (idx : Nat)
+private theorem runSteps_succ_running (n : Nat) (ora : NondetOracle) (idx nid : Nat) (tg : List (Nat × Nat))
     (frames : List CallFrame) (mem : MemoryState) (cfg : SemanticsConfig) (dl : DataLayout)
     (fns : AssocMap FunctionId Definition) (decls : AssocMap FunctionId Declaration) :
-    runSteps (n + 1) ⟨ora, idx⟩ (.running ⟨frames, mem, cfg, dl, fns, decls⟩) =
-      match execStep ⟨ora, idx⟩ (.running ⟨frames, mem, cfg, dl, fns, decls⟩) with
-      | (ev, c1, ⟨ora1, idx1⟩) =>
-        match runSteps n ⟨ora1, idx1⟩ c1 with
+    runSteps (n + 1) ⟨ora, idx, nid, tg⟩ (.running ⟨frames, mem, cfg, dl, fns, decls⟩) =
+      match execStep ⟨ora, idx, nid, tg⟩ (.running ⟨frames, mem, cfg, dl, fns, decls⟩) with
+      | (ev, c1, ⟨ora1, idx1, nid1, tg1⟩) =>
+        match runSteps n ⟨ora1, idx1, nid1, tg1⟩ c1 with
         | (tr, cFinal, oFinal) =>
           match ev with
           | none => (tr, cFinal, oFinal)
@@ -1932,18 +1932,18 @@ theorem runSteps_sound (fuel : Nat) (o : OracleState) (c : Config)
       cases st with
       | mk frames mem cfg dl fns decls =>
         cases o with
-        | mk ora idx =>
+        | mk ora idx nid tg =>
           rw [runSteps_succ_running]
-          cases hstep : execStep ⟨ora, idx⟩ (.running ⟨frames, mem, cfg, dl, fns, decls⟩) with
+          cases hstep : execStep ⟨ora, idx, nid, tg⟩ (.running ⟨frames, mem, cfg, dl, fns, decls⟩) with
           | mk ev rest1 =>
             obtain ⟨c1, o1⟩ := rest1
             cases o1 with
-            | mk ora1 idx1 =>
+            | mk ora1 idx1 nid1 tg1 =>
               dsimp only
               have hs := execStep_sound hwf hstep
               have hwf1 := Step.preserves_wf hwf hs
-              have hrec := ih ⟨ora1, idx1⟩ c1 hwf1
-              cases hrun : runSteps n ⟨ora1, idx1⟩ c1 with
+              have hrec := ih ⟨ora1, idx1, nid1, tg1⟩ c1 hwf1
+              cases hrun : runSteps n ⟨ora1, idx1, nid1, tg1⟩ c1 with
               | mk tr rest2 =>
                 obtain ⟨cFinal, oFinal⟩ := rest2
                 rw [hrun] at hrec
@@ -2014,7 +2014,7 @@ private def collectAddrTakenInstr : Instruction → List GlobalId × List Global
   | .insertelement _ v _ e _ idx | .bitinsert _ v _ e _ idx =>
     let (f1, b1) := collectAddrTakenExp v; let (f2, b2) := collectAddrTakenExp e; let (f3, b3) := collectAddrTakenExp idx
     (f1 ++ f2 ++ f3, b1 ++ b2 ++ b3)
-  | .call _ _ callee args _ bundles _ =>
+  | .call _ _ callee args _ bundles _ _ =>
     -- Direct call `@f(...)` does NOT take the address of `@f`; only non-direct callees and arguments do.
     let (fc, bc) := match callee with
       | .identifier (.global_id _) => ([], [])
@@ -2144,7 +2144,7 @@ private def initModulePass2 (dl : DataLayout) (cfg : SemanticsConfig) :
                 m1.writeObjectBytes aid 0 (valueToBytes dl cfg initVal gv.ty)
               | _ => m1
             | none => m1
-          initModulePass2 dl cfg rest m2 o1
+          initModulePass2 dl cfg rest m2 (drawPtrTags initVal o1)
     | _ => initModulePass2 dl cfg rest mem o
 
 /-- Initialize all globals, declarations, and function addresses for a `TopLevel` module. -/

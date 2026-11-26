@@ -31,6 +31,17 @@ abbrev GlobalId := RawId
 abbrev BlockId := RawId
 abbrev FunctionId := GlobalId
 
+/-- Call-site properties that are not operands: the `tail`/`musttail` marker and the calling
+convention (`""` is the default `ccc`). -/
+structure CallSiteInfo where
+  isTail      : Bool := false
+  callingConv : String := ""
+deriving Repr, DecidableEq, Inhabited
+
+/-- The default call site (no tail marker, `ccc`). -/
+def CallSiteInfo.default : CallSiteInfo := {}
+
+
 inductive InstructionId
   | id (id : RawId)
   | void (n : Nat) -- unique ids for void-returning instructions (`store`, terminators, void `call`, etc.)
@@ -484,7 +495,7 @@ inductive Instruction : Type where
                    (args : List (LlvmType × Exp × List ValueAttr))
                    (retAttrs : List ValueAttr := [])
                    (bundles : List (String × List (LlvmType × Exp)) := [])
-                   (isNoReturn : Bool := false)
+                   (isNoReturn : Bool := false) (site : CallSiteInfo := {})
   | freeze         (v : TypedExp)
   | bitinsert      (baseTy : LlvmType) (base : Exp) (valTy : LlvmType) (val : Exp)
                    (offTy : LlvmType) (off : Exp)
@@ -511,6 +522,8 @@ structure Declaration where
   isNoReturn   : Bool := false
   isNoBuiltin  : Bool := false
   denormalMode : Option DenormalMode := none
+  /-- Calling convention (`""` is the default `ccc`). -/
+  callingConv  : String := ""
 deriving Repr
 
 abbrev Code := List (InstructionId × Instruction)
@@ -678,7 +691,7 @@ private def resolveInstr (defs : List (LocalId × LlvmType)) (fuel : Nat) :
   | .extractelement vTy v iTy i => do .ok (.extractelement (← resolveType defs fuel vTy) (← resolveExp defs fuel v) (← resolveType defs fuel iTy) (← resolveExp defs fuel i))
   | .insertelement vTy v valTy val iTy i => do .ok (.insertelement (← resolveType defs fuel vTy) (← resolveExp defs fuel v) (← resolveType defs fuel valTy) (← resolveExp defs fuel val) (← resolveType defs fuel iTy) (← resolveExp defs fuel i))
   | .shufflevector vTy v1 v2 m => do .ok (.shufflevector (← resolveType defs fuel vTy) (← resolveExp defs fuel v1) (← resolveExp defs fuel v2) m)
-  | .call rTy fmf callee args retAttrs bundles isNoRet => do
+  | .call rTy fmf callee args retAttrs bundles isNoRet site => do
     let rTy' ← resolveRetType defs fuel rTy
     let callee' ← resolveExp defs fuel callee
     let args' ← args.mapM fun (t, e, as) => do
@@ -687,7 +700,7 @@ private def resolveInstr (defs : List (LocalId × LlvmType)) (fuel : Nat) :
     let bundles' ← bundles.mapM fun (tag, bargs) => do
       let bargs' ← bargs.mapM fun (t, e) => do .ok (← resolveType defs fuel t, ← resolveExp defs fuel e)
       .ok (tag, bargs')
-    .ok (.call rTy' fmf callee' args' retAttrs' bundles' isNoRet)
+    .ok (.call rTy' fmf callee' args' retAttrs' bundles' isNoRet site)
   | .freeze (t, e) => do .ok (.freeze (← resolveType defs fuel t, ← resolveExp defs fuel e))
   | .bitinsert bTy b vTy v oTy o => do
     .ok (.bitinsert (← resolveType defs fuel bTy) (← resolveExp defs fuel b)

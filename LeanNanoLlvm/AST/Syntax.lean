@@ -638,7 +638,7 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
       | _ => throwUnsupportedSyntax
     let argList ← mkListLit argTupleT argExprs
     let emptyBundles ← mkListLit (← mkAppM ``Prod #[mkConst ``String, ← mkAppM ``List #[← mkAppM ``Prod #[mkConst ``LlvmType, mkConst ``Exp]]]) []
-    mkAppM ``Instruction.call #[← elabNanoLlvmRetType retTy, toExpr (elabFastMathFlags flags), ← elabNanoLlvmExp callee, argList, ← elabValueAttrList retAttrs, emptyBundles, toExpr false]
+    mkAppM ``Instruction.call #[← elabNanoLlvmRetType retTy, toExpr (elabFastMathFlags flags), ← elabNanoLlvmExp callee, argList, ← elabValueAttrList retAttrs, emptyBundles, toExpr false, mkConst ``CallSiteInfo.default]
   | `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp) => do
     let tv ← mkAppM ``Prod.mk #[← elabNanoLlvmType ty, ← elabNanoLlvmExp v]
     mkAppM ``Instruction.freeze #[tv]
@@ -711,7 +711,7 @@ def elabNanoLlvmDeclaration : Syntax → TermElabM Expr
     let argAttrsList ← mkListLit attrListT argAttrs.toList
     let fnTy ← mkAppM ``LlvmType.function #[retTyE, argList, toExpr isVarArg]
     let noneDenorm ← mkAppOptM ``Option.none #[some (mkConst ``DenormalMode)]
-    mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false, noneDenorm]
+    mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false, noneDenorm, toExpr ""]
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-declaration|" p:nanollvm_declaration "]" : term => elabNanoLlvmDeclaration p
@@ -809,7 +809,7 @@ def elabNanoLlvmDefinition : Syntax → TermElabM Expr
       blockExprs := blockExprs.push bE
     let blockList ← mkListLit (mkConst ``Block) blockExprs.toList
     let noneDenorm ← mkAppOptM ``Option.none #[some (mkConst ``DenormalMode)]
-    let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false, noneDenorm]
+    let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false, noneDenorm, toExpr ""]
     mkAppM ``Definition.mk #[decl, argNameList, blockList]
   | _ => throwUnsupportedSyntax
 

@@ -56,6 +56,46 @@ end
 
 instance : ToString RegisterValue := ⟨toStringAux⟩
 
+/-! ### Provenance tags (executable-only, `llubi`'s `Context::getTag`) -/
+
+mutual
+/-- `(allocId, addrWidth)` of the memory objects of the pointers inside a value, in serialization
+order (the objects whose provenance tag `llubi` needs when the value is written as bytes). -/
+def taggedPtrs : RegisterValue → List (Nat × Nat)
+  | .ptr _ (.value p) =>
+    match p.prov with
+    | .concrete id => [(id, p.addrWidth)]
+    | .wildcard _ (some id) _ => [(id, p.addrWidth)]
+    | _ => []
+  | .vector _ es => taggedPtrsList es
+  | .array _ es => taggedPtrsList es
+  | .struct _ _ es => taggedPtrsList es
+  | _ => []
+
+def taggedPtrsList : List RegisterValue → List (Nat × Nat)
+  | [] => []
+  | v :: vs => taggedPtrs v ++ taggedPtrsList vs
+end
+
+/-- Draw a provenance tag for object `id` unless it has one (a random `w`-bit value, redrawn
+while zero or already used). Tags only record `llubi`'s random-stream consumption and its
+printing; they have no semantic effect. -/
+def _root_.LeanNanoLlvm.Semantics.drawTag (id w : Nat) (o : OracleState) : OracleState :=
+  if o.tags.any (fun (q : Nat × Nat) => q.1 == id) then o
+  else
+    let rec go : Nat → OracleState → OracleState
+      | 0, o0 => o0
+      | fuel + 1, o0 =>
+        match o0.nextBitVec w with
+        | (tg, o1) =>
+          if tg.toNat == 0 || o1.tags.any (fun (q : Nat × Nat) => q.2 == tg.toNat) then go fuel o1
+          else { o1 with tags := o1.tags ++ [(id, tg.toNat)] }
+    go 8 o
+
+/-- Draw the provenance tags needed to serialize `v`. -/
+def _root_.LeanNanoLlvm.Semantics.drawPtrTags (v : RegisterValue) (o : OracleState) : OracleState :=
+  (taggedPtrs v).foldl (fun o0 (q : Nat × Nat) => drawTag q.1 q.2 o0) o
+
 /-! ### `llubi`-compatible rendering (`llvm::ubi::AnyValue::print`) -/
 
 /-- Value of LSB-first concrete bits (non-concrete bits count as 0). -/
@@ -63,7 +103,7 @@ def bitsValue (bits : List MemBit) : Nat :=
   bits.foldr (fun b acc => acc * 2 + (match b with | .concrete true _ => 1 | _ => 0)) 0
 
 /-- `PrintByte` of `ByteValue::print` for one chunk (`bits` LSB-first, at most 8 bits). -/
-def llubiByteChunk (bits : List MemBit) (full : Bool) : String :=
+def llubiByteChunk (bits : List MemBit) (full : Bool) (tags : List (Nat × Nat) := []) : String :=
   let allConcreteNoTag := bits.all fun | .concrete _ none => true | _ => false
   let allPoison := bits.all fun | .concrete .. => false | _ => true
   if full && allConcreteNoTag then "0x" ++ Llubi.hexPadded 2 (bitsValue bits)
@@ -75,8 +115,16 @@ def llubiByteChunk (bits : List MemBit) (full : Bool) : String :=
       | .concrete false _ => '0'
       | _ => '!')
     if bits.any (fun | .concrete _ (some _) => true | _ => false) then
+      let tagBit (p : Provenance) (idx : Nat) : Bool :=
+        let id? := match p with
+          | .concrete id => some id
+          | .wildcard _ (some id) _ => some id
+          | _ => none
+        match id? with
+        | some id => (((tags.find? (fun (q : Nat × Nat) => q.1 == id)).map (fun (q : Nat × Nat) => q.2)).getD 0).testBit idx
+        | none => false
       body ++ "(" ++ String.ofList (msbFirst.map fun
-        | .concrete b (some _) => if b then '1' else '0'
+        | .concrete _ (some (p, idx)) => if tagBit p idx then '1' else '0'
         | _ => '!') ++ ")"
     else body
 
@@ -90,7 +138,8 @@ def pointerOfBits? (bits : List MemBit) : Option Pointer :=
   | _ => none
 
 /-- `ByteValue::print` for a `b<w>` value (`bits` LSB-first). -/
-def llubiByteString (mem : MemoryState) (dl : DataLayout) (w : Nat) (bits : List MemBit) : String :=
+def llubiByteString (mem : MemoryState) (dl : DataLayout) (w : Nat) (bits : List MemBit)
+    (tags : List (Nat × Nat) := []) : String :=
   let n := (w + 7) / 8
   let chunk (k : Nat) : List MemBit := (bits.drop (8 * k)).take (min 8 (w - 8 * k))
   let order : List Nat := if dl.isLittleEndian then List.range n else (List.range n).reverse
@@ -104,33 +153,35 @@ def llubiByteString (mem : MemoryState) (dl : DataLayout) (w : Nat) (bits : List
         let lo := ks.foldl min (n - 1)
         match pointerOfBits? ((bits.drop (8 * lo)).take ptrW) with
         | some p => mem.ptrString p ++ " "
-        | none => String.join (ks.map fun k => llubiByteChunk (chunk k) (isFull k) ++ " "))
-    else String.join (order.map fun k => llubiByteChunk (chunk k) (isFull k) ++ " ")
+        | none => String.join (ks.map fun k => llubiByteChunk (chunk k) (isFull k) tags ++ " "))
+    else String.join (order.map fun k => llubiByteChunk (chunk k) (isFull k) tags ++ " ")
   s!"b{w} " ++ body
 
 mutual
 /-- `AnyValue::print`: `i32 -1`, `T`/`F`, `float 1.500000e+00`, `ptr 0x8 [a]`, `{ ... }`. -/
-def llubiStringAux (mem : MemoryState) (dl : DataLayout) : RegisterValue → String
+def llubiStringAux (mem : MemoryState) (dl : DataLayout) (tags : List (Nat × Nat)) : RegisterValue → String
   | .void => "none"
   | .bv _ .poison => "poison"
   | .bv w (.value b) => if w == 1 then (if b.toNat == 1 then "T" else "F") else s!"i{w} {b.toInt}"
-  | .byte w bits => llubiByteString mem dl w bits
+  | .byte w bits => llubiByteString mem dl w bits tags
   | .float _ .poison => "poison"
   | .float ft (.value f) => s!"{ft.print} {Llubi.llubiFloatString ft f}"
   | .ptr _ .poison => "poison"
   | .ptr _ (.value p) => mem.ptrString p
-  | .vector _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl es) ++ " }"
-  | .array _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl es) ++ " }"
-  | .struct _ _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl es) ++ " }"
+  | .vector _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl tags es) ++ " }"
+  | .array _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl tags es) ++ " }"
+  | .struct _ _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl tags es) ++ " }"
 
-def llubiStringList (mem : MemoryState) (dl : DataLayout) : List RegisterValue → List String
+def llubiStringList (mem : MemoryState) (dl : DataLayout) (tags : List (Nat × Nat)) :
+    List RegisterValue → List String
   | [] => []
-  | v :: vs => llubiStringAux mem dl v :: llubiStringList mem dl vs
+  | v :: vs => llubiStringAux mem dl tags v :: llubiStringList mem dl tags vs
 end
 
-/-- `llubi` rendering of a runtime value. -/
-def llubiString (v : RegisterValue) (mem : MemoryState) (dl : DataLayout) : String :=
-  llubiStringAux mem dl v
+/-- `llubi` rendering of a runtime value (`tags`: provenance tags for byte values). -/
+def llubiString (v : RegisterValue) (mem : MemoryState) (dl : DataLayout)
+    (tags : List (Nat × Nat) := []) : String :=
+  llubiStringAux mem dl tags v
 
 mutual
 def beq : RegisterValue → RegisterValue → Bool
@@ -575,6 +626,22 @@ def writeScalarBits (dl : DataLayout) (val : RegisterValue) (ty : LlvmType)
       0 totalWrite bytes
   | _ => bytes
 
+/-- `llubi`'s undef resolution on loads: walking the logical bytes of `[offsetInBits,
+offsetInBits + 8·chunks)`, each byte containing undef bits takes one oracle draw (its low 8 bits
+supply the undef bits); the walk stops at the first byte containing a poison bit, since the whole
+value is then poison. Returns the per-byte draws (0 where no draw was needed). -/
+def undefByteDraws (dl : DataLayout) (bytes : Array MemByte) (offsetInBits totalBits : Nat) :
+    Nat → Nat → List Nat → OracleState → List Nat × OracleState
+  | _, 0, acc, o => (acc.reverse, o)
+  | k, rem + 1, acc, o =>
+    let n := min 8 (totalBits - 8 * k)
+    let chunk := (List.range n).map fun j => getLogicalBit dl bytes (offsetInBits + 8 * k + j)
+    if chunk.any MemBit.isPoison then (acc.reverse, o)
+    else if chunk.any MemBit.isUndef then
+      match o.nextNat with
+      | (r, o') => undefByteDraws dl bytes offsetInBits totalBits (k + 1) rem (r :: acc) o'
+    else undefByteDraws dl bytes offsetInBits totalBits (k + 1) rem (0 :: acc) o
+
 /-- Read a scalar value from `bytes` starting at logical `offsetInBits`. -/
 def readScalarBits (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemByte)
     (ty : LlvmType) (offsetInBits : Nat) (checkPadding : Bool) (oracle : OracleState) :
@@ -600,6 +667,13 @@ def readScalarBits (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemB
   let numBits := dl.typeSizeInBits ty
   let endBits := if checkPadding then DataLayout.alignTo (offsetInBits + numBits) 8 else offsetInBits + numBits
   let totalRead := endBits - offsetInBits
+  -- per-byte undef draws (made up front, in llubi's order); the bit loop reads them through a
+  -- local oracle indexed by byte
+  let pre : List Nat × OracleState :=
+    if cfg.undefMode == .nondet then
+      undefByteDraws dl bytes offsetInBits totalRead 0 ((totalRead + 7) / 8) [] oracle
+    else ([], oracle)
+  let localO : OracleState := { oracle := fun k => pre.1.getD k 0 }
   let rec loop (i : Nat) : Nat → Nat → Bool → Bool → Bool → Option Provenance → Bool → OracleState →
       Nat × Bool × Bool × Bool × Option Provenance × Bool × OracleState
     | 0, valBits, hasUndef, isPoison, provOk, provAcc, padNonZero, o =>
@@ -617,16 +691,14 @@ def readScalarBits (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemB
         | .zero =>
           loop (i + 1) rem valBits true isPoison false none padNonZero o
         | .nondet =>
-          match o.nextBool with
-          | (b, o') =>
-            match b with
-            | false =>
-              loop (i + 1) rem valBits true isPoison false none padNonZero o'
-            | true =>
-              if inValue then
-                loop (i + 1) rem (valBits + (1 <<< i)) true isPoison false none padNonZero o'
-              else
-                loop (i + 1) rem valBits true isPoison false none true o'
+          match (o.oracle (i / 8)).testBit (i % 8) with
+          | false =>
+            loop (i + 1) rem valBits true isPoison false none padNonZero o
+          | true =>
+            if inValue then
+              loop (i + 1) rem (valBits + (1 <<< i)) true isPoison false none padNonZero o
+            else
+              loop (i + 1) rem valBits true isPoison false none true o
       | .concrete b provBit =>
         let nextProv : Bool × Option Provenance :=
           if !inValue then (provOk, provAcc)
@@ -648,8 +720,9 @@ def readScalarBits (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemB
               loop (i + 1) rem (valBits + (1 <<< i)) hasUndef isPoison provOk' provAcc' padNonZero o
             else
               loop (i + 1) rem valBits hasUndef isPoison provOk' provAcc' true o
-  match loop 0 totalRead 0 false false true none false oracle with
-  | (valBits, hasUndef, isPoison, provOk, provAcc, padNonZero, o') =>
+  match loop 0 totalRead 0 false false true none false localO with
+  | (valBits, hasUndef, isPoison, provOk, provAcc, padNonZero, _) =>
+    let o' := pre.2
     if isPoison || (checkPadding && padNonZero) then
       (RegisterValue.poisonOf ty, true, o')
     else
@@ -930,6 +1003,75 @@ private theorem freezeMemBits_sound (cfg : SemanticsConfig) :
       exact FreezeBitListRel.cons (FreezeBitRel.undef b (drawFreezeBool_zero_spec cfg o hb))
         (freezeMemBits_sound cfg rest o1)
 
+/-- Map bits with their (logical) index, starting at index `k`. -/
+def mapBitsFrom (f : Nat → MemBit → MemBit) : Nat → List MemBit → List MemBit
+  | _, [] => []
+  | k, b :: bs => f k b :: mapBitsFrom f (k + 1) bs
+
+private theorem mapBitsFrom_rel (cfg : SemanticsConfig) (f : Nat → MemBit → MemBit)
+    (hf : ∀ i b, FreezeBitRel cfg b (f i b)) :
+    ∀ (k : Nat) (bs : List MemBit), FreezeBitListRel cfg bs (mapBitsFrom f k bs)
+  | _, [] => FreezeBitListRel.nil
+  | k, b :: bs => FreezeBitListRel.cons (hf k b) (mapBitsFrom_rel cfg f hf (k + 1) bs)
+
+/-- Draw one value per byte (in the data layout's storage order) for the bytes of `bits` that
+contain non-concrete bits (`llubi`'s `freeze` of byte values: `Rng() & 255` per such byte). -/
+def freezeByteDraws (dl : DataLayout) (cfg : SemanticsConfig) (bits : List MemBit) (o : OracleState) :
+    List (Nat × Nat) × OracleState :=
+  let n := (bits.length + 7) / 8
+  let order := if dl.isLittleEndian then List.range n else (List.range n).reverse
+  order.foldl (fun (acc, o0) k =>
+    let chunk := (bits.drop (8 * k)).take 8
+    if chunk.all MemBit.isConcrete || cfg.freezeMode == .zero then (acc, o0)
+    else
+      match o0.nextNat with
+      | (r, o1) => ((k, r) :: acc, o1)) ([], o)
+
+/-- Resolve a non-concrete bit `i` of a frozen byte value from the per-byte draws. -/
+def frozenBit (cfg : SemanticsConfig) (draws : List (Nat × Nat)) (i : Nat) : MemBit → MemBit
+  | .concrete b p => .concrete b p
+  | _ =>
+    if cfg.freezeMode == .zero then .concrete false none
+    else
+      let r := ((draws.find? (·.1 == i / 8)).map (·.2)).getD 0
+      .concrete (r.testBit (i % 8)) none
+
+private theorem frozenBit_rel (cfg : SemanticsConfig) (draws : List (Nat × Nat)) :
+    ∀ i b, FreezeBitRel cfg b (frozenBit cfg draws i b) := by
+  intro i b
+  cases b with
+  | concrete b p => exact FreezeBitRel.concrete b p
+  | poison =>
+    unfold frozenBit
+    by_cases hz : cfg.freezeMode = .zero
+    · simp only [hz, beq_self_eq_true, ↓reduceIte]
+      exact FreezeBitRel.poison false (fun _ => rfl)
+    · have : (cfg.freezeMode == .zero) = false := by
+        cases h : cfg.freezeMode <;> simp_all
+      simp only [this, Bool.false_eq_true, ↓reduceIte]
+      exact FreezeBitRel.poison _ (fun h => absurd h hz)
+  | undef =>
+    unfold frozenBit
+    by_cases hz : cfg.freezeMode = .zero
+    · simp only [hz, beq_self_eq_true, ↓reduceIte]
+      exact FreezeBitRel.undef false (fun _ => rfl)
+    · have : (cfg.freezeMode == .zero) = false := by
+        cases h : cfg.freezeMode <;> simp_all
+      simp only [this, Bool.false_eq_true, ↓reduceIte]
+      exact FreezeBitRel.undef _ (fun h => absurd h hz)
+
+/-- Executable `freeze` of a byte value's bits with `llubi`'s per-byte draws. -/
+def freezeByteBits (dl : DataLayout) (cfg : SemanticsConfig) (bits : List MemBit) (o : OracleState) :
+    List MemBit × OracleState :=
+  match freezeByteDraws dl cfg bits o with
+  | (draws, o') => (mapBitsFrom (frozenBit cfg draws) 0 bits, o')
+
+private theorem freezeByteBits_sound (dl : DataLayout) (cfg : SemanticsConfig)
+    (bits : List MemBit) (o : OracleState) :
+    FreezeBitListRel cfg bits (freezeByteBits dl cfg bits o).1 := by
+  unfold freezeByteBits
+  exact mapBitsFrom_rel cfg _ (frozenBit_rel cfg _) 0 bits
+
 private theorem drawFreezeBits_zero_spec (cfg : SemanticsConfig) (w : Nat) (o : OracleState)
     {bits : BitVec w} {o' : OracleState} (h : drawFreezeBits cfg w o = (bits, o')) :
     cfg.freezeMode = .zero → bits = BitVec.ofNat w 0 := by
@@ -947,7 +1089,7 @@ def freezeValue (dl : DataLayout) (cfg : SemanticsConfig) :
     | (bits, o') => (.bv w (.value bits), o')
   | .bv w (.value v), oracle => (.bv w (.value v), oracle)
   | .byte w bs, oracle =>
-    match freezeMemBits cfg bs oracle with
+    match freezeByteBits dl cfg bs oracle with
     | (bs', o') => (.byte w bs', o')
   | .float ft .poison, oracle =>
     match drawFreezeBits cfg ft.bitWidth oracle with
@@ -991,8 +1133,8 @@ theorem freezeValue_sound (dl : DataLayout) (cfg : SemanticsConfig) :
   | .bv w (.value b), _ => FreezeRel.bv_val w b
   | .byte w bs, o => by
     unfold freezeValue
-    have ih := freezeMemBits_sound cfg bs o
-    cases h : freezeMemBits cfg bs o with
+    have ih := freezeByteBits_sound dl cfg bs o
+    cases h : freezeByteBits dl cfg bs o with
     | mk bs' o' =>
       rw [h] at ih
       exact FreezeRel.byte w bs bs' ih
@@ -1138,13 +1280,23 @@ def genUndefRepeatExec (f : OracleState → Except ExecError (RegisterValue × O
       | .error e => .error e
       | .ok (vs, o2) => .ok (v :: vs, o2)
 
+/-- `w` random bits drawn one byte at a time in storage order (`llubi` freezes a poison byte value
+with one `Rng() & 255` per byte). -/
+def nextByteBits (dl : DataLayout) (w : Nat) (o : OracleState) : BitVec w × OracleState :=
+  let n := (w + 7) / 8
+  let order := if dl.isLittleEndian then List.range n else (List.range n).reverse
+  match order.foldl (fun (acc, o0) k =>
+      match o0.nextNat with
+      | (r, o1) => (acc ||| ((r % 256) <<< (8 * k)), o1)) (0, o) with
+  | (v, o') => (BitVec.ofNat w v, o')
+
 mutual
 def genUndefNondetExec (dl : DataLayout) : LlvmType → OracleState → Except ExecError (RegisterValue × OracleState)
   | .int w, o =>
     match o.nextBitVec w with
     | (bv, o') => .ok (.bv w (.value bv), o')
   | .byte w, o =>
-    match o.nextBitVec w with
+    match nextByteBits dl w o with
     | (bv, o') => .ok (RegisterValue.byteOfBitVec bv, o')
   | .float ft, o =>
     match o.nextBitVec ft.bitWidth with
@@ -1291,7 +1443,7 @@ private theorem genUndefNondetExec_sound (dl : DataLayout) (cfg : SemanticsConfi
       exact UndefValRel.int w bv (fun hz => absurd hz hne)
   | .byte w, o, _, _, h => by
     unfold genUndefNondetExec at h
-    cases hnext : o.nextBitVec w with
+    cases hnext : nextByteBits dl w o with
     | mk bv o1 =>
       rw [hnext] at h; cases h
       exact UndefValRel.byte w bv (fun hz => absurd hz hne)
@@ -1600,6 +1752,14 @@ def liftBinaryPure (resElemTy : LlvmType) (v1 v2 : RegisterValue)
       .ok (.vector resElemTy (← go es1 es2))
   | _, _ => f v1 v2
 
+/-- Parameter attributes checked on an argument when the call is made. For `byval` arguments
+`llubi` first copies the pointee and checks the attributes on the copy, which satisfies them by
+construction, so they are not applied to the source pointer. -/
+def byvalDeferredAttrs (attrs : List ValueAttr) : List ValueAttr :=
+  if attrs.any (fun | .byval _ => true | _ => false) then [] else attrs
+
+@[simp] theorem byvalDeferredAttrs_nil : byvalDeferredAttrs [] = [] := rfl
+
 def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
     (val : RegisterValue) (attr : ValueAttr) : Except ExecError RegisterValue :=
   match attr with
@@ -1657,7 +1817,7 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
         | none =>
           .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable({bytes}) attribute.")
         | some mo =>
-          if mo.state == .freed || bytes > mo.size || p.addr.toNat < mo.baseAddr ||
+          if mo.state == .freed || mem.isInaccessible mo.allocId || bytes > mo.size || p.addr.toNat < mo.baseAddr ||
              p.addr.toNat - mo.baseAddr > mo.size - bytes then
             .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable({bytes}) attribute.")
           else .ok (.ptr as (.value p))
@@ -1672,7 +1832,7 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
         | none =>
           .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable_or_null({bytes}) attribute.")
         | some mo =>
-          if mo.state == .freed || bytes > mo.size || p.addr.toNat < mo.baseAddr ||
+          if mo.state == .freed || mem.isInaccessible mo.allocId || bytes > mo.size || p.addr.toNat < mo.baseAddr ||
              p.addr.toNat - mo.baseAddr > mo.size - bytes then
             .error (.immediateUB s!"The value {val.llubiString mem dl} violates dereferenceable_or_null({bytes}) attribute.")
           else .ok (.ptr as (.value p))
@@ -1686,7 +1846,7 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
         | none => .ok (.ptr as .poison)
         | some mo =>
           let sz := dl.typeStoreSize ty
-          if mo.state == .freed || sz > mo.size || p.addr.toNat < mo.baseAddr ||
+          if mo.state == .freed || mem.isInaccessible mo.allocId || sz > mo.size || p.addr.toNat < mo.baseAddr ||
              p.addr.toNat - mo.baseAddr > mo.size - sz then
             .ok (.ptr as .poison)
           else .ok (.ptr as (.value p))
@@ -1934,7 +2094,7 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
       .error (.staticError s!"bitcast size mismatch: {fromTy.print} ({dl.typeSizeInBits fromTy}b) to {toTy.print} ({dl.typeSizeInBits toTy}b)")
     else
       let bs := valueToBytes dl cfg val fromTy
-      match bytesToValue dl cfg bs toTy o with
+      match bytesToValue dl cfg bs toTy (drawPtrTags val o) with
       | (v, _, o') => .ok (v, o')
   | .trunc nuw nsw =>
     match toTy.scalarType with
@@ -1966,11 +2126,8 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
       let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
         match v with
         | .float _ fw =>
-          let (flipIn, o1) := o0.nextBool
-          let (denormIn, o2) := o1.nextBool
-          let (nanSign, o3) := o2.nextBool
-          let (nanPick, o4) := o3.nextNat
-          .ok (.float dstFt (evalFPConv dstFt cfg fmf flipIn denormIn nanSign nanPick fw), o4)
+          match evalFPConvO dstFt cfg fmf fw o0 with
+          | (r, o1) => .ok (.float dstFt r, o1)
         | other => .error (.staticError s!"Expected float in fptrunc/fpext, got {other}")
       match val with
       | .vector _ elems =>
@@ -2001,8 +2158,8 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
       let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
         match v with
         | .bv _ iv =>
-          let (flipZ, o1) := o0.nextBool
-          .ok (.float dstFt (evalIntToFP dstFt cfg false nneg fmf flipZ iv), o1)
+          match evalIntToFPO dstFt cfg false nneg fmf iv o0 with
+          | (r, o1) => .ok (.float dstFt r, o1)
         | other => .error (.staticError s!"Expected integer in uitofp, got {other}")
       match val with
       | .vector _ elems =>
@@ -2017,8 +2174,8 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
       let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
         match v with
         | .bv _ iv =>
-          let (flipZ, o1) := o0.nextBool
-          .ok (.float dstFt (evalIntToFP dstFt cfg true false fmf flipZ iv), o1)
+          match evalIntToFPO dstFt cfg true false fmf iv o0 with
+          | (r, o1) => .ok (.float dstFt r, o1)
         | other => .error (.staticError s!"Expected integer in sitofp, got {other}")
       match val with
       | .vector _ elems =>
@@ -2097,8 +2254,8 @@ def evalFloatUnaryExec (op : FloatUnaryOp) (ty : LlvmType) (val : RegisterValue)
   let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
     match v with
     | .float ft fw =>
-      let (flipZ, o1) := o0.nextBool
-      .ok (.float ft (evalFloatUnaryOp op flipZ fw), o1)
+      let r := evalFloatUnaryOpO op fw o0
+      .ok (.float ft r.1, r.2)
     | _ => .error (.staticError s!"Expected float value for fneg, got {v}")
   match val with
   | .vector _ elems =>
@@ -2121,13 +2278,8 @@ def evalFloatBinaryExec (cfg : SemanticsConfig) (op : FloatBinaryOp) (ty : LlvmT
     match a, b with
     | .float ft1 fw1, .float ft2 fw2 =>
       if h : ft1 = ft2 then
-        let (flipL, o1) := o0.nextBool
-        let (flipR, o2) := o1.nextBool
-        let (denormL, o3) := o2.nextBool
-        let (denormR, o4) := o3.nextBool
-        let (nanSign, o5) := o4.nextBool
-        let (nanPick, o6) := o5.nextNat
-        .ok (.float ft2 (evalFloatBinaryOp cfg op flipL flipR denormL denormR nanSign nanPick (h ▸ fw1) fw2), o6)
+        let r := evalFloatBinaryOpO cfg op (h ▸ fw1) fw2 o0
+        .ok (.float ft2 r.1, r.2)
       else .error (.staticError s!"Mismatched float types: {ft1.print} vs {ft2.print}")
     | _, _ => .error (.staticError s!"Expected float values for FP binary op, got {a}, {b}")
   match v1, v2 with
@@ -2155,11 +2307,8 @@ def evalFCmpExec (cfg : SemanticsConfig) (fmf : FastMathFlags) (pred : FCmpPred)
     match a, b with
     | .float ft1 fw1, .float ft2 fw2 =>
       if h : ft1 = ft2 then
-        let (flipL, o1) := o0.nextBool
-        let (flipR, o2) := o1.nextBool
-        let (denormL, o3) := o2.nextBool
-        let (denormR, o4) := o3.nextBool
-        .ok (.bv 1 (evalFCmp cfg fmf pred flipL flipR denormL denormR (h ▸ fw1) fw2), o4)
+        let r := evalFCmpO cfg fmf pred (h ▸ fw1) fw2 o0
+        .ok (.bv 1 r.1, r.2)
       else .error (.staticError s!"Mismatched float types in fcmp: {ft1.print} vs {ft2.print}")
     | _, _ => .error (.staticError s!"Expected float values in fcmp, got {a}, {b}")
   match v1, v2 with

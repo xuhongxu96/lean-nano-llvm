@@ -242,11 +242,70 @@ private def computeMdSlots (w : WCtx) (fnSrcs : Array FnSrc) : List (String × N
         slots := s'; next := n'
   return slots
 
+/-- Parse `attributes #N = { ... }` groups. -/
+def collectAttrGroups (w : WCtx) : List (Nat × List String) := Id.run do
+  let mut acc : List (Nat × List String) := []
+  for i in [0:w.toks.size] do
+    match w.tok i, w.tok (i + 1), w.tok (i + 2), w.tok (i + 3) with
+    | .ident "attributes", .attrGrp n, .eq, .lbrace =>
+      let (attrs, _) := collectAttrs w (i + 4)
+      acc := acc ++ [(n, attrs)]
+    | _, _, _, _ => pure ()
+  return acc
+
+/-- Function-attribute keys of all function headers (`define`/`declare`), in module order. -/
+def functionAttrKeys (w : WCtx) : List String := Id.run do
+  let mut acc : List String := []
+  for i in [0:w.toks.size] do
+    match w.tok i with
+    | .ident "define" | .ident "declare" =>
+      -- skip to the parameter list of the first `@name (`, then past its closing parenthesis
+      let mut j := i + 1
+      while j < w.toks.size && !(match w.tok j with | .globalId _ => w.tok (j + 1) == .lparen | _ => false) do
+        j := j + 1
+      j := j + 2
+      let mut depth := 1
+      while j < w.toks.size && depth > 0 do
+        match w.tok j with
+        | .lparen => depth := depth + 1
+        | .rparen => depth := depth - 1
+        | _ => pure ()
+        j := j + 1
+      let (attrs, _) := collectAttrs w j
+      if !attrs.isEmpty then
+        let key := attrSetKey w attrs
+        if !acc.contains key then acc := acc ++ [key]
+    | _ => pure ()
+  return acc
+
+/-- Replace `#⟦key⟧` attribute-set markers by `#N` slot numbers (function attribute sets first,
+then call-site sets in order of appearance, as LLVM's slot tracker numbers them). -/
+def numberAttrGroups (fnKeys : List String) (texts : List (String × String)) : List (String × String) := Id.run do
+  let mut keys := fnKeys
+  let mut out : List (String × String) := []
+  for (k, t) in texts do
+    let mut t' := t
+    let mut guard := 8
+    while guard > 0 && (t'.splitOn "#⟦").length > 1 do
+      guard := guard - 1
+      match t'.splitOn "#⟦" with
+      | pre :: rest =>
+        let restStr := "#⟦".intercalate rest
+        match restStr.splitOn "⟧" with
+        | key :: after =>
+          if !keys.contains key then keys := keys ++ [key]
+          let n := keys.idxOf key
+          t' := pre ++ s!"#{n}" ++ "⟧".intercalate after
+        | [] => guard := 0
+      | [] => guard := 0
+    out := out ++ [(k, t')]
+  return out
+
 /-- Default alignment LLVM attaches to `alloca`/`load`/`store` without an explicit `align`. -/
 def defaultAlignOf (dl : DataLayout) : Instruction → Option Nat
-  | .alloca ty _ none _ => some (dl.typePrefAlign ty)
-  | .load ty _ _ none .. => some (dl.typeABIAlign ty)
-  | .store ty _ _ _ none .. => some (dl.typeABIAlign ty)
+  | .alloca ty _ a? _ => some (a?.getD (dl.typePrefAlign ty))
+  | .load ty _ _ a? .. => some (a?.getD (dl.typeABIAlign ty))
+  | .store ty _ _ _ a? .. => some (a?.getD (dl.typeABIAlign ty))
   | _ => none
 
 /-- Build the printed text / line tables for all instructions of the module. -/
@@ -271,6 +330,13 @@ def buildSrcTables (w : WCtx) (pm : ParsedModule) (fns : AssocMap FunctionId Def
       t := { t with text := t.text.insert k (printInstruction w e.startTok e.endTok hints (some e.iid)),
                     line := t.line.insert k e.line }
     t := { t with params := t.params.insert fs.name.ToString (printParams w fs.paramsStart fs.paramsEnd) }
+  -- resolve attribute-group markers in source order of the instructions
+  let ordered : List (String × String) := pm.fnSrcs.toList.foldl (fun acc fs =>
+    acc ++ fs.entries.toList.map fun e =>
+      let k := iidKey fs.name e.iid
+      (k, t.text.getD k "")) []
+  for (k, txt) in numberAttrGroups (functionAttrKeys w) ordered do
+    t := { t with text := t.text.insert k txt }
   return t
 
 /-! ### Trace driver -/
@@ -442,26 +508,26 @@ inductive Outcome where
   | aborted
 
 /-- Print the phi nodes at the start of the block a frame just jumped to. -/
-private def printPhis (d : DState) (mem : MemoryState) (fr : CallFrame) : IO Unit := do
+private def printPhis (d : DState) (mem : MemoryState) (fr : CallFrame) (tags : List (Nat × Nat)) : IO Unit := do
   match fr.defn.findBlock? fr.curBlock with
   | some blk =>
     for (iid, ins) in blk.code do
       match ins, iid with
       | .phi .., .id rid =>
         match fr.registers.get? (.local_id rid) with
-        | some v => errLine s!"{textOf d fr.defn.prototype.name iid} => {printValue mem d.dl v}"
+        | some v => errLine s!"{textOf d fr.defn.prototype.name iid} => {printValue mem d.dl v tags}"
         | none => pure ()
       | _, _ => pure ()
   | none => pure ()
 
 /-- Print `Entering function:` and its argument lines for a freshly pushed frame. -/
-private def printEntry (d : DState) (mem : MemoryState) (fr : CallFrame) : IO Unit := do
+private def printEntry (d : DState) (mem : MemoryState) (fr : CallFrame) (tags : List (Nat × Nat)) : IO Unit := do
   let fn := fr.defn.prototype.name
   errLine s!"Entering function: {fn.ToString}"
   let params := d.tables.params.getD fn.ToString []
   for (arg, ptxt) in fr.defn.args.zip params do
     match fr.registers.get? (.local_id arg) with
-    | some v => errLine s!"  {ptxt} = {printValue mem d.dl v}"
+    | some v => errLine s!"  {ptxt} = {printValue mem d.dl v tags}"
     | none => pure ()
 
 /-- Report a failure (`Stacktrace:` + message), returning `Outcome.failed`. -/
@@ -484,7 +550,7 @@ private def oomMessage (pend : Instruction ⊕ Terminator) : String :=
 /-- Main trace loop. `sites` holds, for each caller frame (innermost first), the call instruction
 that is waiting for the callee. -/
 partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
-    (sites : List InstructionId) : IO Outcome := do
+    (sites : List InstructionId) (byvals : List (List AllocId) := []) : IO Outcome := do
   match c with
   | .running st =>
     match st.frames with
@@ -505,9 +571,12 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
         if n' == n + 1 then
           if d.verbose then
             match st'.frames with
-            | callee :: _ => printEntry d st'.memory callee
+            | callee :: _ => printEntry d st'.memory callee o'.tags
             | [] => pure ()
-          traceLoop d o' c' (steps + 1) (iid :: sites)
+          -- objects created while entering the callee are its byval copies
+          let copies := (List.range (st'.memory.nextAllocId - st.memory.nextAllocId)).map
+            (· + st.memory.nextAllocId)
+          traceLoop d o' c' (steps + 1) (iid :: sites) (copies :: byvals)
         else if n' + 1 == n then
           -- returned from a callee into its caller
           if d.verbose then
@@ -518,12 +587,17 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
               let ctext := textOf d caller.defn.prototype.name site
               match site with
               | .id rid =>
+                -- llubi reports the call's result before releasing the callee's byval copies
+                let memShown := (byvals.headD []).foldl (fun (m : MemoryState) id =>
+                  match m.objects.get? id with
+                  | some obj => { m with objects := m.objects.insert id { obj with state := .alive } }
+                  | none => m) st'.memory
                 match caller.registers.get? (.local_id rid) with
-                | some v => errLine s!"{ctext} => {printValue st'.memory d.dl v}"
+                | some v => errLine s!"{ctext} => {printValue memShown d.dl v o'.tags}"
                 | none => errLine ctext
               | .void _ => errLine ctext
             | _, _ => pure ()
-          traceLoop d o' c' (steps + 1) sites.tail
+          traceLoop d o' c' (steps + 1) sites.tail byvals.tail
         else
           match pend with
           | .inl _ =>
@@ -533,10 +607,10 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
               match iid, st'.frames with
               | .id rid, fr' :: _ =>
                 match fr'.registers.get? (.local_id rid) with
-                | some v => errLine s!"{textOf d fn iid} => {printValue st'.memory d.dl v}"
+                | some v => errLine s!"{textOf d fn iid} => {printValue st'.memory d.dl v o'.tags}"
                 | none => errLine (textOf d fn iid)
               | _, _ => errLine (textOf d fn iid)
-            traceLoop d o' c' (steps + 1) sites
+            traceLoop d o' c' (steps + 1) sites byvals
           | .inr _ =>
             if d.verbose then
               match st'.frames with
@@ -544,9 +618,9 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
                 let w : WCtx := { toks := #[], dl := d.dl, typeDefs := [], mdDefs := [], mdSlots := [],
                                   fnTypes := [], localSlots := d.tables.slots.getD fn.ToString [] }
                 errLine s!"{textOf d fn iid} jump to {w.loc fr'.curBlock}"
-                printPhis d st'.memory fr'
+                printPhis d st'.memory fr' o'.tags
               | [] => pure ()
-            traceLoop d o' c' (steps + 1) sites
+            traceLoop d o' c' (steps + 1) sites byvals
       | .halted v _ =>
         if d.verbose then
           errLine (textOf d fn iid)
@@ -706,12 +780,13 @@ def llubiMain (args : List String) : IO UInt32 := do
   let rng := mt19937_64 opts.seed.toUInt64 65536
   let oracle : OracleState :=
     if opts.deterministic then default
-    else ⟨fun i => (rng[i]?.getD 0).toNat, 0⟩
+    else { oracle := fun i => (rng[i]?.getD 0).toNat }
   match initModuleExec pm.topLevel cfg pm.dataLayout oracle with
   | .error _ =>
     errLine "error: Failed to initialize global values (e.g., the memory limit may be too low)."
     return 1
   | .ok (mem, fns, decls, o1) =>
+  let mut o1 := o1
   match fns.get? (.name opts.entry) with
   | none =>
     if (decls.get? (.name opts.entry)).isSome then
@@ -748,7 +823,9 @@ def llubiMain (args : List String) : IO UInt32 := do
         | .ok (strObj, m2) =>
           let raw : Array MemByte := bytes.toList.toArray.map MemByte.concrete
           let m3 := m2.writeObjectBytes strObj.allocId 0 raw
-          let pbytes := valueToBytes dl cfg (.ptr 0 (.value (MemoryState.derivePointer dl strObj))) (.ptr 0)
+          let argPtr : RegisterValue := .ptr 0 (.value (MemoryState.derivePointer dl strObj))
+          o1 := drawPtrTags argPtr o1
+          let pbytes := valueToBytes dl cfg argPtr (.ptr 0)
           mem := m3.writeObjectBytes argvObj.allocId (idx * ptrSz) pbytes
         idx := idx + 1
       entryArgs := [.bv 32 (.value (BitVec.ofNat 32 inputArgv.length)),
@@ -766,6 +843,7 @@ def llubiMain (args : List String) : IO UInt32 := do
     | _ => none
   let w0 : WCtx := { toks := pm.tokens, dl, typeDefs, mdDefs := [], mdSlots := [], fnTypes,
                      vscale := opts.vscale }
+  let w0 := { w0 with attrGroupDefs := collectAttrGroups w0 }
   let w1 := { w0 with mdDefs := collectMdDefs w0 }
   let w := { w1 with mdSlots := computeMdSlots w1 pm.fnSrcs }
   let tables := buildSrcTables w pm fns
@@ -777,7 +855,7 @@ def llubiMain (args : List String) : IO UInt32 := do
     match initCfg with
     | .running st =>
       match st.frames with
-      | fr :: _ => printEntry d st.memory fr
+      | fr :: _ => printEntry d st.memory fr o1.tags
       | [] => pure ()
     | _ => pure ()
   let outcome ← traceLoop d o1 initCfg 0 []

@@ -30,7 +30,9 @@ def execMemTransferPure (mem : MemoryState) (destVal srcVal lenVal : RegisterVal
   | .bv _ .poison => .error (.immediateUB s!"{if isMemMove then "memmove" else "memcpy"} called with poison length.")
   | .bv _ (.value bv) =>
     let len := bv.toNat
-    if len == 0 then .ok mem
+    if len ≥ 2 ^ 64 then
+      .error (.immediateUB s!"{if isMemMove then "memmove" else "memcpy"} called with length overflows uint64_t.")
+    else if len == 0 then .ok mem
     else match destVal with
       | .ptr _ .poison => .error (.immediateUB s!"{if isMemMove then "memmove" else "memcpy"} called with poison destination pointer.")
       | .ptr _ (.value dstPtr) =>
@@ -65,6 +67,9 @@ theorem execMemTransferPure_preserves_wf {mem dst src len isMove isLib mem'}
     | poison => cases h
     | value lbv =>
       dsimp only at h
+      by_cases hbig : 2 ^ 64 ≤ lbv.toNat
+      · rw [if_pos hbig] at h; cases h
+      rw [if_neg hbig] at h
       by_cases hz : (lbv.toNat == 0) = true
       · rw [if_pos hz] at h; cases h; exact hwf
       · rw [if_neg hz] at h
@@ -101,7 +106,8 @@ def execMemSetPure (mem : MemoryState) (destVal fillVal lenVal : RegisterValue) 
   | .bv _ .poison => .error (.immediateUB "memset called with poison length.")
   | .bv _ (.value bv) =>
     let len := bv.toNat
-    if len == 0 then .ok mem
+    if len ≥ 2 ^ 64 then .error (.immediateUB "memset called with length overflows uint64_t.")
+    else if len == 0 then .ok mem
     else match destVal with
       | .ptr _ .poison => .error (.immediateUB "memset called with poison destination pointer.")
       | .ptr _ (.value dstPtr) =>
@@ -128,6 +134,9 @@ theorem execMemSetPure_preserves_wf {mem dst fill len mem'}
     | poison => cases h
     | value lbv =>
       dsimp only at h
+      by_cases hbig : 2 ^ 64 ≤ lbv.toNat
+      · rw [if_pos hbig] at h; cases h
+      rw [if_neg hbig] at h
       by_cases hz : (lbv.toNat == 0) = true
       · rw [if_pos hz] at h; cases h; exact hwf
       · rw [if_neg hz] at h
@@ -766,6 +775,100 @@ def evalPureDetIntrinsic? (cfg : SemanticsConfig) (name : String) (retTy : LlvmR
   else
     none
 
+/-- Map an oracle-threading function over a list. -/
+def mapListOracleI (f : RegisterValue → OracleState → Except ExecError (RegisterValue × OracleState)) :
+    List RegisterValue → OracleState → Except ExecError (List RegisterValue × OracleState)
+  | [], o => .ok ([], o)
+  | e :: es, o =>
+    match f e o with
+    | .error err => .error err
+    | .ok (r, o1) =>
+      match mapListOracleI f es o1 with
+      | .error err => .error err
+      | .ok (rs, o2) => .ok (r :: rs, o2)
+
+/-- Map an oracle-threading function over two lists pairwise. -/
+def mapList2OracleI (f : RegisterValue → RegisterValue → OracleState → Except ExecError (RegisterValue × OracleState)) :
+    List RegisterValue → List RegisterValue → OracleState → Except ExecError (List RegisterValue × OracleState)
+  | x :: xs, y :: ys, o =>
+    match f x y o with
+    | .error err => .error err
+    | .ok (r, o1) =>
+      match mapList2OracleI f xs ys o1 with
+      | .error err => .error err
+      | .ok (rs, o2) => .ok (r :: rs, o2)
+  | _, _, o => .ok ([], o)
+
+/-- The float payloads of `es` if all are floats of type `ft`. -/
+def floatsOf (ft : FloatType) : List RegisterValue → Option (List (PoisonOr (IEEEFloat ft.format)))
+  | [] => some []
+  | .float ft' v :: rest =>
+    if h : ft' = ft then (floatsOf ft rest).map ((h ▸ v) :: ·) else none
+  | _ :: _ => none
+
+/-- Validate min/max reduction inputs (poison, `nnan`/`ninf`) and draw their input denormal
+choices, stopping at the first invalid input. -/
+def prepMinMaxInputs {fmt : FloatFormat} (cfg : SemanticsConfig) (fmf : FastMathFlags) :
+    List (PoisonOr (IEEEFloat fmt)) → OracleState → Option (List (IEEEFloat fmt)) × OracleState
+  | [], o => (some [], o)
+  | .poison :: _, o => (none, o)
+  | .value x :: xs, o =>
+    match fmfIn fmf x o with
+    | (.poison, o1) => (none, o1)
+    | (.value x', o1) =>
+      match denormIn cfg.denormalMode.input x' o1 with
+      | (fx, o2) =>
+        match prepMinMaxInputs cfg fmf xs o2 with
+        | (some rest, o3) => (some (fx :: rest), o3)
+        | (none, o3) => (none, o3)
+
+/-- `llvm.vector.reduce.fmaximum/fminimum/...num`: validate, flush and combine element by element. -/
+def foldMinMaxO {fmt : FloatFormat} (cfg : SemanticsConfig) (k : FPMinMaxKind) (fmf : FastMathFlags)
+    (nsz : Bool) : List (PoisonOr (IEEEFloat fmt)) → Option (IEEEFloat fmt) → OracleState →
+    Option (IEEEFloat fmt) × OracleState
+  | [], acc, o => (acc, o)
+  | .poison :: _, _, o => (none, o)
+  | .value x :: xs, acc, o =>
+    match fmfIn fmf x o with
+    | (.poison, o1) => (none, o1)
+    | (.value x', o1) =>
+      match denormIn cfg.denormalMode.input x' o1 with
+      | (fx, o2) =>
+        match acc with
+        | none => foldMinMaxO cfg k fmf nsz xs (some fx) o2
+        | some a =>
+          match applyFPMinMaxO k nsz a fx o2 with
+          | (r, o3) => foldMinMaxO cfg k fmf nsz xs (some r) o3
+
+/-- `llvm.vector.reduce.fmax/fmin` reduction: with an sNaN input the pairing order is chosen
+nondeterministically (two draws per combination step), as `llubi`'s work-list reduction does. -/
+def reducePairwiseO {fmt : FloatFormat} (k : FPMinMaxKind) (nsz hasSNaN : Bool) :
+    List (IEEEFloat fmt) → OracleState → IEEEFloat fmt × OracleState
+  | ws, o =>
+    let rec go (fuel : Nat) (ws : List (IEEEFloat fmt)) (o : OracleState) : IEEEFloat fmt × OracleState :=
+      match fuel, ws with
+      | 0, _ | _, [] => (ws.headD (IEEEFloat.zero fmt), o)
+      | _, [w] => (w, o)
+      | fuel' + 1, _ =>
+        let n := ws.length
+        let (li, ri, o1) : Nat × Nat × OracleState :=
+          if hasSNaN then
+            match o.nextNat with
+            | (a, oa) =>
+              match oa.nextNat with
+              | (b, ob) =>
+                let l := a % n
+                let r := b % (n - 1)
+                (l, if r ≥ l then r + 1 else r, ob)
+          else (0, 1, o)
+        match applyFPMinMaxO k nsz (ws.getD li (IEEEFloat.zero fmt)) (ws.getD ri (IEEEFloat.zero fmt)) o1 with
+        | (res, o2) =>
+          let hi := max li ri
+          let lo := min li ri
+          let ws' := ((ws.eraseIdx hi).eraseIdx lo) ++ [res]
+          go fuel' ws' o2
+    go ws.length ws o
+
 /-- Pure non-memory LLVM intrinsics (integer, bit-manipulation, saturating, overflow, FP, assume). -/
 def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : LlvmRetType)
     (fmf : FastMathFlags) (argVals : List RegisterValue) (o : OracleState) :
@@ -933,36 +1036,37 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           match e with
           | .float ft .poison => .ok (.float ft .poison, o0)
           | .float ft (.value flt) =>
-            match o0.nextBool with
-            | (flipZ, o1) =>
-              match handleFMF fmf true flipZ flt with
-              | .poison => .ok (.float ft .poison, o1)
-              | .value f' => .ok (.float ft (handleFMF fmf false false f'.abs), o1)
+            match fmfIn fmf flt o0 with
+            | (.poison, o1) => .ok (.float ft .poison, o1)
+            | (.value f', o1) => .ok (.float ft (handleFMF fmf false false f'.abs), o1)
           | other => .error (.staticError s!"Expected float in llvm.fabs, got {other}")
         match v with
         | .vector _ elems =>
-          let rec goL : List RegisterValue → OracleState → Except ExecError (List RegisterValue × OracleState)
-            | [], o0 => .ok ([], o0)
-            | e :: es, o0 => do
-              let (r, o1) ← goElem e o0
-              let (rs, o2) ← goL es o1
-              .ok (r :: rs, o2)
-          match goL elems o with
-          | .ok (rs, o') => .ok (.vector resElemTy rs, o')
-          | .error e => .error e
+          (mapListOracleI goElem elems o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _ => goElem v o
       | _ => .error (.staticError "llvm.fabs expects 1 argument")
   else if strHasPrefix name "llvm.copysign" then
     some <| match argVals with
       | [v1, v2] =>
         let resElemTy := match retTy with | .ret t => t.scalarType | .void => .f32
-        (liftBinaryPure resElemTy v1 v2 fun a b =>
+        let goElem (a b : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
           match a, b with
-          | .float ft1 (.value m), .float ft2 (.value s) =>
-            if h : ft1 = ft2 then .ok (.float ft2 (.value ((h ▸ m).copySign s)))
+          | .float ft1 (.value m), .float ft2 (.value sg) =>
+            if h : ft1 = ft2 then
+              match fmfIn fmf (h ▸ m) o0 with
+              | (vm, o1) =>
+                match fmfIn fmf sg o1 with
+                | (vs, o2) =>
+                  match vm, vs with
+                  | .value m', .value s' => .ok (.float ft2 (handleFMF fmf false false (m'.copySign s')), o2)
+                  | _, _ => .ok (.float ft2 .poison, o2)
             else .error (.staticError "Mismatched float types in llvm.copysign")
-          | .float ft _, _ => .ok (.float ft .poison)
-          | _, _ => .error (.staticError "Expected floats in llvm.copysign")).map (·, o)
+          | .float ft _, _ => .ok (.float ft .poison, o0)
+          | _, _ => .error (.staticError "Expected floats in llvm.copysign")
+        match v1, v2 with
+        | .vector _ es1, .vector _ es2 =>
+          (mapList2OracleI goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
+        | _, _ => goElem v1 v2 o
       | _ => .error (.staticError "llvm.copysign expects 2 arguments")
   else if strHasPrefix name "llvm.fma" || strHasPrefix name "llvm.fmuladd" then
     some <| match argVals with
@@ -974,15 +1078,30 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           | .float ft1 (.value a), .float ft2 (.value b), .float ft3 (.value c) =>
             if h1 : ft1 = ft3 then
               if h2 : ft2 = ft3 then
-                let a' := h1 ▸ a
-                let b' := h2 ▸ b
-                let res :=
-                  if useFma then IEEEFloat.fma cfg.roundingMode a' b' c
-                  else IEEEFloat.add cfg.roundingMode (IEEEFloat.mul cfg.roundingMode a' b') c
-                let (nanSign, o1) := o0.nextBool
-                let (nanPick, o2) := o1.nextNat
-                let final := applyNaNPropagation cfg.nanMode res [a', b', c] nanSign nanPick
-                .ok (.float ft3 (handleFMF fmf false false final), o2)
+                match fmfIn fmf (h1 ▸ a) o0 with
+                | (va, o1) =>
+                  match fmfIn fmf (h2 ▸ b) o1 with
+                  | (vb, o2) =>
+                    match fmfIn fmf c o2 with
+                    | (vc, o3) =>
+                      match va, vb, vc with
+                      | .value a', .value b', .value c' =>
+                        match denormIn cfg.denormalMode.input a' o3 with
+                        | (fa, o4) =>
+                          match denormIn cfg.denormalMode.input b' o4 with
+                          | (fb, o5) =>
+                            match denormIn cfg.denormalMode.input c' o5 with
+                            | (fc, o6) =>
+                              let raw :=
+                                if useFma then IEEEFloat.fma cfg.roundingMode fa fb fc
+                                else IEEEFloat.add cfg.roundingMode (IEEEFloat.mul cfg.roundingMode fa fb) fc
+                              let flushed := handleDenormal cfg.denormalMode.output false false raw
+                              match handleFMF fmf false false flushed with
+                              | .poison => .ok (.float ft3 .poison, o6)
+                              | .value r =>
+                                match nanPropagate cfg.nanMode r [fa, fb, fc] o6 with
+                                | (fin, o7) => .ok (.float ft3 (.value fin), o7)
+                      | _, _, _ => .ok (.float ft3 .poison, o3)
               else .error (.staticError "Mismatched float types in llvm.fma")
             else .error (.staticError "Mismatched float types in llvm.fma")
           | .float ft _, _, _ => .ok (.float ft .poison, o0)
@@ -1005,37 +1124,44 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
     some <| match argVals with
       | [v1, v2] =>
         let resElemTy := match retTy with | .ret t => t.scalarType | .void => .f32
+        let kind : FPMinMaxKind :=
+          if strHasPrefix name "llvm.minimumnum" then .minimumnum
+          else if strHasPrefix name "llvm.maximumnum" then .maximumnum
+          else if strHasPrefix name "llvm.minnum" then .minnum
+          else if strHasPrefix name "llvm.maxnum" then .maxnum
+          else if strHasPrefix name "llvm.minimum" then .minimum
+          else .maximum
+        let inFmf : FastMathFlags := { fmf with nsz := false }
         let goElem (a b : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
           match a, b with
           | .float ft1 (.value x), .float ft2 (.value y) =>
             if h : ft1 = ft2 then
-              let x' : IEEEFloat ft2.format := h ▸ x
-              let res :=
-                if strHasPrefix name "llvm.minimumnum" || strHasPrefix name "llvm.minnum" then IEEEFloat.minimumnum x' y
-                else if strHasPrefix name "llvm.maximumnum" || strHasPrefix name "llvm.maxnum" then IEEEFloat.maximumnum x' y
-                else if strHasPrefix name "llvm.minimum" then IEEEFloat.minimum x' y
-                else IEEEFloat.maximum x' y
-              let (nanSign, o1) := o0.nextBool
-              let (nanPick, o2) := o1.nextNat
-              let final := applyNaNPropagation cfg.nanMode res [x', y] nanSign nanPick
-              .ok (.float ft2 (handleFMF fmf false false final), o2)
+              match fmfIn inFmf (h ▸ x) o0 with
+              | (vx, o1) =>
+                match fmfIn inFmf y o1 with
+                | (vy, o2) =>
+                  match vx, vy with
+                  | .value x', .value y' =>
+                    match denormIn cfg.denormalMode.input x' o2 with
+                    | (fx, o3) =>
+                      match denormIn cfg.denormalMode.input y' o3 with
+                      | (fy, o4) =>
+                        match applyFPMinMaxO kind fmf.nsz fx fy o4 with
+                        | (raw, o5) =>
+                          let flushed := handleDenormal cfg.denormalMode.output false false raw
+                          match handleFMF inFmf false false flushed with
+                          | .poison => .ok (.float ft2 .poison, o5)
+                          | .value r =>
+                            match nanPropagate cfg.nanMode r [fx, fy] o5 with
+                            | (fin, o6) => .ok (.float ft2 (.value fin), o6)
+                  | _, _ => .ok (.float ft2 .poison, o2)
             else .error (.staticError "Mismatched float types in FP min/max")
           | .float ft _, _ => .ok (.float ft .poison, o0)
           | _, _ => .error (.staticError "Expected floats in FP min/max")
         match v1, v2 with
         | .vector _ es1, .vector _ es2 =>
           if es1.length != es2.length then .error (.staticError "Vector length mismatch in FP min/max")
-          else
-            let rec goMinMax : List RegisterValue → List RegisterValue → OracleState →
-                Except ExecError (List RegisterValue × OracleState)
-              | x :: xs, y :: ys, o0 => do
-                let (r, o1) ← goElem x y o0
-                let (rs, o2) ← goMinMax xs ys o1
-                .ok (r :: rs, o2)
-              | _, _, o0 => .ok ([], o0)
-            match goMinMax es1 es2 o with
-            | .ok (rs, o') => .ok (.vector resElemTy rs, o')
-            | .error e => .error e
+          else (mapList2OracleI goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _, _ => goElem v1 v2 o
       | _ => .error (.staticError s!"{name} expects 2 arguments")
   else if strHasPrefix name "llvm.is.fpclass" then
@@ -1086,27 +1212,18 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           match e with
           | .float ft .poison => .ok (.float ft .poison, o0)
           | .float ft (.value flt) =>
-            let (flipZ, o1) := o0.nextBool
-            match handleFMF fmf true flipZ flt with
-            | .poison => .ok (.float ft .poison, o1)
-            | .value f' =>
-              let raw := applyUnaryOp f'
-              let (nanSign, o2) := o1.nextBool
-              let (nanPick, o3) := o2.nextNat
-              let final := applyNaNPropagation cfg.nanMode raw [f'] nanSign nanPick
-              .ok (.float ft (handleFMF fmf false false final), o3)
+            match fmfIn fmf flt o0 with
+            | (.poison, o1) => .ok (.float ft .poison, o1)
+            | (.value f', o1) =>
+              match handleFMF fmf false false (applyUnaryOp f') with
+              | .poison => .ok (.float ft .poison, o1)
+              | .value r =>
+                match nanPropagate cfg.nanMode r [f'] o1 with
+                | (fin, o2) => .ok (.float ft (.value fin), o2)
           | other => .error (.staticError s!"Expected float in {name}, got {other}")
         match v with
         | .vector _ elems =>
-          let rec goFPUnary : List RegisterValue → OracleState → Except ExecError (List RegisterValue × OracleState)
-            | [], o0 => .ok ([], o0)
-            | e :: es, o0 => do
-              let (r, o1) ← goElem e o0
-              let (rs, o2) ← goFPUnary es o1
-              .ok (r :: rs, o2)
-          match goFPUnary elems o with
-          | .ok (rs, o') => .ok (.vector resElemTy rs, o')
-          | .error e => .error e
+          (mapListOracleI goElem elems o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _ => goElem v o
       | _ => .error (.staticError s!"{name} expects 1 argument")
   else if strHasPrefix name "llvm.ldexp" then
@@ -1116,59 +1233,40 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
         let goElem (a b : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
           match a, b with
           | .float ft (.value flt), .bv _ (.value expBv) =>
-            let (flipZ, o1) := o0.nextBool
-            match handleFMF fmf true flipZ flt with
-            | .poison => .ok (.float ft .poison, o1)
-            | .value f' =>
-              let raw := f'.ldexp cfg.roundingMode expBv.toInt
-              let (nanSign, o2) := o1.nextBool
-              let (nanPick, o3) := o2.nextNat
-              let final := applyNaNPropagation cfg.nanMode raw [f'] nanSign nanPick
-              .ok (.float ft (handleFMF fmf false false final), o3)
+            match fmfIn fmf flt o0 with
+            | (.poison, o1) => .ok (.float ft .poison, o1)
+            | (.value f', o1) =>
+              match handleFMF fmf false false (f'.ldexp cfg.roundingMode expBv.toInt) with
+              | .poison => .ok (.float ft .poison, o1)
+              | .value r =>
+                match nanPropagate cfg.nanMode r [f'] o1 with
+                | (fin, o2) => .ok (.float ft (.value fin), o2)
           | .float ft _, .bv _ _ => .ok (.float ft .poison, o0)
           | _, _ => .error (.staticError "Expected (float, int) in llvm.ldexp")
         match v1, v2 with
         | .vector _ es1, .vector _ es2 =>
           if es1.length != es2.length then .error (.staticError "Vector length mismatch in llvm.ldexp")
-          else
-            let rec goLdexp : List RegisterValue → List RegisterValue → OracleState →
-                Except ExecError (List RegisterValue × OracleState)
-              | x :: xs, y :: ys, o0 => do
-                let (r, o1) ← goElem x y o0
-                let (rs, o2) ← goLdexp xs ys o1
-                .ok (r :: rs, o2)
-              | _, _, o0 => .ok ([], o0)
-            match goLdexp es1 es2 o with
-            | .ok (rs, o') => .ok (.vector resElemTy rs, o')
-            | .error e => .error e
+          else (mapList2OracleI goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _, _ => goElem v1 v2 o
       | _ => .error (.staticError "llvm.ldexp expects 2 arguments")
   else if strHasPrefix name "llvm.vector.reduce.fadd" || strHasPrefix name "llvm.vector.reduce.fmul" then
     some <| match argVals with
       | [startV, .vector _ elems] =>
-        let isAdd := strHasPrefix name "llvm.vector.reduce.fadd"
+        let op : FloatBinaryOp := if strHasPrefix name "llvm.vector.reduce.fadd" then .fadd fmf else .fmul fmf
+        -- sequential reduction; stops (without further draws) as soon as the result is poison
         let rec goFold (acc : RegisterValue) (es : List RegisterValue) (o0 : OracleState) :
             Except ExecError (RegisterValue × OracleState) :=
           match es with
           | [] => .ok (acc, o0)
           | e :: rest =>
             match acc, e with
-            | .float ft1 (.value a), .float ft2 (.value b) =>
+            | .float _ .poison, _ => .ok (acc, o0)
+            | .float ft1 fa, .float ft2 fb =>
               if h : ft1 = ft2 then
-                let a' : IEEEFloat ft2.format := h ▸ a
-                let (flipL, o1) := o0.nextBool
-                let (flipR, o2) := o1.nextBool
-                match handleFMF fmf true flipL a', handleFMF fmf true flipR b with
-                | .value fa, .value fb =>
-                  let raw := if isAdd then IEEEFloat.add cfg.roundingMode fa fb
-                             else IEEEFloat.mul cfg.roundingMode fa fb
-                  let (nanSign, o3) := o2.nextBool
-                  let (nanPick, o4) := o3.nextNat
-                  let final := applyNaNPropagation cfg.nanMode raw [fa, fb] nanSign nanPick
-                  goFold (.float ft2 (handleFMF fmf false false final)) rest o4
-                | _, _ => goFold (.float ft2 .poison) rest o2
+                match evalFloatBinaryOpO cfg op (h ▸ fa) fb o0 with
+                | (.poison, o1) => .ok (.float ft2 .poison, o1)
+                | (r, o1) => goFold (.float ft2 r) rest o1
               else .error (.staticError s!"Mismatched float types in {name}")
-            | .float ft _, .float _ _ => goFold (.float ft .poison) rest o0
             | _, _ => .error (.staticError s!"Expected float elements in {name}")
         goFold startV elems o
       | _ => .error (.staticError s!"{name} expects (float, vector) arguments")
@@ -1176,40 +1274,62 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           strHasPrefix name "llvm.vector.reduce.fmaximum" || strHasPrefix name "llvm.vector.reduce.fminimum" ||
           strHasPrefix name "llvm.vector.reduce.fmax" || strHasPrefix name "llvm.vector.reduce.fmin" then
     some <| match argVals with
-      | [.vector _ (first :: rest)] =>
-        let combine {fmt : FloatFormat} (x y : IEEEFloat fmt) : IEEEFloat fmt :=
-          if strHasPrefix name "llvm.vector.reduce.fminimumnum" || strHasPrefix name "llvm.vector.reduce.fmin" then
-            IEEEFloat.minimumnum x y
-          else if strHasPrefix name "llvm.vector.reduce.fmaximumnum" || strHasPrefix name "llvm.vector.reduce.fmax" then
-            IEEEFloat.maximumnum x y
-          else if strHasPrefix name "llvm.vector.reduce.fminimum" then
-            IEEEFloat.minimum x y
-          else
-            IEEEFloat.maximum x y
-        let rec goRed (acc : RegisterValue) (es : List RegisterValue) (o0 : OracleState) :
-            Except ExecError (RegisterValue × OracleState) :=
-          match es with
-          | [] => .ok (acc, o0)
-          | e :: tl =>
-            match acc, e with
-            | .float ft1 (.value a), .float ft2 (.value b) =>
-              if h : ft1 = ft2 then
-                let a' : IEEEFloat ft2.format := h ▸ a
-                let (flipL, o1) := o0.nextBool
-                let (flipR, o2) := o1.nextBool
-                match handleFMF fmf true flipL a', handleFMF fmf true flipR b with
-                | .value fa, .value fb =>
-                  let raw := combine fa fb
-                  let (nanSign, o3) := o2.nextBool
-                  let (nanPick, o4) := o3.nextNat
-                  let final := applyNaNPropagation cfg.nanMode raw [fa, fb] nanSign nanPick
-                  goRed (.float ft2 (handleFMF fmf false false final)) tl o4
-                | _, _ => goRed (.float ft2 .poison) tl o2
-              else .error (.staticError s!"Mismatched float types in {name}")
-            | .float ft _, .float _ _ => goRed (.float ft .poison) tl o0
-            | _, _ => .error (.staticError s!"Expected float elements in {name}")
-        goRed first rest o
+      | [.vector _ elems@(.float ft _ :: _)] =>
+        let kind : FPMinMaxKind :=
+          if strHasPrefix name "llvm.vector.reduce.fminimumnum" then .minimumnum
+          else if strHasPrefix name "llvm.vector.reduce.fmaximumnum" then .maximumnum
+          else if strHasPrefix name "llvm.vector.reduce.fminimum" then .minimum
+          else if strHasPrefix name "llvm.vector.reduce.fmaximum" then .maximum
+          else if strHasPrefix name "llvm.vector.reduce.fmin" then .minnum
+          else .maxnum
+        let inFmf : FastMathFlags := { fmf with nsz := false }
+        match floatsOf ft elems with
+        | none => .error (.staticError s!"Expected float elements of one type in {name}")
+        | some xs =>
+          let vals := xs.filterMap fun | .value x => some x | .poison => none
+          let combined : Option (IEEEFloat ft.format × List (IEEEFloat ft.format)) × OracleState :=
+            if kind == .maxnum || kind == .minnum then
+              -- all inputs are validated first, then reduced in a (possibly random) order
+              match prepMinMaxInputs cfg inFmf xs o with
+              | (none, o1) => (none, o1)
+              | (some ins, o1) =>
+                match reducePairwiseO kind fmf.nsz (ins.any IEEEFloat.isSNaN) ins o1 with
+                | (r, o2) => (some (r, ins), o2)
+            else
+              -- inputs are validated and combined one at a time
+              match foldMinMaxO cfg kind inFmf fmf.nsz xs none o with
+              | (some r, o1) => (some (r, vals), o1)
+              | (none, o1) => (none, o1)
+          match combined with
+          | (none, o1) => .ok (.float ft .poison, o1)
+          | (some (raw, nanInputs), o2) =>
+            match handleFMF fmf false false raw with
+            | .poison => .ok (.float ft .poison, o2)
+            | .value r =>
+              let flushed := handleDenormal cfg.denormalMode.output false false r
+              match nanPropagate cfg.nanMode flushed nanInputs o2 with
+              | (fin, o3) => .ok (.float ft (.value fin), o3)
       | _ => .error (.staticError s!"{name} expects a non-empty float vector argument")
+  else if strHasPrefix name "llvm.experimental.get.vector.length" then
+    -- nondeterministic per LangRef: any value in [ceil(cnt / ceil(cnt / max)), max] when cnt > max
+    some <| match argVals, retTy with
+      | [.bv _ (.value cntBV), .bv _ (.value vfBV), .bv 1 (.value scBV)], .ret (.int rw) =>
+        let mult := if scBV == 1#1 then cfg.vscale else 1
+        let maxLanes := vfBV.toNat * mult
+        let cnt := cntBV.toNat
+        if cnt == 0 then .ok (.bv rw (.value 0), o)
+        else if cnt ≤ maxLanes then .ok (.bv rw (.value (BitVec.ofNat rw cnt)), o)
+        else
+          let iters := (cnt + maxLanes - 1) / maxLanes
+          let lower := (cnt + iters - 1) / iters
+          let range := maxLanes - lower + 1
+          match o.nextNat with
+          | (r, o1) =>
+            let res := lower + r % range
+            if res < 2 ^ 32 then .ok (.bv rw (.value (BitVec.ofNat rw res)), o1)
+            else .ok (.bv rw .poison, o1)
+      | [_, _, _], .ret (.int rw) => .ok (.bv rw .poison, o)
+      | _, _ => .error (.staticError "llvm.experimental.get.vector.length expects (cnt, vf, scalable)")
   else
     (evalPureDetIntrinsic? cfg name retTy fmf argVals).map fun r => r.map (·, o)
 
@@ -1827,7 +1947,10 @@ def evalVecMemRead? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState
         let boundRes : Except ExecError Nat := match optBound with
           | [] => .ok totalSz
           | .bv _ .poison :: _ => .error (.immediateUB "llvm.speculative.load with poison number of accessible bytes.")
-          | .bv _ (.value bBV) :: _ => .ok (min totalSz bBV.toNat)
+          | .bv _ (.value bBV) :: _ =>
+            if bBV.toNat > totalSz then
+              .error (.immediateUB s!"llvm.speculative.load number of accessible bytes {bBV.toNat} exceeds the loaded size {totalSz}.")
+            else .ok bBV.toNat
           | _ => .error (.immediateUB "invalid bound in llvm.speculative.load")
         match boundRes with
         | .error e => .error e
@@ -2124,21 +2247,32 @@ private theorem evalVecMemWrite?_preserves_wf {dl cfg mem name argVals argAttrs 
                 · cases h
               · cases h
 
+/-- Lifetime intrinsics on an inaccessible object (of a caller suspended in a tail call) are UB. -/
+def lifetimeInaccessible (mem : MemoryState) (p : Pointer) : Bool :=
+  match mem.resolveObject? p with
+  | some mo => mem.isInaccessible mo.allocId
+  | none => false
+
+def lifetimeInaccessibleUB (mem : MemoryState) (p : Pointer) : ExecError :=
+  .immediateUB s!"Try to access an inaccessible memory object: {mem.ptrString p}."
+
 /-- Non-allocating memory & pure intrinsics/libcalls (shared between `Step` and `Exec`). -/
 def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
     (name : String) (retTy : LlvmRetType) (fmf : FastMathFlags) (argVals : List RegisterValue)
     (o : OracleState) (allowLibcalls : Bool := true) (argAttrs : List (List ValueAttr) := []) :
     Option (Except ExecError (RegisterValue × MemoryState × OracleState)) :=
   if strHasPrefix name "llvm.lifetime.start" then
-    let mem' := match argVals.getLast? with
-      | some (.ptr _ (.value p)) => mem.lifetimeStart cfg p
-      | _ => mem
-    some (.ok (.void, mem', o))
+    some <| match argVals.getLast? with
+      | some (.ptr _ (.value p)) =>
+        if lifetimeInaccessible mem p then .error (lifetimeInaccessibleUB mem p)
+        else .ok (.void, mem.lifetimeStart cfg p, o)
+      | _ => .ok (.void, mem, o)
   else if strHasPrefix name "llvm.lifetime.end" then
-    let mem' := match argVals.getLast? with
-      | some (.ptr _ (.value p)) => mem.lifetimeEnd p
-      | _ => mem
-    some (.ok (.void, mem', o))
+    some <| match argVals.getLast? with
+      | some (.ptr _ (.value p)) =>
+        if lifetimeInaccessible mem p then .error (lifetimeInaccessibleUB mem p)
+        else .ok (.void, mem.lifetimeEnd p, o)
+      | _ => .ok (.void, mem, o)
   else if strHasPrefix name "llvm.memcpy" then
     some <| match argVals with
       | dst :: src :: len :: _ => (execMemTransferPure mem dst src len false false).map (fun m' => (.void, m', o))
@@ -2171,29 +2305,19 @@ theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVa
   unfold evalNonAllocIntrinsicExec? at h
   by_cases h1 : strHasPrefix name "llvm.lifetime.start" = true
   · rw [if_pos h1] at h
-    cases h
-    cases argVals.getLast? with
-    | none => exact hwf
-    | some v =>
-      cases v with
-      | ptr _ pv =>
-        cases pv using PoisonOr.casesOn' with
-        | poison => exact hwf
-        | value p => exact MemoryState.lifetimeStart_preserves_wf hwf cfg p
-      | _ => exact hwf
+    split at h
+    · split at h
+      · cases h
+      · cases h; exact MemoryState.lifetimeStart_preserves_wf hwf cfg _
+    · cases h; exact hwf
   · rw [if_neg h1] at h
     by_cases h2 : strHasPrefix name "llvm.lifetime.end" = true
     · rw [if_pos h2] at h
-      cases h
-      cases argVals.getLast? with
-      | none => exact hwf
-      | some v =>
-        cases v with
-        | ptr _ pv =>
-          cases pv using PoisonOr.casesOn' with
-          | poison => exact hwf
-          | value p => exact MemoryState.lifetimeEnd_preserves_wf hwf p
-        | _ => exact hwf
+      split at h
+      · split at h
+        · cases h
+        · cases h; exact MemoryState.lifetimeEnd_preserves_wf hwf _
+      · cases h; exact hwf
     · rw [if_neg h2] at h
       by_cases h3 : strHasPrefix name "llvm.memcpy" = true
       · rw [if_pos h3] at h

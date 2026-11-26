@@ -336,6 +336,9 @@ structure PState where
   intMeta      : List (String × Nat) := []
   noReturnGrps : List Nat := []
   vscale       : Nat := 4
+  /-- Named type definitions seen so far, as `(name, type, type at vscale = 1)`, used only to
+  compute LLVM's recorded alignment for memory operations on scalable types. -/
+  typeDefs     : List (LocalId × LlvmType × LlvmType) := []
   curSrc       : Array SrcEntry := #[]
   lines        : Array Nat := #[]
   fnSrcs       : Array FnSrc := #[]
@@ -1203,12 +1206,75 @@ private def parseTrailingValueAttrs (fuel : Nat) : ParseM (List ValueAttr) := do
     | _, _ => guard := 0
   return md.reverse
 
+/-- Replace named types by their definitions (to depth `fuel`). -/
+def substNamedTypes (defs : List (LocalId × LlvmType)) : Nat → LlvmType → LlvmType
+  | 0, t => t
+  | fuel + 1, t =>
+    match t with
+    | .named n => match defs.lookup n with
+      | some d => substNamedTypes defs fuel d
+      | none => t
+    | .vector n e => .vector n (substNamedTypes defs fuel e)
+    | .array n e => .array n (substNamedTypes defs fuel e)
+    | .struct p fs => .struct p (fs.map (substNamedTypes defs fuel))
+    | t => t
+
+/-- Named calling conventions and their `cc <N>` numbers (`llvm::CallingConv`). -/
+private def callingConvNames : List (String × Nat) :=
+  [("ccc", 0), ("fastcc", 8), ("coldcc", 9), ("ghccc", 10), ("webkit_jscc", 12), ("anyregcc", 13),
+   ("preserve_mostcc", 14), ("preserve_allcc", 15), ("swiftcc", 16), ("cxx_fast_tlscc", 17),
+   ("tailcc", 18), ("cfguard_checkcc", 19), ("swifttailcc", 20), ("preserve_nonecc", 21),
+   ("x86_stdcallcc", 64), ("x86_fastcallcc", 65), ("arm_apcscc", 66), ("arm_aapcscc", 67),
+   ("arm_aapcs_vfpcc", 68), ("x86_thiscallcc", 70), ("ptx_kernel", 71), ("ptx_device", 72),
+   ("spir_func", 75), ("spir_kernel", 76), ("intel_ocl_bicc", 77), ("x86_64_sysvcc", 78),
+   ("win64cc", 79), ("x86_vectorcallcc", 80), ("x86_intrcc", 83), ("avr_intrcc", 84),
+   ("avr_signalcc", 85), ("amdgpu_vs", 87), ("amdgpu_gs", 88), ("amdgpu_ps", 89),
+   ("amdgpu_cs", 90), ("amdgpu_kernel", 91), ("x86_regcallcc", 92), ("amdgpu_hs", 93),
+   ("aarch64_vector_pcs", 97), ("aarch64_sve_vector_pcs", 98), ("riscv_vector_cc", 110)]
+
+/-- Parse an optional calling convention, normalized to its name (`""` for `ccc`; `cc <N>` with an
+unnamed `N` stays `cc <N>`). -/
+def parseCallingConv : ParseM String := do
+  match ← peek with
+  | .ident "cc" =>
+    match ← peekAt 1 with
+    | .intLit n =>
+      let _ ← bump; let _ ← bump
+      match callingConvNames.find? (·.2 == n.toNat) with
+      | some (nm, _) => return (if nm == "ccc" then "" else nm)
+      | none => return s!"cc {n}"
+    | _ => return ""
+  | .ident s =>
+    if (callingConvNames.lookup s).isSome then
+      let _ ← bump
+      return (if s == "ccc" then "" else s)
+    else return ""
+  | _ => return ""
+
+/-- Parse a type and, if it contains scalable vectors, also LLVM's alignment for it: the alignment
+of its known-minimum layout (`vscale = 1`), which LLVM's parser records on `alloca`/`load`/`store`
+without an explicit `align` (the semantic type itself is expanded with the configured `vscale`). -/
+private def parseTypeScalableAlign (fuel : Nat) (pref : Bool := false) :
+    ParseM (LlvmType × Option Nat) := do
+  let st0 ← get
+  set { st0 with vscale := 1 }
+  let tyMin ← parseType fuel
+  modify fun st => { st with pos := st0.pos, vscale := st0.vscale }
+  let ty ← parseType fuel
+  let defs := (← get).typeDefs
+  let tyMin := substNamedTypes (defs.map fun (n, _, m) => (n, m)) 8 tyMin
+  let tyFull := substNamedTypes (defs.map fun (n, f, _) => (n, f)) 8 ty
+  if decide (tyMin = tyFull) then return (ty, none)
+  else return (ty, some (if pref then DataLayout.default64LE.typePrefAlign tyMin
+    else DataLayout.default64LE.typeABIAlign tyMin))
+
 /-- Parse a single non-terminator LLVM instruction. -/
 def parseInstruction (fuel : Nat) : ParseM Instruction := do
   -- Handle optional `tail` / `musttail` / `notail` prefix on `call`
-  let _ ← tryEatIdent "tail"
-  let _ ← tryEatIdent "musttail"
+  let isTail1 ← tryEatIdent "tail"
+  let isTail2 ← tryEatIdent "musttail"
   let _ ← tryEatIdent "notail"
+  let isTail := isTail1 || isTail2
   let opTok ← bump
   match opTok with
   | .ident "add" | .ident "sub" | .ident "mul" | .ident "shl" =>
@@ -1413,7 +1479,7 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
     return .bitextract retTy srcTy src offTy off
   | .ident "alloca" =>
     let _ ← tryEatIdent "inalloca"
-    let allocTy ← parseType fuel
+    let (allocTy, scalableAlign?) ← parseTypeScalableAlign fuel (pref := true)
     let mut numElem : Option (LlvmType × Exp) := none
     let mut align? : Option Nat := none
     let mut addrSpace : Nat := 0
@@ -1438,11 +1504,11 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
         let cexp ← parseExp fuel
         numElem := some (cty, cexp)
     skipTrailingMetadata fuel
-    return .alloca allocTy numElem align? addrSpace
+    return .alloca allocTy numElem (align?.orElse fun _ => scalableAlign?) addrSpace
   | .ident "load" =>
     let _ ← tryEatIdent "atomic"
     let isVol ← tryEatIdent "volatile"
-    let ty ← parseType fuel
+    let (ty, scalableAlign?) ← parseTypeScalableAlign fuel
     expect .comma "load"
     let ptrTy ← parseType fuel
     let ptrExp ← parseExp fuel
@@ -1462,11 +1528,11 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
           if attr == .noundef then noundef := true
           else md := attr :: md
       | _ => guard := 0
-    return .load ty ptrTy ptrExp align? isVol noundef md.reverse
+    return .load ty ptrTy ptrExp (align?.orElse fun _ => scalableAlign?) isVol noundef md.reverse
   | .ident "store" =>
     let _ ← tryEatIdent "atomic"
     let isVol ← tryEatIdent "volatile"
-    let valTy ← parseType fuel
+    let (valTy, scalableAlign?) ← parseTypeScalableAlign fuel
     let valExp ← parseExp fuel
     expect .comma "store"
     let ptrTy ← parseType fuel
@@ -1477,7 +1543,7 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
       let _ ← bump
       align? := some (← parseNatTok "store align")
     skipTrailingMetadata fuel
-    return .store valTy valExp ptrTy ptrExp align? isVol
+    return .store valTy valExp ptrTy ptrExp (align?.orElse fun _ => scalableAlign?) isVol
   | .ident "getelementptr" =>
     let flags ← parseGEPFlags
     let baseTy ← parseType fuel
@@ -1571,9 +1637,7 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
   | .ident "call" =>
     let fmf ← parseFMF
     -- Optional calling convention
-    let _ ← tryEatIdent "ccc"
-    let _ ← tryEatIdent "fastcc"
-    let _ ← tryEatIdent "coldcc"
+    let cc ← parseCallingConv
     let retAttrs ← parseValueAttrs fuel
     let retTy ← parseRetType fuel
     -- Skip optional explicit function pointer signature `(argTys)` before `@callee`
@@ -1638,6 +1702,7 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
       | _ => g2 := 0
     let callMd ← parseTrailingValueAttrs fuel
     return .call retTy fmf callee args.reverse (retAttrs ++ callMd) bundles.reverse isNoRet
+      { isTail := isTail, callingConv := cc }
   | tok => throw s!"parse error: unsupported instruction opcode {repr tok}"
 
 private def isTerminatorStart : Tok → Bool
@@ -1741,9 +1806,7 @@ private def parseInvoke (fuel : Nat) (iid? : Option InstructionId) :
   let isCallBr ← tryEatIdent "callbr"
   if !isCallBr then expectIdent "invoke" "invoke"
   let fmf ← parseFMF
-  let _ ← tryEatIdent "ccc"
-  let _ ← tryEatIdent "fastcc"
-  let _ ← tryEatIdent "coldcc"
+  let cc ← parseCallingConv
   let retAttrs ← parseValueAttrs fuel
   let retTy ← parseRetType fuel
   if (← peek) == .lparen then skipParenGroup fuel
@@ -1792,7 +1855,7 @@ private def parseInvoke (fuel : Nat) (iid? : Option InstructionId) :
   let iid ← match iid? with
     | some id => pure id
     | none => match retTy with | .void => freshVoidId | .ret _ => pure (InstructionId.id (← freshAnonId))
-  return ((iid, .call retTy fmf callee args.reverse retAttrs [] isNoRet), .br normalLbl)
+  return ((iid, .call retTy fmf callee args.reverse retAttrs [] isNoRet { callingConv := cc }), .br normalLbl)
 
 /-- Parse a single basic block (with explicit or implicit label). -/
 def parseBlock (fuel : Nat) (isFirst : Bool) : ParseM Block := do
@@ -1892,7 +1955,6 @@ private def skipLinkageAndCC : ParseM Unit := do
     | .ident "external" | .ident "dso_local" | .ident "dso_preemptable"
     | .ident "default" | .ident "hidden" | .ident "protected"
     | .ident "unnamed_addr" | .ident "local_unnamed_addr"
-    | .ident "ccc" | .ident "fastcc" | .ident "coldcc" | .ident "tailcc"
     | .ident "thread_local" | .ident "externally_initialized" =>
       let _ ← bump
     | _ => guard := 0
@@ -1974,6 +2036,8 @@ private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMo
 /-- Parse a `declare` or `define` header returning `(Declaration, paramNames)`. -/
 private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) := do
   skipLinkageAndCC
+  let cc ← parseCallingConv
+  skipLinkageAndCC
   let retAttrs ← parseValueAttrs fuel
   let retTy ← parseRetType fuel
   let fnName ← parseRawGlobalId "function name"
@@ -2016,6 +2080,7 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
     isNoReturn := isNoRet
     isNoBuiltin := isNoBuiltin
     denormalMode := denorm?
+    callingConv := cc
   }
   return (decl, argNames.reverse)
 
@@ -2189,7 +2254,12 @@ def parseLlvmModule (input : String) (vscale : Nat := 4) : Except String ParsedM
         if ← tryEatIdent "opaque" then
           entities := .typeDef typeName (.struct false []) :: entities
         else
+          let st0 ← get
+          set { st0 with vscale := 1 }
+          let tyMin ← parseType fuel
+          modify fun st => { st with pos := st0.pos, vscale := st0.vscale }
           let ty ← parseType fuel
+          modify fun st => { st with typeDefs := (typeName, ty, tyMin) :: st.typeDefs }
           entities := .typeDef typeName ty :: entities
       | .globalId gName =>
         let _ ← bump

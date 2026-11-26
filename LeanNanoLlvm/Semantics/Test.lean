@@ -107,7 +107,7 @@ theorem freeze_of_poison_draws_from_oracle_modern :
     []
     .modern
     .default64LE
-    ⟨NondetOracle.ofList [42], 0⟩
+    { oracle := NondetOracle.ofList [42] }
     = .ok (.bv 8 (.value (42 : BitVec 8))) := by
   decide +kernel
 
@@ -221,7 +221,7 @@ theorem undef_rejected_at_runtime_modern :
   decide +kernel
 
 theorem undef_nondet_draws_from_oracle :
-    runDefinitionRet undefUseDef [] .withUndef .default64LE ⟨NondetOracle.ofList [41], 0⟩ =
+    runDefinitionRet undefUseDef [] .withUndef .default64LE { oracle := NondetOracle.ofList [41] } =
       .ok (.bv 8 (.value (42 : BitVec 8))) := by
   decide +kernel
 
@@ -245,10 +245,11 @@ theorem uninit_alloca_is_poison_when_undef_disabled :
       .ok (.bv 8 .poison) := by
   decide +kernel
 
-/-- Bit-granular `undef` memory draws 1 bit per uninitialized bit (LSB-first `[0,1,0,1,1,0,1,0]` = `0x5A`). -/
+/-- Uninitialized memory draws one oracle value per byte containing undef bits (its low 8 bits
+supply the bits, as `llubi` does with `Rng()`); here `0x15A` yields `0x5A`. -/
 theorem uninit_alloca_is_oracle_value_when_undef_enabled :
     runDefinitionRet uninitAllocaLoadDef [] .withUndef .default64LE
-        ⟨NondetOracle.ofList [0, 1, 0, 1, 1, 0, 1, 0], 0⟩ =
+        { oracle := NondetOracle.ofList [0x15A] } =
       .ok (.bv 8 (.value (0x5A : BitVec 8))) := by
   decide +kernel
 

@@ -119,6 +119,8 @@ structure WCtx where
   limit     : Nat := 0
   /-- Slot renumbering of anonymous local values/blocks of the current function (`%N`). -/
   localSlots : List (Nat × Nat) := []
+  /-- Attribute groups `attributes #N = { ... }` (canonically ordered attribute strings). -/
+  attrGroupDefs : List (Nat × List String) := []
 
 def WCtx.tok (c : WCtx) (i : Nat) : Tok :=
   if c.limit != 0 && i ≥ c.limit then .eof else c.toks.getD i .eof
@@ -571,6 +573,10 @@ partial def parseValAt (c : WCtx) (t : PTy) (i : Nat) : Option (CVal × Nat) :=
             else if 'A' ≤ ch && ch ≤ 'F' then ch.toNat - 'A'.toNat + 10 else 0
           acc * 16 + d) 0
         some (.int v, i + 1)
+      else if s == "insertelement" && (foldInsertElement c (i + 1)).isSome then
+        foldInsertElement c (i + 1)
+      else if s == "shufflevector" && (foldShuffleVector c (i + 1)).isSome then
+        foldShuffleVector c (i + 1)
       else if constExprOps.contains s then
         match printConstExpr c s (i + 1) with
         | some (str, j) => some (.expr str, j)
@@ -591,6 +597,107 @@ partial def parseValAt (c : WCtx) (t : PTy) (i : Nat) : Option (CVal × Nat) :=
   | .lpacked =>
     match parseTypedList c (i + 1) .rpacked with
     | some (es, j) => some (.agg es, j)
+    | none => none
+  | _ => none
+
+/-- `insertelement (<N x T> vec, T elt, Ti k)` of a constant vector at a constant index folds to a
+vector constant (LLVM's constant folder); `none` if not foldable. -/
+partial def foldInsertElement (c : WCtx) (i : Nat) : Option (CVal × Nat) :=
+  if c.tok i != .lparen then none else
+  match parseTyAt c (i + 1) with
+  | some (vt@(.vec false n et), j) =>
+    match parseValAt c vt j with
+    | some (vv, j2) =>
+      if c.tok j2 != .comma then none else
+      match parseTyAt c (j2 + 1) with
+      | some (et', j3) =>
+        match parseValAt c et' j3 with
+        | some (ev, j4) =>
+          if c.tok j4 != .comma then none else
+          match parseTyAt c (j4 + 1) with
+          | some (it, j5) =>
+            match parseValAt c it j5 with
+            | some (CVal.int k, j6) =>
+              if c.tok j6 != .rparen then none else
+              let nullOf : CVal := match c.resolve et with
+                | .int _ | .byte _ => .int 0
+                | .float _ => .fpBits 0
+                | .ptr _ => .null
+                | _ => .zero
+              let elems? : Option (List (PTy × CVal)) := match canon c vt vv with
+                | .agg es => some es
+                | .zero => some (List.replicate n (et, nullOf))
+                | .poison => some (List.replicate n (et, .poison))
+                | .undef => some (List.replicate n (et, .undef))
+                | .splat t v => some (List.replicate n (t, v))
+                | _ => none
+              match elems? with
+              | some es =>
+                if k < 0 || k.toNat ≥ n then some (.poison, j6 + 1)
+                else some (.agg (es.set k.toNat (et, ev)), j6 + 1)
+              | none => none
+            | _ => none
+          | none => none
+        | none => none
+      | none => none
+    | none => none
+  | _ => none
+
+/-- The elements of a fixed vector constant `v : <n x et>`, if it is in a foldable form. -/
+partial def vecElems (c : WCtx) (vt : PTy) (n : Nat) (et : PTy) (v : CVal) :
+    Option (List (PTy × CVal)) :=
+  let nullOf : CVal := match c.resolve et with
+    | .int _ | .byte _ => .int 0
+    | .float _ => .fpBits 0
+    | .ptr _ => .null
+    | _ => .zero
+  match canon c vt v with
+  | .agg es => some es
+  | .zero => some (List.replicate n (et, nullOf))
+  | .poison => some (List.replicate n (et, .poison))
+  | .undef => some (List.replicate n (et, .undef))
+  | .splat t v => some (List.replicate n (t, v))
+  | _ => none
+
+/-- `shufflevector (<N x T> v1, <N x T> v2, <M x i32> mask)` of fixed vectors folds to a vector
+of per-element `extractelement`s (LLVM's constant folder); `none` if not foldable. -/
+partial def foldShuffleVector (c : WCtx) (i : Nat) : Option (CVal × Nat) :=
+  if c.tok i != .lparen then none else
+  match parseTyAt c (i + 1) with
+  | some (vt@(.vec false n et), j) =>
+    match parseValAt c vt j with
+    | some (v1, j2) =>
+      if c.tok j2 != .comma then none else
+      match parseTyAt c (j2 + 1) with
+      | some (vt2, j3) =>
+        match parseValAt c vt2 j3 with
+        | some (v2, j4) =>
+          if c.tok j4 != .comma then none else
+          match parseTyAt c (j4 + 1) with
+          | some (mt@(.vec false m mEt), j5) =>
+            match parseValAt c mt j5 with
+            | some (mv, j6) =>
+              if c.tok j6 != .rparen then none else
+              match vecElems c mt m mEt mv with
+              | some mask =>
+                let pick (src : CVal) (k : Nat) : CVal :=
+                  match vecElems c vt n et src with
+                  | some es => (es.getD k (et, .poison)).2
+                  | none => .expr s!"extractelement ({vt.print} {printConst c vt (canon c vt src)}, i32 {k})"
+                let elems := mask.map fun (_, mk) =>
+                  match mk with
+                  | .int k =>
+                    if k < 0 then (et, CVal.poison)
+                    else if k.toNat < n then (et, pick v1 k.toNat)
+                    else if k.toNat < 2 * n then (et, pick v2 (k.toNat - n))
+                    else (et, .poison)
+                  | _ => (et, .poison)
+                some (.agg elems, j6 + 1)
+              | none => none
+            | none => none
+          | _ => none
+        | none => none
+      | none => none
     | none => none
   | _ => none
 
@@ -623,27 +730,79 @@ partial def printConstExpr (c : WCtx) (op : String) (i : Nat) : Option (String �
         | some (st, k) => (st.print ++ ", ", if c.tok k == .comma then k + 1 else k)
         | none => ("", j0 + 1)
       else ("", j0 + 1)
-    let rec go (j : Nat) (acc : List String) : Option (List String × Nat) :=
+    let rec go (j : Nat) (acc : List (PTy × CVal)) : Option (List (PTy × CVal) × Nat) :=
       match parseTyAt c j with
       | some (t, k) =>
         match parseValAt c t k with
         | some (v, l) =>
-          let item := s!"{t.print} {printConst c t (canon c t v)}"
-          if c.tok l == .comma then go (l + 1) (item :: acc)
-          else some ((item :: acc).reverse, l)
+          if c.tok l == .comma then go (l + 1) ((t, canon c t v) :: acc)
+          else some (((t, canon c t v) :: acc).reverse, l)
         | none => none
       | none => none
     match go j1 [] with
-    | some (items, k) =>
-      let (toStr, k2) : String × Nat :=
+    | some (ops0, k) =>
+      -- A vector GEP splats its scalar indices (LLParser).
+      let vecLen? : Option Nat := ops0.findSome? fun (t, _) =>
+        match c.resolve t with | .vec false n _ => some n | _ => none
+      let ops := match op, vecLen?, ops0 with
+        | "getelementptr", some n, base :: idxs =>
+          base :: idxs.map fun (t, v) => match c.resolve t with
+            | it@(.int _) => (PTy.vec false n it, canon c (.vec false n it) (.splat it v))
+            | _ => (t, v)
+        | _, _, _ => ops0
+      let items := ops.map fun (t, v) => s!"{t.print} {printConst c t v}"
+      let (toTy?, k2) : Option PTy × Nat :=
         if c.tok k == .ident "to" then
           match parseTyAt c (k + 1) with
-          | some (tt, k3) => (s!" to {tt.print}", k3)
-          | none => ("", k + 1)
-        else ("", k)
-      if c.tok k2 == .rparen then
-        some (s!"{op}{flagStr} ({pre}{", ".intercalate items}{toStr})", k2 + 1)
-      else none
+          | some (tt, k3) => (some tt, k3)
+          | none => (none, k + 1)
+        else (none, k)
+      let toStr := match toTy? with | some tt => s!" to {tt.print}" | none => ""
+      if c.tok k2 != .rparen then none
+      else
+        -- LLVM folds a binary operator on fixed vectors into a vector of element operations.
+        let binOps := ["add", "sub", "mul", "xor", "shl"]
+        let foldBin? : Option (List (PTy × CVal)) :=
+          match ops with
+          | [(vt@(.vec false n et), a), (_, b)] =>
+            if !binOps.contains op || toTy?.isSome then none else
+            match vecElems c vt n et a, vecElems c vt n et b with
+            | some as, some bs =>
+              some ((as.zip bs).map fun ((_, x), (_, y)) =>
+                match x, y, c.resolve et with
+                | .int xi, .int yi, .int w =>
+                  if !flags.isEmpty && !(op == "xor") then
+                    (et, .expr s!"{op}{flagStr} ({et.print} {printConst c et x}, {et.print} {printConst c et y})")
+                  else
+                    let m : Int := 2 ^ w
+                    let r : Int := match op with
+                      | "add" => xi + yi | "sub" => xi - yi | "mul" => xi * yi
+                      | "xor" => Int.ofNat ((xi % m).toNat ^^^ (yi % m).toNat)
+                      | _ => if yi.toNat < w then xi * 2 ^ yi.toNat else 0
+                    let u := r % m
+                    (et, .int (if u ≥ m / 2 then u - m else u))
+                | .poison, _, _ | _, .poison, _ => (et, .poison)
+                | _, _, _ =>
+                  (et, .expr s!"{op}{flagStr} ({et.print} {printConst c et x}, {et.print} {printConst c et y})"))
+            | _, _ => none
+          | _ => none
+        match foldBin? with
+        | some es => some (printConst c (ops.head!.1) (canon c (ops.head!.1) (.agg es)), k2 + 1)
+        | none =>
+        -- LLVM folds a (non-bitcast) cast of a fixed vector into a vector of element casts
+        match toTy?, ops with
+        | some (.vec false n dstElem), [(srcTy@(.vec false _ srcElem), v)] =>
+          if op == "bitcast" then some (s!"{op}{flagStr} ({pre}{", ".intercalate items}{toStr})", k2 + 1)
+          else
+            let elems := (List.range n).map fun idx =>
+              let srcElemStr := match v with
+                | .agg es => match es[idx]? with
+                  | some (et, ev) => s!"{et.print} {printConst c et ev}"
+                  | none => s!"{srcElem.print} poison"
+                | _ => s!"{srcElem.print} extractelement ({srcTy.print} {printConst c srcTy v}, i32 {idx})"
+              s!"{dstElem.print} {op}{flagStr} ({srcElemStr} to {dstElem.print})"
+            some ("<" ++ ", ".intercalate elems ++ ">", k2 + 1)
+        | _, _ => some (s!"{op}{flagStr} ({pre}{", ".intercalate items}{toStr})", k2 + 1)
     | none => none
 
 /-- Decode the raw (escape-preserving) contents of a `c"..."` literal into bytes. -/
@@ -794,6 +953,22 @@ partial def collectAttrs (c : WCtx) (i : Nat) (acc : List String := []) : List S
       let ka := attrSortKey a
       let kb := attrSortKey b
       ka.1 < kb.1 || (ka.1 == kb.1 && ka.2 ≤ kb.2)), i)
+
+/-- Canonical key of an attribute set (attribute-group references expanded). -/
+def attrSetKey (c : WCtx) (attrs : List String) : String :=
+  let expanded := attrs.foldl (fun acc a =>
+    if a.startsWith "#" then
+      match (a.drop 1).toString.toNat? with
+      | some n => match c.attrGroupDefs.find? (·.1 == n) with
+        | some (_, as) => acc ++ as
+        | none => acc ++ [a]
+      | none => acc ++ [a]
+    else acc ++ [a]) []
+  let sorted := expanded.mergeSort (fun a b =>
+    let ka := attrSortKey a
+    let kb := attrSortKey b
+    ka.1 < kb.1 || (ka.1 == kb.1 && ka.2 ≤ kb.2))
+  " ".intercalate sorted
 
 /-! ### Instruction printing -/
 
@@ -1100,7 +1275,10 @@ partial def printCall (c : WCtx) (i stop : Nat) : String :=
     let (argStr, argTys, j5) :=
       if c.tok j4 == .lparen then printCallArgs c (j4 + 1) calleeStr else ("", [], j4)
     let calleeStr := remangleIntrinsic c calleeStr retTy argTys
-    let (fnAttrs, j6) := collectAttrs c j5
+    let (fnAttrs0, j6) := collectAttrs c j5
+    -- call-site function attributes print as an attribute group `#N`, numbered by the slot
+    -- tracker; mark them with their canonical key, resolved to a number by the caller
+    let fnAttrs := if fnAttrs0.isEmpty then [] else ["#⟦" ++ attrSetKey c fnAttrs0 ++ "⟧"]
     let (bundleStr, j7) := if c.tok j6 == .lbrack then printBundles c j6 else ("", j6)
     let (atts, _) := parseAttachments c j7 stop
     joinSp (preWords ++ retAttrs ++ [tyStr, s!"{calleeStr}({argStr})"] ++ fnAttrs ++ [bundleStr])

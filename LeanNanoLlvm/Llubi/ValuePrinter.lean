@@ -19,7 +19,8 @@ open LeanNanoLlvm.Semantics
 def printPointer (mem : MemoryState) (p : Pointer) : String := mem.ptrString p
 
 /-- `AnyValue::print`. -/
-def printValue (mem : MemoryState) (dl : DataLayout) (v : RegisterValue) : String :=
-  v.llubiString mem dl
+def printValue (mem : MemoryState) (dl : DataLayout) (v : RegisterValue)
+    (tags : List (Nat × Nat) := []) : String :=
+  v.llubiString mem dl tags
 
 end LeanNanoLlvm.Llubi

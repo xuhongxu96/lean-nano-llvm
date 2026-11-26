@@ -666,14 +666,21 @@ theorem fneg_fneg_is_refined_by_id : fnegFnegDef ⊒ idFloatDef := by
     rename_i v
     rw [initCallConfig_1 .modern .default64LE initMem idFloatDef rfl (Or.inl rfl) rfl rfl rfl rfl]
     rw [initCallConfig_1 .modern .default64LE initMem fnegFnegDef rfl (Or.inl rfl) rfl rfl rfl rfl]
-    have hfneg1 : evalFloatUnaryExec (.fneg {}) (.float .float) (.float .float v) default =
-        .ok (.float .float (evalFloatUnaryOp (.fneg {}) false v), (default : OracleState).nextBool.2) := rfl
-    have hfneg2 : evalFloatUnaryExec (.fneg {}) (.float .float)
-        (.float .float (evalFloatUnaryOp (.fneg {}) false v)) default =
-        .ok (.float .float v, (default : OracleState).nextBool.2) := by
+    have hneg : ∀ w : FloatW .float,
+        evalFloatUnaryExec (.fneg {}) (.float .float) (.float .float w) default =
+          .ok (.float .float (evalFloatUnaryOpO (.fneg {}) w default).1,
+               (evalFloatUnaryOpO (.fneg {}) w default).2) := fun _ => rfl
+    have hinv : (evalFloatUnaryOpO (.fneg {})
+        (evalFloatUnaryOpO (ft := .float) (.fneg {}) v default).1 default).1 = v := by
       cases v using PoisonOr.casesOn' with
       | poison => rfl
-      | value flt => simp [evalFloatUnaryExec, evalFloatUnaryOp, handleFMF, OracleState.nextBool]
+      | value flt => simp [evalFloatUnaryOpO, handleFMF]
+    have hfneg1 := hneg v
+    have hfneg2 : evalFloatUnaryExec (.fneg {}) (.float .float)
+        (.float .float (evalFloatUnaryOpO (.fneg {}) v default).1) default =
+        .ok (.float .float v, (evalFloatUnaryOpO (.fneg {})
+          (evalFloatUnaryOpO (ft := .float) (.fneg {}) v default).1 default).2) := by
+      rw [hneg, hinv]
     exact Config.IsRefinedBy.of_det_halted
       (det_step_to_halted fun ev c' => by
         rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .float .float v)
@@ -716,34 +723,37 @@ private theorem evalFloatBinary_fadd_refines_nnan (va vb : FloatW .float) (o : O
       evalFloatBinaryExec .modern (.fadd { «nnan» := true }) (.float .float) (.float .float va) (.float .float vb) o =
         .ok (.float .float rs, o2) ∧
       RegisterValue.IsRefinedBy .id (.float .float rs) (.float .float rt) := by
+  have hinV : ∀ (x : IEEEFloat FloatFormat.single) (o0 : OracleState), x.isNaN = false →
+      fmfIn { «nnan» := true } x o0 = (.value x, o0) := by
+    intro x o0 hx; unfold fmfIn; simp only [hx, Bool.and_false, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+  have hinP : ∀ (x : IEEEFloat FloatFormat.single) (o0 : OracleState), x.isNaN = true →
+      fmfIn { «nnan» := true } x o0 = (.poison, o0) := by
+    intro x o0 hx; unfold fmfIn; simp only [hx, Bool.and_true, ↓reduceIte]
+  have hpoisonL : ∀ (t : FloatW .float), RegisterValue.IsRefinedBy .id (.float .float .poison) (.float .float t) := by
+    intro t; simp [RegisterValue.IsRefinedBy]
   unfold evalFloatBinaryExec
   dsimp only [↓reduceDIte]
-  cases h1 : o.nextBool with | mk flipL o1 =>
-  cases h2 : o1.nextBool with | mk flipR o2 =>
-  cases h3 : o2.nextBool with | mk denormL o3 =>
-  cases h4 : o3.nextBool with | mk denormR o4 =>
-  cases h5 : o4.nextBool with | mk nanSign o5 =>
-  cases h6 : o5.nextNat with | mk nanPick o6 =>
-  refine ⟨_, _, o6, o6, rfl, rfl, ?_⟩
+  refine ⟨_, _, _, _, rfl, rfl, ?_⟩
   cases va using PoisonOr.casesOn' with
-  | poison => simp [evalFloatBinaryOp]
+  | poison => exact hpoisonL _
   | value fa =>
     cases vb using PoisonOr.casesOn' with
-    | poison => simp [evalFloatBinaryOp]
+    | poison => exact hpoisonL _
     | value fb =>
-      simp only [evalFloatBinaryOp, handleFMF, handleDenormal_ieee, SemanticsConfig.modern,
-                 PoisonOr.value_bind, Bool.true_and, Bool.false_and,
-                 ite_false, Bool.false_eq_true]
       by_cases ha : fa.isNaN = true
-      · rw [ha]; simp
-      · rw [Bool.eq_false_iff.mpr ha]
+      · simp only [evalFloatBinaryOpO, hinP fa o ha]; exact hpoisonL _
+      · have ha' : fa.isNaN = false := Bool.eq_false_iff.mpr ha
         by_cases hb : fb.isNaN = true
-        · rw [hb]; simp
-        · rw [Bool.eq_false_iff.mpr hb]
-          simp only [Bool.false_eq_true, ite_false, PoisonOr.value_bind]
+        · simp only [evalFloatBinaryOpO, hinV fa o ha', hinP fb o hb]; exact hpoisonL _
+        · have hb' : fb.isNaN = false := Bool.eq_false_iff.mpr hb
+          simp only [evalFloatBinaryOpO, fmfIn_none, hinV fa o ha', hinV fb o hb',
+            SemanticsConfig.modern, denormIn_ieee_fst, handleDenormal_ieee]
           by_cases hr : (IEEEFloat.add RoundingMode.RNE fa fb).isNaN = true
-          · rw [hr]; simp
-          · rw [Bool.eq_false_iff.mpr hr]; simp
+          · simp only [handleFMF, hr, Bool.and_true, ↓reduceIte]; exact hpoisonL _
+          · have hr' := Bool.eq_false_iff.mpr hr
+            simp only [handleFMF, hr', Bool.and_false, Bool.false_and, Bool.false_eq_true, ↓reduceIte,
+              nanPropagate_not_nan _ _ _ _ hr']
+            exact RegisterValue.IsRefinedBy.refl _
 
 open scoped LeanNanoLlvm.AST.Syntax in
 def faddDef : AST.Definition := [llvm-definition|
@@ -993,7 +1003,7 @@ private theorem alloc_i8_steps_ok {initMem : MemoryState} (hwf : MemoryState.Wel
     unfold MemoryState.verifyMemAccess
     rw [hresolve1]; dsimp only
     rw [hspec.state_eq, hspec.const_eq, hspec.size_eq, hptrAddr]
-    simp [Nat.mod_one]
+    simp [Nat.mod_one, hspec.not_mem_inaccessible]
   have hcallerEq : ∀ id ∈ initMem.allocIds, mem1.objects.get? id = initMem.objects.get? id := by
     intro id hid
     have hlt := MemoryState.allocId_lt_nextAllocId_of_mem_allocIds hwf hid
@@ -1006,7 +1016,7 @@ private theorem alloc_i8_steps_ok {initMem : MemoryState} (hwf : MemoryState.Wel
     unfold MemoryState.verifyMemAccess
     rw [hresolve1]; dsimp only
     rw [hspec.state_eq, hspec.size_eq, hptrAddr]
-    simp [Nat.mod_one]
+    simp [Nat.mod_one, hspec.not_mem_inaccessible]
   have hverLoad1 := MemoryState.verifyMemAccess_writeObjectBytes_same hwf1 hverLoad0 0 #[b]
   have hgoEq : MemoryState.writeObjectBytes.go 0 #[b] 0 #[b].size obj.bytes = #[b] := by
     rw [hspec.bytes_eq]
@@ -1051,13 +1061,13 @@ private theorem byte_roundtrip_i8 (v : IntW 8) (o : OracleState) :
   cases v using PoisonOr.casesOn' with
   | poison => rfl
   | value bv =>
-    rw [readScalarBits_loop_modern_eq (o0 := ⟨fun _ => 0, 0⟩)]
+    rw [readScalarBits_loop_modern_eq (o0 := { oracle := fun _ => 0 })]
     have hcheck : ∀ hi lo : Fin 16,
         let n := hi.val * 16 + lo.val
         let bs := writeBitLoop AST.DataLayout.default64LE 0
           (fun i => if i < 8 then MemBit.concrete ((BitVec.ofNat 8 n).getLsbD i) none else MemBit.concrete false none)
           0 8 (Array.replicate 1 MemByte.zero)
-        let r := readScalarBits.loop AST.DataLayout.default64LE .modern bs 0 8 0 8 0 false false true none false ⟨fun _ => 0, 0⟩
+        let r := readScalarBits.loop AST.DataLayout.default64LE .modern bs 0 8 0 8 0 false false true none false { oracle := fun _ => 0 }
         r.1 = n ∧ r.2.1 = false ∧ r.2.2.1 = false ∧ r.2.2.2.2.2.1 = false := by
       decide +kernel
     have hhi : bv.toNat / 16 < 16 := by have := bv.isLt; omega
@@ -1076,8 +1086,8 @@ private theorem byte_roundtrip_i8 (v : IntW 8) (o : OracleState) :
     rw [h3, h4, h1, h2]
     have hof : BitVec.ofNat 8 bv.toNat = bv := by simp
     simp [hof]
-    intro hc
-    cases hc
+    refine ⟨fun hc => (by cases hc), ?_⟩
+    rw [if_neg (by decide)]
 
 private theorem valueToBytes_i8_singleton (v : IntW 8) :
     ∃ b : MemByte, valueToBytes .default64LE .modern (.bv 8 v) (.int 8) = #[b] := by
@@ -1799,9 +1809,9 @@ theorem caller_add0_is_refined_by_direct_in_module :
              registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
                (.local_id (.name "v")) (.bv 32 v) }, initMem) := rfl
     -- Source execution: `add` → `call @id32` → callee `ret` → caller `ret`
-    have hnoIntr : ∀ o b a, evalNonAllocIntrinsicExec? .default64LE .modern initMem
+    have hnoIntr : ∀ cfg mem o b a, evalNonAllocIntrinsicExec? .default64LE cfg mem
         (AST.RawId.name "id32").ToString (.ret (.int 32)) {} [.bv 32 v] o b a = none :=
-      fun _ b _ => by cases b <;> rfl
+      fun _ _ _ b _ => by cases b <;> rfl
     have hX_term : Terminates (.running {
         frames := [{ defn := callerWithAdd0Def, curBlock := .name "entry",
                      remainingCode := entryCode callerWithAdd0Def,
@@ -1820,8 +1830,8 @@ theorem caller_add0_is_refined_by_direct_in_module :
         (StarStep.step (ev := none)
           (Step.instr rfl rfl
             (StepInstr.call_user_ok
-              (EvalCallArgs.cons_ok (EvalExp.leaf_ok (by llvm_step; rfl)) (by llvm_step) EvalCallArgs.nil)
-              EvalCallee.direct rfl (fun o => hnoIntr o _ _) hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
+              (EvalCallArgs.cons_ok (EvalExp.leaf_ok (by llvm_step; rfl)) (by simp only [byvalDeferredAttrs_nil]; llvm_step) EvalCallArgs.nil)
+              EvalCallee.direct rfl (fun o => hnoIntr _ _ o _ _) hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
           (StarStep.step (ev := none)
             (Step.term rfl rfl rfl
               (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
@@ -1919,7 +1929,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
             | cons_attr_err he ha =>
               rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
               injection he with hpair; cases hpair
-              simp only [applyValueAttrsPure] at ha; cases ha
+              simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; cases ha
             | cons_tail_err he ha hrest =>
               rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
               injection he with hpair; cases hpair
@@ -1949,9 +1959,9 @@ theorem caller_add0_is_refined_by_direct_in_module :
               | cons_ok he ha hrest =>
                 rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
                 injection he with hpair; cases hpair
-                simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
-                obtain ⟨o, _, h⟩ := hintr; rw [hnoIntr o _ _] at h; cases h
+                obtain ⟨o, _, h⟩ := hintr; rw [hnoIntr _ _ o _ _] at h; cases h
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_intrinsic_err hargsEv hcallee _ hintr =>
             cases hcallee with
@@ -1960,9 +1970,9 @@ theorem caller_add0_is_refined_by_direct_in_module :
               | cons_ok he ha hrest =>
                 rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
                 injection he with hpair; cases hpair
-                simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
-                obtain ⟨o, h⟩ := hintr; rw [hnoIntr o _ _] at h; cases h
+                obtain ⟨o, h⟩ := hintr; rw [hnoIntr _ _ o _ _] at h; cases h
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_user_ok hargsEv hcallee _ _ hfn _ hmk =>
             cases hcallee with
@@ -1971,10 +1981,10 @@ theorem caller_add0_is_refined_by_direct_in_module :
               | cons_ok he ha hrest =>
                 rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
                 injection he with hpair; cases hpair
-                simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
                 rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
-                dsimp only [List.map] at hmk
+                dsimp only [List.map, tailHidden, MemoryState.hide, AST.CallSiteInfo.default] at hmk
                 rw [hmkCallee] at hmk; injection hmk with hpair; cases hpair
                 exact ⟨rfl, rfl⟩
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
@@ -1985,10 +1995,10 @@ theorem caller_add0_is_refined_by_direct_in_module :
               | cons_ok he ha hrest =>
                 rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
                 injection he with hpair; cases hpair
-                simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
                 rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
-                dsimp only [List.map] at hmk
+                dsimp only [List.map, tailHidden, MemoryState.hide, AST.CallSiteInfo.default] at hmk
                 rw [hmkCallee] at hmk; cases hmk
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_user_overflow _ _ _ _ _ _ hge => simp [SemanticsConfig.modern] at hge
@@ -1999,8 +2009,8 @@ theorem caller_add0_is_refined_by_direct_in_module :
         · rintro ⟨rfl, rfl⟩
           exact Step.instr rfl rfl
             (StepInstr.call_user_ok
-              (EvalCallArgs.cons_ok (EvalExp.leaf_ok (by llvm_step; rfl)) (by llvm_step) EvalCallArgs.nil)
-              EvalCallee.direct rfl (fun o => hnoIntr o _ _) hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
+              (EvalCallArgs.cons_ok (EvalExp.leaf_ok (by llvm_step; rfl)) (by simp only [byvalDeferredAttrs_nil]; llvm_step) EvalCallArgs.nil)
+              EvalCallee.direct rfl (fun o => hnoIntr _ _ o _ _) hlookupId (Or.inr (by simp [SemanticsConfig.modern])) hmkCallee))
       hY2
     exact Config.IsRefinedBy.of_det_halted hY1 hX_term
       (RegisterValue.IsRefinedBy.refl _)

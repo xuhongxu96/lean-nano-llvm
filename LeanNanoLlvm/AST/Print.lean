@@ -255,7 +255,7 @@ def Instruction.print : Instruction → String
         | some i => s!"i32 {i}"
         | none => "i32 poison")
       s!"shufflevector {vecTy.print} {v1.print}, {vecTy.print} {v2.print}, <{mask.length} x i32> <{maskStr}>"
-  | .call retTy fmf callee args retAttrs _ _ =>
+  | .call retTy fmf callee args retAttrs _ _ _ =>
       let retAttrStr := formatFlags (retAttrs.map ValueAttr.print)
       let argStr := String.intercalate ", " (args.map fun (t, e, attrs) =>
         s!"{t.print}{formatFlags (attrs.map ValueAttr.print)} {e.print}")

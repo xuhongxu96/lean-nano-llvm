@@ -130,6 +130,8 @@ structure ReturnDest : Type where
   retAttrs   : List ValueAttr := []
   isNoReturn : Bool := false
   specLoad?  : Option (RegisterValue × RegisterValue) := none
+  /-- The caller's stack objects made inaccessible by a `tail` call (restored on return). -/
+  hidden     : List AllocId := []
 
 /-- Explicit activation record on the small-step call stack (mirrors `llubi::Frame`). -/
 structure CallFrame : Type where
@@ -287,7 +289,7 @@ def bindFrameArgs (dl : DataLayout) (mem : MemoryState)
         if !v.matchesType ty then
           .error (.staticError s!"Unmatched argument type for %{nm}: expected [{ty.print}], got {v}")
         else
-          let attrs := argAttrs.getD i []
+          let attrs := byvalDeferredAttrs (argAttrs.getD i [])
           match applyValueAttrsPure dl mem ty v attrs with
           | .error e => .error e
           | .ok v' => go (i + 1) ts nms vs (acc.insert (.local_id nm) v')
@@ -338,9 +340,16 @@ def mkEntryFrame (dl : DataLayout) (mem : MemoryState) (defn : Definition)
             }
   | ty => .error (.staticError s!"Expected function type for prototype, found [{ty.print}]")
 
-/-- Copy any `byval(T)` pointer arguments into fresh callee-owned stack objects (freed on `ret`). -/
+/-- Copy any `byval(T)` pointer arguments into fresh stack objects (freed on `ret`), as `llubi`
+does: the copy is allocated (aligned to the callee's `align`, else the call site's, else the ABI
+alignment of `T`), then the source is checked with the larger of that and the call-site alignment,
+then the bytes are copied. `siteAttrs` are the call site's parameter attributes. The copies are
+made before a tail call hides the caller's stack objects, so the source is read with `visible`
+(the objects hidden by this call) accessible. -/
 def applyByValCopies (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
-    (defn : Definition) (frame : CallFrame) : Except ExecError (CallFrame × MemoryState) :=
+    (defn : Definition) (frame : CallFrame) (siteAttrs : List (List ValueAttr) := [])
+    (visible : List AllocId := []) :
+    Except ExecError (CallFrame × MemoryState) :=
   let rec go (i : Nat) (m : MemoryState) (regs : AssocMap Identifier RegisterValue)
       (allocas : List AllocId) : List LocalId → Except ExecError (CallFrame × MemoryState)
     | [] => .ok ({ frame with registers := regs, frameAllocas := allocas }, m)
@@ -349,18 +358,21 @@ def applyByValCopies (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
       match attrs.findSome? (fun | .byval ty => some ty | _ => none) with
       | none => go (i + 1) m regs allocas rest
       | some byvalTy =>
-        let effAlign := (attrs.findSome? (fun | .align a => some a | _ => none)).getD (dl.typeABIAlign byvalTy)
+        let siteAlign := (siteAttrs.getD i []).findSome? (fun | .align a => some a | _ => none)
+        let calleeAlign := attrs.findSome? (fun | .align a => some a | _ => none)
+        let allocAlign := match calleeAlign with
+          | some a => a
+          | none => siteAlign.getD (dl.typeABIAlign byvalTy)
         match regs.get? (.local_id nm) with
         | some (.ptr as (.value p)) =>
-          let storeSize := dl.typeStoreSize byvalTy
           let allocSize := dl.typeAllocSize byvalTy
-          match m.verifyMemAccess p storeSize effAlign false with
+          match m.allocate dl cfg allocSize allocAlign nm.ToString as .uninitialized .stack false with
           | .error err => .error err
-          | .ok (srcObj, srcOff) =>
-            let bytes := MemoryState.readObjectBytes srcObj srcOff storeSize
-            match m.allocate dl cfg allocSize effAlign nm.ToString as .uninitialized .stack false with
+          | .ok (newObj, m1) =>
+            match (m1.unhide visible).verifyMemAccess p allocSize (max allocAlign (siteAlign.getD 1)) false with
             | .error err => .error err
-            | .ok (newObj, m1) =>
+            | .ok (srcObj, srcOff) =>
+              let bytes := MemoryState.readObjectBytes srcObj srcOff allocSize
               let m2 := m1.writeObjectBytes newObj.allocId 0 bytes
               let newPtr := MemoryState.derivePointer dl newObj
               go (i + 1) m2 (regs.insert (.local_id nm) (.ptr as (.value newPtr)))
@@ -372,9 +384,9 @@ def applyByValCopies (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
   else
     .ok (frame, mem)
 
-private theorem applyByValCopies_go_wf {dl cfg defn frame i m regs allocas nms frame' mem'}
+private theorem applyByValCopies_go_wf {dl cfg defn frame siteAttrs visible i m regs allocas nms frame' mem'}
     (hwf : MemoryState.WellFormed m)
-    (h : applyByValCopies.go dl cfg defn frame i m regs allocas nms = .ok (frame', mem')) :
+    (h : applyByValCopies.go dl cfg defn frame siteAttrs visible i m regs allocas nms = .ok (frame', mem')) :
     MemoryState.WellFormed mem' := by
   induction nms generalizing i m regs allocas with
   | nil => unfold applyByValCopies.go at h; cases h; exact hwf
@@ -384,19 +396,20 @@ private theorem applyByValCopies_go_wf {dl cfg defn frame i m regs allocas nms f
     split at h
     · exact ih hwf h
     · split at h
-      · split at h
-        · cases h
-        · cases ha : m.allocate dl cfg (dl.typeAllocSize _) _ nm.ToString _ .uninitialized .stack false with
-          | error e => rw [ha] at h; cases h
-          | ok p =>
-            rw [ha] at h
-            exact ih (MemoryState.writeObjectBytes_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
+      · cases ha : m.allocate dl cfg (dl.typeAllocSize _) _ nm.ToString _ .uninitialized .stack false with
+        | error e => rw [ha] at h; cases h
+        | ok p =>
+          rw [ha] at h
+          dsimp only at h
+          split at h
+          · cases h
+          · exact ih (MemoryState.writeObjectBytes_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
       · cases h
       · cases h
 
-theorem applyByValCopies_preserves_wf {dl cfg mem defn frame frame' mem'}
+theorem applyByValCopies_preserves_wf {dl cfg mem defn frame siteAttrs visible frame' mem'}
     (hwf : MemoryState.WellFormed mem)
-    (h : applyByValCopies dl cfg mem defn frame = .ok (frame', mem')) :
+    (h : applyByValCopies dl cfg mem defn frame siteAttrs visible = .ok (frame', mem')) :
     MemoryState.WellFormed mem' := by
   unfold applyByValCopies at h
   split at h
@@ -405,14 +418,16 @@ theorem applyByValCopies_preserves_wf {dl cfg mem defn frame frame' mem'}
 
 /-- Construct entry `CallFrame` and perform any `byval(T)` stack copies. -/
 def mkEntryFrameWithMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
-    (defn : Definition) (argVals : List RegisterValue) : Except ExecError (CallFrame × MemoryState) :=
+    (defn : Definition) (argVals : List RegisterValue) (siteAttrs : List (List ValueAttr) := [])
+    (visible : List AllocId := []) :
+    Except ExecError (CallFrame × MemoryState) :=
   match mkEntryFrame dl mem defn argVals with
   | .error e => .error e
-  | .ok frame => applyByValCopies dl cfg mem defn frame
+  | .ok frame => applyByValCopies dl cfg mem defn frame siteAttrs visible
 
-theorem mkEntryFrameWithMem_preserves_wf {dl cfg mem defn argVals frame' mem'}
+theorem mkEntryFrameWithMem_preserves_wf {dl cfg mem defn argVals siteAttrs visible frame' mem'}
     (hwf : MemoryState.WellFormed mem)
-    (h : mkEntryFrameWithMem dl cfg mem defn argVals = .ok (frame', mem')) :
+    (h : mkEntryFrameWithMem dl cfg mem defn argVals siteAttrs visible = .ok (frame', mem')) :
     MemoryState.WellFormed mem' := by
   unfold mkEntryFrameWithMem at h
   cases hmk : mkEntryFrame dl mem defn argVals with
@@ -421,11 +436,14 @@ theorem mkEntryFrameWithMem_preserves_wf {dl cfg mem defn argVals frame' mem'}
 
 /-- Check that a callsite's return type and `byval` attributes match the callee prototype. -/
 def checkCallSignatureAndByVal (_dl : DataLayout) (retTy : LlvmRetType)
-    (callArgAttrs : List (List ValueAttr)) (defn : Definition) : Except ExecError Unit :=
+    (callArgAttrs : List (List ValueAttr)) (defn : Definition) (siteCC : String := "") :
+    Except ExecError Unit :=
   match defn.prototype.type with
   | .function calleeRetTy ps va =>
     if calleeRetTy != retTy then
       .error (.immediateUB s!"Indirect call through a function pointer with mismatched signature. Expected: {(LlvmType.function retTy ps va).print}, Actual: {defn.prototype.type.print}.")
+    else if defn.prototype.callingConv != siteCC then
+      .error (.immediateUB "Mismatched calling convention between callee and callsite.")
     else
       let rec go (i : Nat) : List (List ValueAttr) → Except ExecError Unit
         | [] =>
@@ -450,17 +468,18 @@ def checkCallSignatureAndByVal (_dl : DataLayout) (retTy : LlvmRetType)
 /-- Construct a callee entry frame for a `call` instruction, checking signature & `byval` match. -/
 def mkCallEntryFrameWithMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
     (retTy : LlvmRetType) (callArgAttrs : List (List ValueAttr))
-    (defn : Definition) (argVals : List RegisterValue) : Except ExecError (CallFrame × MemoryState) :=
-  match checkCallSignatureAndByVal dl retTy callArgAttrs defn with
+    (defn : Definition) (argVals : List RegisterValue) (siteCC : String := "")
+    (visible : List AllocId := []) : Except ExecError (CallFrame × MemoryState) :=
+  match checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC with
   | .error e => .error e
-  | .ok () => mkEntryFrameWithMem dl cfg mem defn argVals
+  | .ok () => mkEntryFrameWithMem dl cfg mem defn argVals callArgAttrs visible
 
-theorem mkCallEntryFrameWithMem_preserves_wf {dl cfg mem retTy callArgAttrs defn argVals frame' mem'}
+theorem mkCallEntryFrameWithMem_preserves_wf {dl cfg mem retTy callArgAttrs defn argVals siteCC visible frame' mem'}
     (hwf : MemoryState.WellFormed mem)
-    (h : mkCallEntryFrameWithMem dl cfg mem retTy callArgAttrs defn argVals = .ok (frame', mem')) :
+    (h : mkCallEntryFrameWithMem dl cfg mem retTy callArgAttrs defn argVals siteCC visible = .ok (frame', mem')) :
     MemoryState.WellFormed mem' := by
   unfold mkCallEntryFrameWithMem at h
-  cases hc : checkCallSignatureAndByVal dl retTy callArgAttrs defn with
+  cases hc : checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC with
   | error e => rw [hc] at h; cases h
   | ok u => rw [hc] at h; exact mkEntryFrameWithMem_preserves_wf hwf h
 

@@ -278,7 +278,7 @@ def main (args : List String) : IO UInt32 := do
           else opts.cfg
         let oracle : OracleState := match opts.seed? with
           | none => default
-          | some s => ⟨fun i => (s * 6364136223846793005 + i * 1442695040888963407 + 1) % (2 ^ 64), 0⟩
+          | some s => { oracle := fun i => (s * 6364136223846793005 + i * 1442695040888963407 + 1) % (2 ^ 64) }
         match initModuleExec parsed.topLevel effCfg parsed.dataLayout oracle with
         | .error (.immediateUB msg) =>
           IO.eprintln s!"UB: {msg}"

@@ -219,7 +219,7 @@ def Instruction.WellFormedWith (cfg : SemanticsConfig) (locals : List LocalId)
       ∧ mask ≠ []
       ∧ v1.WellFormedFor cfg vecTy ∧ v1.WellScopedTo locals
       ∧ v2.WellFormedFor cfg vecTy ∧ v2.WellScopedTo locals
-  | .call retTy _ callee args _ _ _ =>
+  | .call retTy _ callee args _ _ _ _ =>
       (match retTy with | .void => instrId.IsVoid | .ret _ => True)
       ∧ callee.WellScopedTo locals
       ∧ ∀ a ∈ args, a.2.1.WellFormedFor cfg a.1 ∧ a.2.1.WellScopedTo locals

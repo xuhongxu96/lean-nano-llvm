@@ -105,8 +105,8 @@ def applyInputFMFExec (fmf : FastMathFlags) (ty : LlvmType) (val : RegisterValue
     let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
       match v with
       | .float ft (.value flt) =>
-        let (flipZ, o1) := o0.nextBool
-        .ok (.float ft (handleFMF fmf true flipZ flt), o1)
+        match fmfIn fmf flt o0 with
+        | (r, o1) => .ok (.float ft r, o1)
       | other => .ok (other, o0)
     match val with
     | .vector _ elems =>
@@ -145,6 +145,14 @@ def finishVoidInstr (st : MachineState) (frame : CallFrame) (callers : List Call
     (restCode : Code) (mem' : MemoryState) : Config :=
   .running (st.withFramesAndMemory
     (frame.advance restCode frame.registers frame.frameAllocas :: callers) mem')
+
+/-- The stack objects a call makes inaccessible for its duration: for a `tail`/`musttail` call, the
+caller's allocas and its own byval copies (`llubi`'s `setFrameStackInaccessible`). -/
+@[simp, simp_step]
+def tailHidden (site : CallSiteInfo) (frame : CallFrame) : List AllocId :=
+  match site.isTail with
+  | true => frame.frameAllocas
+  | false => []
 
 /-- Finish a `call` result (LLVM permits discarding non-void call results when `instrId` is `.void`). -/
 @[simp, simp_step]
@@ -429,7 +437,7 @@ inductive EvalCallArgs (dl : DataLayout) (cfg : SemanticsConfig)
       EvalCallArgs dl cfg regs mem [] (.ok ([], mem))
   | cons_ok {mem ty e attrs rest rawV m1 v vs m2} :
       EvalExp dl cfg regs mem ty e (.ok (rawV, m1)) →
-      applyValueAttrsPure dl m1 ty rawV attrs = .ok v →
+      applyValueAttrsPure dl m1 ty rawV (byvalDeferredAttrs attrs) = .ok v →
       EvalCallArgs dl cfg regs m1 rest (.ok (vs, m2)) →
       EvalCallArgs dl cfg regs mem ((ty, e, attrs) :: rest) (.ok (v :: vs, m2))
   | cons_exp_err {mem ty e attrs rest err} :
@@ -437,11 +445,11 @@ inductive EvalCallArgs (dl : DataLayout) (cfg : SemanticsConfig)
       EvalCallArgs dl cfg regs mem ((ty, e, attrs) :: rest) (.error err)
   | cons_attr_err {mem ty e attrs rest rawV m1 err} :
       EvalExp dl cfg regs mem ty e (.ok (rawV, m1)) →
-      applyValueAttrsPure dl m1 ty rawV attrs = .error err →
+      applyValueAttrsPure dl m1 ty rawV (byvalDeferredAttrs attrs) = .error err →
       EvalCallArgs dl cfg regs mem ((ty, e, attrs) :: rest) (.error err)
   | cons_tail_err {mem ty e attrs rest rawV m1 v err} :
       EvalExp dl cfg regs mem ty e (.ok (rawV, m1)) →
-      applyValueAttrsPure dl m1 ty rawV attrs = .ok v →
+      applyValueAttrsPure dl m1 ty rawV (byvalDeferredAttrs attrs) = .ok v →
       EvalCallArgs dl cfg regs m1 rest (.error err) →
       EvalCallArgs dl cfg regs mem ((ty, e, attrs) :: rest) (.error err)
 
@@ -622,7 +630,7 @@ def allocaInitKind (defn : Definition) (iid : InstructionId) : MemInitKind :=
     let hasStart := defn.blocks.any fun blk =>
       blk.code.any fun (_, instr) =>
         match instr with
-        | .call _ _ (.identifier (.global_id fid)) args _ _ _ =>
+        | .call _ _ (.identifier (.global_id fid)) args _ _ _ _ =>
           strHasPrefix fid.ToString "llvm.lifetime.start" &&
           args.any fun
             | (_, .identifier (.local_id r), _) => r == rid
@@ -666,7 +674,7 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
           (((caller.withRegisters (match rd.retTy, rd.destId with
               | .ret _, .id rid => caller.registers.insert (.local_id rid) retVal2
               | _, _ => caller.registers)).withReturnDest none) :: restCallers)
-          (freeAllocaList m1 frame.frameAllocas)))
+          ((freeAllocaList m1 frame.frameAllocas).unhide rd.hidden)))
   | noreturn_ub {caller restCallers retVal1 rd msg} :
       callers = caller :: restCallers →
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
@@ -1152,134 +1160,134 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       StepInstr st frame callers iid rest (.bitextract retTy srcTy src offTy off) none (Config.ofError err)
 
   /- Call (alloc libcalls via AllocLibcallSpec, non-alloc intrinsics, user-defined functions) -/
-  | call_args_err {retTy fmf calleeExp args retAttrs bundles isNoRet err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.error err) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_callee_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+  | call_args_err {retTy fmf calleeExp args retAttrs bundles isNoRet site err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.error err) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_callee_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.error err) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_alloc_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 finalRet} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_alloc_ok {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 rawRet m3 finalRet} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = true →
       AllocLibcallSpec st.dataLayout st.config m2 (heapObjName iid) fid.ToString retTy argVals (.ok (rawRet, m3)) →
       applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet = .ok finalRet →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
-        (finishCallResult st frame callers rest iid retTy finalRet m3)
-  | call_alloc_retattr_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none
+        (finishCallResult st frame callers rest iid retTy finalRet (m3.unhide (tailHidden site frame)))
+  | call_alloc_retattr_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 rawRet m3 err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = true →
       AllocLibcallSpec st.dataLayout st.config m2 (heapObjName iid) fid.ToString retTy argVals (.ok (rawRet, m3)) →
       applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet = .error err →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_alloc_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_alloc_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = true →
       AllocLibcallSpec st.dataLayout st.config m2 (heapObjName iid) fid.ToString retTy argVals (.error err) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_intrinsic_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 m4 finalRet} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_intrinsic_ok {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 rawRet m3 m4 finalRet} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
+      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
       EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.ok m4) →
       applyRetFMFAndAttrsPure st.dataLayout m4 retTy fmf retAttrs rawRet = .ok finalRet →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
-        (finishCallResult st frame callers rest iid retTy finalRet m4)
-  | call_intrinsic_bundle_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none
+        (finishCallResult st frame callers rest iid retTy finalRet (m4.unhide (tailHidden site frame)))
+  | call_intrinsic_bundle_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 rawRet m3 err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
+      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
       EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.error err) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_intrinsic_retattr_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 rawRet m3 m4 err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_intrinsic_retattr_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 rawRet m3 m4 err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
+      (∃ o o', evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.ok (rawRet, m3, o'))) →
       EvalAssumeBundles st.dataLayout st.config frame.registers m3 (if fid.ToString == "llvm.assume" then bundles else []) (.ok m4) →
       applyRetFMFAndAttrsPure st.dataLayout m4 retTy fmf retAttrs rawRet = .error err →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_intrinsic_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_intrinsic_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∃ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.error err)) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_user_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 calleeDef calleeFrame m3} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      (∃ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = some (.error err)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_user_ok {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 calleeDef calleeFrame m3} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
+      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals = .ok (calleeFrame, m3) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) = .ok (calleeFrame, m3) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none
         (.running (st.withFramesAndMemory
           (calleeFrame ::
             (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
-              (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet }) ::
+              (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet, hidden := tailHidden site frame }) ::
             callers)
           m3))
-  | call_user_entry_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 calleeDef err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+  | call_user_entry_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 calleeDef err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
+      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals = .error err →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_user_overflow {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 calleeDef} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) = .error err →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_user_overflow {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 calleeDef} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
+      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = some calleeDef →
       st.config.maxStackDepth ≠ 0 →
       st.frames.length ≥ st.config.maxStackDepth →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (.resourceError .stackOverflow)
-  | call_spec_oracle_ok {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs calleeFrame m3} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (.resourceError .stackOverflow)
+  | call_spec_oracle_ok {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs calleeFrame m3} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
       specLoadOracleCall? st m2 fid.ToString argVals = some (oracleDef, ptrVal, revVal, oracleArgs) →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs = .ok (calleeFrame, m3) →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs oracleDef.prototype.callingConv (tailHidden site frame) = .ok (calleeFrame, m3) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none
         (.running (st.withFramesAndMemory
           (calleeFrame ::
             (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
-              (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet, specLoad? := some (ptrVal, revVal) }) ::
+              (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs, isNoReturn := isNoRet, specLoad? := some (ptrVal, revVal), hidden := tailHidden site frame }) ::
             callers)
           m3))
-  | call_spec_oracle_entry_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs err} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+  | call_spec_oracle_entry_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs err} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
       specLoadOracleCall? st m2 fid.ToString argVals = some (oracleDef, ptrVal, revVal, oracleArgs) →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs = .error err →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (Config.ofError err)
-  | call_spec_oracle_overflow {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 (oracleDef.retType?.getD (.ret (.int 64))) ((args.drop 3).map (fun a => a.2.2)) oracleDef oracleArgs oracleDef.prototype.callingConv (tailHidden site frame) = .error err →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
+  | call_spec_oracle_overflow {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 oracleDef ptrVal revVal oracleArgs} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
       specLoadOracleCall? st m2 fid.ToString argVals = some (oracleDef, ptrVal, revVal, oracleArgs) →
       st.config.maxStackDepth ≠ 0 →
       st.frames.length ≥ st.config.maxStackDepth →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (.resourceError .stackOverflow)
-  | call_external_err {retTy fmf calleeExp args retAttrs bundles isNoRet argVals m1 fid m2 msg} :
-      EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (.resourceError .stackOverflow)
+  | call_external_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 msg} :
+      EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false →
-      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
+      (∀ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = none →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet) none (.staticError msg)
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (.staticError msg)
 
 /-- Relational small-step execution of a block terminator (indexed by `Terminator`). -/
 inductive StepTerm (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
@@ -1451,7 +1459,7 @@ private theorem stepRet_wf {st frame callers retTy retVal m1 c'}
     Config.WellFormed c' := by
   cases h with
   | top_ok _ _ => exact freeAllocaList_preserves_wf hwf _
-  | call_ok _ _ _ _ _ => exact freeAllocaList_preserves_wf hwf _
+  | call_ok _ _ _ _ _ => exact MemoryState.unhide_preserves_wf (freeAllocaList_preserves_wf hwf _) _
   | noreturn_ub _ _ _ _ => trivial
   | callee_attr_err _ => exact configOfError_wf _
   | caller_attr_err _ _ _ _ _ => exact configOfError_wf _
@@ -1495,14 +1503,14 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
   | bitextract_ok h1 h2 _ =>
     exact finishRegInstr_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2)
   | call_alloc_ok ha hc _ hspec _ =>
-    exact finishCallResult_wf (AllocLibcallSpec.preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hspec)
+    exact finishCallResult_wf (MemoryState.unhide_preserves_wf (AllocLibcallSpec.preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) ha) hc) hspec) _)
   | call_intrinsic_ok ha hc _ hint hb _ =>
     obtain ⟨o, o', hev⟩ := hint
-    exact finishCallResult_wf (EvalAssumeBundles.preserves_wf (evalNonAllocIntrinsicExec?_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hev) hb)
+    exact finishCallResult_wf (MemoryState.unhide_preserves_wf (EvalAssumeBundles.preserves_wf (evalNonAllocIntrinsicExec?_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) ha) hc) hev) hb) _)
   | call_user_ok ha hc _ _ _ _ hmk =>
-    exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hmk
+    exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) ha) hc) hmk
   | call_spec_oracle_ok ha hc _ _ _ hmk =>
-    exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hmk
+    exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) ha) hc) hmk
   | _ => first | exact configOfError_wf _ | trivial
 
 theorem StepTerm.preserves_wf {st frame callers tid term c'}
