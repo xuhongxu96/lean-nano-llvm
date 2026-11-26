@@ -428,7 +428,7 @@ def ofTopLevel (m : AST.TopLevel) (cfg : SemanticsConfig := .modern)
     match ent with
     | .definition d => (acc.1.insert d.prototype.name d, acc.2)
     | .declaration decl => (acc.1, acc.2.insert decl.name decl)
-    | .global _ => acc) (∅, ∅)
+    | .global _ | .typeDef _ _ => acc) (∅, ∅)
   { cfg := cfg, dl := dl, fns := fns, decls := decls }
 
 end RefinementEnv

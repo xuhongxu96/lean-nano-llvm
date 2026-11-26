@@ -172,7 +172,7 @@ private theorem genUndefZeroExec_error_spec (dl : DataLayout) :
     cases hf : genUndefZeroListExec dl fields with
     | ok _ => rw [hf] at h; cases h
     | error e => rw [hf] at h; cases h; exact genUndefZeroListExec_error_spec dl fields hf
-  | .function .., _, h => by unfold genUndefZeroExec at h; cases h; exact ⟨rfl, _, rfl⟩
+  | .function .., _, h | .named _, _, h => by unfold genUndefZeroExec at h; cases h; exact ⟨rfl, _, rfl⟩
 
 private theorem genUndefZeroListExec_error_spec (dl : DataLayout) :
     ∀ (ts : List LlvmType) {err : ExecError},
@@ -239,7 +239,7 @@ private theorem genUndefNondetExec_error_spec (dl : DataLayout) :
     cases hl : genUndefListExec dl fields o with
     | ok _ => rw [hl] at h; cases h
     | error e => rw [hl] at h; cases h; exact genUndefListExec_error_spec dl fields o hl
-  | .function .., _, _, h => by unfold genUndefNondetExec at h; cases h; exact ⟨rfl, _, rfl⟩
+  | .function .., _, _, h | .named _, _, _, h => by unfold genUndefNondetExec at h; cases h; exact ⟨rfl, _, rfl⟩
 
 private theorem genUndefListExec_error_spec (dl : DataLayout) :
     ∀ (ts : List LlvmType) (o : OracleState) {err : ExecError},
@@ -816,7 +816,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           (.ptr addrSpace (.value (MemoryState.derivePointer dl obj)))
           mem' (obj.allocId :: frame.frameAllocas), o1)
       | .error err => (none, Config.ofError err, o1)
-  | .load ty ptrTy ptrExp align? isVol noundef =>
+  | .load ty ptrTy ptrExp align? isVol noundef md =>
     match execExp dl cfg regs st.memory ptrTy ptrExp o with
     | .error err => (none, Config.ofError err, o)
     | .ok (ptrVal, m1, o1) =>
@@ -831,11 +831,14 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           let rawBytes := MemoryState.readObjectBytes mo offset storeSize
           let ev := if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat rawBytes) else none
           match bytesToValue dl cfg rawBytes ty o1 with
-          | (val, hasUndef, o2) =>
-            if noundef && (hasUndef || val.containsPoison) then
-              (ev, .ub "Loaded value violates !noundef (contains poison or undef bits)", o2)
-            else
-              (ev, finishRegInstr st frame callers rest iid val m1, o2)
+          | (rawVal, hasUndef, o2) =>
+            match applyValueAttrsPure dl m1 ty rawVal md with
+            | .error err => (ev, Config.ofError err, o2)
+            | .ok val =>
+              if noundef && (hasUndef || val.containsPoison) then
+                (ev, .ub "Loaded value violates !noundef (contains poison or undef bits)", o2)
+              else
+                (ev, finishRegInstr st frame callers rest iid val m1, o2)
       | _ => (none, .staticError s!"Expected pointer in load, got {ptrVal}", o1)
   | .store valTy valExp ptrTy ptrExp align? isVol =>
     match execExp dl cfg regs st.memory valTy valExp o with
@@ -952,12 +955,12 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
               if cfg.maxStackDepth != 0 && st.frames.length ≥ cfg.maxStackDepth then
                 (none, .resourceError .stackOverflow, o2)
               else
-                match mkEntryFrame dl m2 calleeDef argVals with
+                match mkEntryFrameWithMem dl cfg m2 calleeDef argVals with
                 | .error err => (none, Config.ofError err, o2)
-                | .ok calleeFrame =>
+                | .ok (calleeFrame, m3) =>
                   let caller' := (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
                     (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs })
-                  (none, .running (st.withFramesAndMemory (calleeFrame :: caller' :: callers) m2), o2)
+                  (none, .running (st.withFramesAndMemory (calleeFrame :: caller' :: callers) m3), o2)
 
 /-- Kernel-reducible block-terminator step (mirroring `StepTerm`). -/
 def execTerm (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
@@ -1206,7 +1209,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
             dsimp only at h
             exact finishAlloca bv.toNat m1 o1 (EvalExp.preserves_wf hwf ih) ⟨w, bv, ih, rfl⟩ h
         | _ => dsimp only at h; cases h; exact StepInstr.alloca_count_nonint ih (by intro _ _ heq; cases heq)
-  | load ty ptrTy ptrExp align? isVol noundef =>
+  | load ty ptrTy ptrExp align? isVol noundef md =>
     dsimp only at h
     have ih1 := execExp_sound st.dataLayout st.config frame.registers st.memory ptrTy ptrExp o
     cases h1 : execExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp o with
@@ -1226,20 +1229,24 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
             rw [hver] at h; obtain ⟨mo, offset⟩ := pm; dsimp only at h
             cases hbtv : bytesToValue st.dataLayout st.config
                 (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty o1 with
-            | mk val restP =>
+            | mk rawVal restP =>
               obtain ⟨hasUndef, o2⟩ := restP
               rw [hbtv] at h; dsimp only at h
               have hrel := bytesToValue_satisfies_rel hbtv
-              by_cases hbad : (noundef && (hasUndef || val.containsPoison)) = true
-              · rw [if_pos hbad] at h; cases h
-                simp only [Bool.and_eq_true, Bool.or_eq_true] at hbad
-                obtain ⟨rfl, hup⟩ := hbad
-                exact StepInstr.load_noundef_ub ih1 hver hrel hup
-              · rw [if_neg hbad] at h; cases h
-                exact StepInstr.load_ok ih1 hver hrel (by
-                  intro hn
-                  simp only [hn, Bool.true_and, Bool.or_eq_true, not_or] at hbad
-                  exact ⟨Bool.eq_false_iff.mpr hbad.1, Bool.eq_false_iff.mpr hbad.2⟩)
+              cases hmd : applyValueAttrsPure st.dataLayout m1 ty rawVal md with
+              | error err => rw [hmd] at h; cases h; exact StepInstr.load_md_err ih1 hver hrel hmd
+              | ok val =>
+                rw [hmd] at h; dsimp only at h
+                by_cases hbad : (noundef && (hasUndef || val.containsPoison)) = true
+                · rw [if_pos hbad] at h; cases h
+                  simp only [Bool.and_eq_true, Bool.or_eq_true] at hbad
+                  obtain ⟨rfl, hup⟩ := hbad
+                  exact StepInstr.load_noundef_ub ih1 hver hrel hmd hup
+                · rw [if_neg hbad] at h; cases h
+                  exact StepInstr.load_ok ih1 hver hrel hmd (by
+                    intro hn
+                    simp only [hn, Bool.true_and, Bool.or_eq_true, not_or] at hbad
+                    exact ⟨Bool.eq_false_iff.mpr hbad.1, Bool.eq_false_iff.mpr hbad.2⟩)
       | _ => cases h; exact StepInstr.load_ptr_nonptr ih1 (by intro _ _ heq; cases heq)
   | store valTy valExp ptrTy ptrExp align? isVol =>
     dsimp only at h
@@ -1431,11 +1438,12 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                   · simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq, not_and] at hov
                     have := hov hz
                     exact Or.inr (by omega)
-                cases hentry : mkEntryFrame st.dataLayout m2 calleeDef argVals with
+                cases hentry : mkEntryFrameWithMem st.dataLayout st.config m2 calleeDef argVals with
                 | error err =>
                   rw [hentry] at h; cases h
                   exact StepInstr.call_user_entry_err iha ihc hallocF hnoneAll hfn hdepth hentry
-                | ok calleeFrame =>
+                | ok pframe =>
+                  obtain ⟨calleeFrame, m3⟩ := pframe
                   rw [hentry] at h; cases h
                   exact StepInstr.call_user_ok iha ihc hallocF hnoneAll hfn hdepth hentry
 
@@ -1646,6 +1654,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig) :
         let ptr := MemoryState.derivePointer dl obj
         let mem'' := mem'.insertGlobalAddr gv.name ptr
         initModulePass1 dl cfg rest mem'' fns decls
+    | .typeDef _ _ => initModulePass1 dl cfg rest mem fns decls
 
 private def initModulePass2 (dl : DataLayout) (cfg : SemanticsConfig) :
     List TopLevelEntity → MemoryState → OracleState →
@@ -1674,12 +1683,15 @@ private def initModulePass2 (dl : DataLayout) (cfg : SemanticsConfig) :
 def initModuleExec (mod : TopLevel) (cfg : SemanticsConfig := .modern)
     (dl : DataLayout := .default64LE) (oracle : OracleState := default) :
     Except ExecError (MemoryState × AssocMap FunctionId Definition × AssocMap FunctionId Declaration × OracleState) :=
-  match initModulePass1 dl cfg mod.entities {} ∅ ∅ with
-  | .error e => .error e
-  | .ok (mem1, fns, decls) =>
-    match initModulePass2 dl cfg mod.entities mem1 oracle with
+  match mod.resolveTypes with
+  | .error msg => .error (.staticError msg)
+  | .ok resolvedMod =>
+    match initModulePass1 dl cfg resolvedMod.entities {} ∅ ∅ with
     | .error e => .error e
-    | .ok (mem2, o2) => .ok (mem2, fns, decls, o2)
+    | .ok (mem1, fns, decls) =>
+      match initModulePass2 dl cfg resolvedMod.entities mem1 oracle with
+      | .error e => .error e
+      | .ok (mem2, o2) => .ok (mem2, fns, decls, o2)
 
 private theorem initModulePass1_wf {dl cfg ents mem fns decls mem' fns' decls'}
     (hwf : MemoryState.WellFormed mem)
@@ -1714,6 +1726,7 @@ private theorem initModulePass1_wf {dl cfg ents mem fns decls mem' fns' decls'}
       | ok p =>
         rw [ha] at h; obtain ⟨obj, m1⟩ := p
         exact ih (MemoryState.insertGlobalAddr_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _) h
+    | typeDef _ _ => exact ih hwf h
 
 private theorem initModulePass2_wf {dl cfg ents mem o mem' o'}
     (hwf : MemoryState.WellFormed mem)
@@ -1755,14 +1768,18 @@ theorem initModuleExec_wf {mod cfg dl oracle mem fns decls o'}
     (h : initModuleExec mod cfg dl oracle = .ok (mem, fns, decls, o')) :
     MemoryState.WellFormed mem := by
   unfold initModuleExec at h
-  cases h1 : initModulePass1 dl cfg mod.entities {} ∅ ∅ with
-  | error e => rw [h1] at h; cases h
-  | ok p1 =>
-    rw [h1] at h; obtain ⟨m1, fns1, decls1⟩ := p1; dsimp only at h
-    have hwf1 := initModulePass1_wf MemoryState.empty_wf h1
-    cases h2 : initModulePass2 dl cfg mod.entities m1 oracle with
-    | error e => rw [h2] at h; cases h
-    | ok p2 => rw [h2] at h; obtain ⟨m2, o2⟩ := p2; cases h; exact initModulePass2_wf hwf1 h2
+  cases hres : mod.resolveTypes with
+  | error msg => rw [hres] at h; cases h
+  | ok rmod =>
+    rw [hres] at h; dsimp only at h
+    cases h1 : initModulePass1 dl cfg rmod.entities {} ∅ ∅ with
+    | error e => rw [h1] at h; cases h
+    | ok p1 =>
+      rw [h1] at h; obtain ⟨m1, fns1, decls1⟩ := p1; dsimp only at h
+      have hwf1 := initModulePass1_wf MemoryState.empty_wf h1
+      cases h2 : initModulePass2 dl cfg rmod.entities m1 oracle with
+      | error e => rw [h2] at h; cases h
+      | ok p2 => rw [h2] at h; obtain ⟨m2, o2⟩ := p2; cases h; exact initModulePass2_wf hwf1 h2
 
 /-- Execute a `Definition`, returning the full `(trace, finalConfig, finalOracle)`. -/
 def runDefinitionWithTrace (defn : Definition) (args : List RegisterValue := [])

@@ -29,9 +29,10 @@ private theorem initCallConfig_0 (cfg : SemanticsConfig) (dl : AST.DataLayout)
         frames := [{ defn := defn, curBlock := bid, remainingCode := body,
                      terminator := term, registers := ∅ }]
         memory := mem, config := cfg, dataLayout := dl } := by
-  simp only [initCallConfig, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
+  simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
+             applyByValCopies, applyByValCopies.go,
              ht, ha, hb, hcode, List.length_nil, bne_self_eq_false, Bool.false_or,
-             Bool.false_eq_true, ↓reduceIte, List.isEmpty_nil, Bool.not_true]
+             Bool.false_eq_true, ↓reduceIte, ite_self, List.isEmpty_nil, Bool.not_true]
 
 private theorem initCallConfig_1 (cfg : SemanticsConfig) (dl : AST.DataLayout)
     (mem : MemoryState) (defn : AST.Definition) {retTy : AST.LlvmRetType}
@@ -51,10 +52,10 @@ private theorem initCallConfig_1 (cfg : SemanticsConfig) (dl : AST.DataLayout)
                      registers := (∅ : AssocMap AST.Identifier RegisterValue).insert (.local_id pId) arg }]
         memory := mem, config := cfg, dataLayout := dl } := by
   rcases hpa with hpa | hpa <;>
-  (simp only [initCallConfig, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
-             ht, hpa, ha, hb, hcode, hm,
-             List.length_nil, List.length_cons, bne_self_eq_false, Bool.false_or,
-             Bool.false_eq_true, ↓reduceIte, List.isEmpty_nil, Bool.not_true]; rfl)
+  (simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
+             applyByValCopies, ht, hpa, ha, hb, hcode, hm,
+             List.length_nil, List.length_cons, List.any_nil, List.any_cons, Bool.or_self,
+             bne_self_eq_false, Bool.false_eq_true, ↓reduceIte, List.isEmpty_nil, Bool.not_true]; rfl)
 
 private theorem initCallConfig_2 (cfg : SemanticsConfig) (dl : AST.DataLayout)
     (mem : MemoryState) (defn : AST.Definition) {retTy : AST.LlvmRetType}
@@ -76,10 +77,10 @@ private theorem initCallConfig_2 (cfg : SemanticsConfig) (dl : AST.DataLayout)
                        (.local_id pId1) arg1).insert (.local_id pId2) arg2 }]
         memory := mem, config := cfg, dataLayout := dl } := by
   rcases hpa with hpa | hpa <;>
-  (simp only [initCallConfig, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
-             ht, hpa, ha, hb, hcode, hm1, hm2,
-             List.length_nil, List.length_cons, bne_self_eq_false, Bool.false_or,
-             Bool.false_eq_true, ↓reduceIte, List.isEmpty_nil, Bool.not_true]; rfl)
+  (simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
+             applyByValCopies, ht, hpa, ha, hb, hcode, hm1, hm2,
+             List.length_nil, List.length_cons, List.any_nil, List.any_cons, Bool.or_self,
+             bne_self_eq_false, Bool.false_eq_true, ↓reduceIte, List.isEmpty_nil, Bool.not_true]; rfl)
 
 /-! ### 1. Basic Arithmetic, Reflexivity & Width-Generic Refinement (`i$(w)`) -/
 
@@ -1188,6 +1189,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
                   (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
                   (by simpa [typeStoreSize_i8, hb] using hverLoad)
                   (by simpa [typeStoreSize_i8] using hbtv)
+                  rfl
                   (by intro h; cases h)))
               (StarStep.step (ev := none)
                 (Step.term rfl rfl rfl
@@ -1782,11 +1784,11 @@ theorem caller_add0_is_refined_by_direct_in_module :
       | poison => llvm_simp
       | value bv => llvm_simp
     have hlookupId : helperId32Env.fns.get? (.name "id32") = some helperId32Def := rfl
-    have hmkCallee : mkEntryFrame .default64LE initMem helperId32Def [.bv 32 v] =
-      .ok { defn := helperId32Def, curBlock := .name "entry", remainingCode := [],
-            terminator := entryTerm helperId32Def,
-            registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
-              (.local_id (.name "v")) (.bv 32 v) } := rfl
+    have hmkCallee : mkEntryFrameWithMem .default64LE .modern initMem helperId32Def [.bv 32 v] =
+      .ok ({ defn := helperId32Def, curBlock := .name "entry", remainingCode := [],
+             terminator := entryTerm helperId32Def,
+             registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
+               (.local_id (.name "v")) (.bv 32 v) }, initMem) := rfl
     -- Source execution: `add` → `call @id32` → callee `ret` → caller `ret`
     have hnoIntr : ∀ o, evalNonAllocIntrinsicExec? .default64LE .modern initMem
         (AST.RawId.name "id32").ToString (.ret (.int 32)) {} [.bv 32 v] o = none :=
@@ -1952,7 +1954,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
                 simp only [applyValueAttrsPure] at ha; injection ha with hv; subst hv
                 cases hrest
                 rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
-                rw [hmkCallee] at hmk; injection hmk with hfr; subst hfr
+                rw [hmkCallee] at hmk; injection hmk with hpair; cases hpair
                 exact ⟨rfl, rfl⟩
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_user_entry_err hargsEv hcallee _ _ hfn _ hmk =>

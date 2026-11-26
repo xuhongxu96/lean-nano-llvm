@@ -331,15 +331,96 @@ def mkEntryFrame (dl : DataLayout) (mem : MemoryState) (defn : Definition)
             }
   | ty => .error (.staticError s!"Expected function type for prototype, found [{ty.print}]")
 
+/-- Copy any `byval(T)` pointer arguments into fresh callee-owned stack objects (freed on `ret`). -/
+def applyByValCopies (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (defn : Definition) (frame : CallFrame) : Except ExecError (CallFrame × MemoryState) :=
+  let rec go (i : Nat) (m : MemoryState) (regs : AssocMap Identifier RegisterValue)
+      (allocas : List AllocId) : List LocalId → Except ExecError (CallFrame × MemoryState)
+    | [] => .ok ({ frame with registers := regs, frameAllocas := allocas }, m)
+    | nm :: rest =>
+      let attrs := defn.prototype.argAttrs.getD i []
+      match attrs.findSome? (fun | .byval ty => some ty | _ => none) with
+      | none => go (i + 1) m regs allocas rest
+      | some byvalTy =>
+        let effAlign := (attrs.findSome? (fun | .align a => some a | _ => none)).getD (dl.typeABIAlign byvalTy)
+        match regs.get? (.local_id nm) with
+        | some (.ptr as (.value p)) =>
+          let storeSize := dl.typeStoreSize byvalTy
+          let allocSize := dl.typeAllocSize byvalTy
+          match m.verifyMemAccess p storeSize effAlign false with
+          | .error err => .error err
+          | .ok (srcObj, srcOff) =>
+            let bytes := MemoryState.readObjectBytes srcObj srcOff storeSize
+            match m.allocate dl cfg allocSize effAlign nm.ToString as .uninitialized .stack false with
+            | .error err => .error err
+            | .ok (newObj, m1) =>
+              let m2 := m1.writeObjectBytes newObj.allocId 0 bytes
+              let newPtr := MemoryState.derivePointer dl newObj
+              go (i + 1) m2 (regs.insert (.local_id nm) (.ptr as (.value newPtr)))
+                (newObj.allocId :: allocas) rest
+        | some (.ptr _ .poison) => .error (.immediateUB s!"byval argument %{nm} is poison")
+        | _ => .error (.staticError s!"byval argument %{nm} must be a pointer")
+  if defn.prototype.argAttrs.any (fun as => as.any (fun | .byval _ => true | _ => false)) then
+    go 0 mem frame.registers frame.frameAllocas defn.args
+  else
+    .ok (frame, mem)
+
+private theorem applyByValCopies_go_wf {dl cfg defn frame i m regs allocas nms frame' mem'}
+    (hwf : MemoryState.WellFormed m)
+    (h : applyByValCopies.go dl cfg defn frame i m regs allocas nms = .ok (frame', mem')) :
+    MemoryState.WellFormed mem' := by
+  induction nms generalizing i m regs allocas with
+  | nil => unfold applyByValCopies.go at h; cases h; exact hwf
+  | cons nm rest ih =>
+    unfold applyByValCopies.go at h
+    dsimp only at h
+    split at h
+    · exact ih hwf h
+    · split at h
+      · split at h
+        · cases h
+        · cases ha : m.allocate dl cfg (dl.typeAllocSize _) _ nm.ToString _ .uninitialized .stack false with
+          | error e => rw [ha] at h; cases h
+          | ok p =>
+            rw [ha] at h
+            exact ih (MemoryState.writeObjectBytes_preserves_wf (MemoryState.allocate_preserves_wf hwf ha) _ _ _) h
+      · cases h
+      · cases h
+
+theorem applyByValCopies_preserves_wf {dl cfg mem defn frame frame' mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : applyByValCopies dl cfg mem defn frame = .ok (frame', mem')) :
+    MemoryState.WellFormed mem' := by
+  unfold applyByValCopies at h
+  split at h
+  · exact applyByValCopies_go_wf hwf h
+  · cases h; exact hwf
+
+/-- Construct entry `CallFrame` and perform any `byval(T)` stack copies. -/
+def mkEntryFrameWithMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
+    (defn : Definition) (argVals : List RegisterValue) : Except ExecError (CallFrame × MemoryState) :=
+  match mkEntryFrame dl mem defn argVals with
+  | .error e => .error e
+  | .ok frame => applyByValCopies dl cfg mem defn frame
+
+theorem mkEntryFrameWithMem_preserves_wf {dl cfg mem defn argVals frame' mem'}
+    (hwf : MemoryState.WellFormed mem)
+    (h : mkEntryFrameWithMem dl cfg mem defn argVals = .ok (frame', mem')) :
+    MemoryState.WellFormed mem' := by
+  unfold mkEntryFrameWithMem at h
+  cases hmk : mkEntryFrame dl mem defn argVals with
+  | error e => rw [hmk] at h; cases h
+  | ok frame => rw [hmk] at h; exact applyByValCopies_preserves_wf hwf h
+
 /-- Construct the initial small-step `Config` for calling `defn` with `argVals` in `(cfg, dl, initMem)`. -/
 def initCallConfig (cfg : SemanticsConfig) (dl : DataLayout) (initMem : MemoryState)
     (fns : AssocMap FunctionId Definition := ∅) (decls : AssocMap FunctionId Declaration := ∅)
     (defn : Definition) (argVals : List RegisterValue) : Config :=
-  match mkEntryFrame dl initMem defn argVals with
-  | .ok frame =>
+  match mkEntryFrameWithMem dl cfg initMem defn argVals with
+  | .ok (frame', mem') =>
     .running {
-      frames := [frame]
-      memory := initMem
+      frames := [frame']
+      memory := mem'
       config := cfg
       dataLayout := dl
       functions := fns

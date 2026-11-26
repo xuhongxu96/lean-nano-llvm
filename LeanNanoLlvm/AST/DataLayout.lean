@@ -122,6 +122,7 @@ def typeLayout (dl : DataLayout) : LlvmType → Nat × Nat
       | (_, rawEnd, maxAlign) =>
         let sAlign := if packed then 1 else maxAlign
         (alignTo rawEnd sAlign * 8, sAlign)
+  | .named _ => (0, 1)
   | .function .. => (0, 1)
 
 /--

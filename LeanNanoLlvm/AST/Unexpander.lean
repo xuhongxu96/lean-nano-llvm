@@ -818,7 +818,7 @@ def unexpandInstructionAlloca : Unexpander
 
 @[app_unexpander Instruction.load]
 def unexpandInstructionLoad : Unexpander
-  | `($_ $ty $pTy $ptr $al $isVol $nu) => do
+  | `($_ $ty $pTy $ptr $al $isVol $nu) | `($_ $ty $pTy $ptr $al $isVol $nu []) => do
     match asType? ty, asType? pTy, asExp? ptr, asBool? isVol, asBool? nu with
     | some ty, some pTy, some ptr, some isVol, some nu =>
       let mut opts : Array (TSyntax `nanollvm_load_opt) := #[]

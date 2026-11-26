@@ -597,6 +597,147 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           | _ => .error (.staticError "Expected integer return type for fpto[su]i.sat")
         | .void => .error (.staticError "fpto[su]i.sat cannot return void")
       | _ => .error (.staticError s!"{name} expects 1 argument")
+  else if strHasPrefix name "llvm.ceil" || strHasPrefix name "llvm.floor" ||
+          strHasPrefix name "llvm.trunc" || strHasPrefix name "llvm.roundeven" ||
+          strHasPrefix name "llvm.round" || strHasPrefix name "llvm.rint" ||
+          strHasPrefix name "llvm.nearbyint" || strHasPrefix name "llvm.canonicalize" ||
+          strHasPrefix name "llvm.sqrt" then
+    some <| match argVals with
+      | [v] =>
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .f32
+        let applyUnaryOp {fmt : FloatFormat} (x : IEEEFloat fmt) : IEEEFloat fmt :=
+          if strHasPrefix name "llvm.ceil" then x.ceil
+          else if strHasPrefix name "llvm.floor" then x.floor
+          else if strHasPrefix name "llvm.trunc" then x.trunc
+          else if strHasPrefix name "llvm.roundeven" then x.roundeven
+          else if strHasPrefix name "llvm.round" then x.round
+          else if strHasPrefix name "llvm.rint" || strHasPrefix name "llvm.nearbyint" then
+            x.roundToIntegral cfg.roundingMode
+          else if strHasPrefix name "llvm.canonicalize" then x.canonicalize
+          else x.sqrt cfg.roundingMode
+        let goElem (e : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
+          match e with
+          | .float ft .poison => .ok (.float ft .poison, o0)
+          | .float ft (.value flt) =>
+            let (flipZ, o1) := o0.nextBool
+            match handleFMF fmf true flipZ flt with
+            | .poison => .ok (.float ft .poison, o1)
+            | .value f' =>
+              let raw := applyUnaryOp f'
+              let (nanSign, o2) := o1.nextBool
+              let (nanPick, o3) := o2.nextNat
+              let final := applyNaNPropagation cfg.nanMode raw [f'] nanSign nanPick
+              .ok (.float ft (handleFMF fmf false false final), o3)
+          | other => .error (.staticError s!"Expected float in {name}, got {other}")
+        match v with
+        | .vector _ elems =>
+          let rec goFPUnary : List RegisterValue → OracleState → Except ExecError (List RegisterValue × OracleState)
+            | [], o0 => .ok ([], o0)
+            | e :: es, o0 => do
+              let (r, o1) ← goElem e o0
+              let (rs, o2) ← goFPUnary es o1
+              .ok (r :: rs, o2)
+          match goFPUnary elems o with
+          | .ok (rs, o') => .ok (.vector resElemTy rs, o')
+          | .error e => .error e
+        | _ => goElem v o
+      | _ => .error (.staticError s!"{name} expects 1 argument")
+  else if strHasPrefix name "llvm.ldexp" then
+    some <| match argVals with
+      | [v1, v2] =>
+        let resElemTy := match retTy with | .ret t => t.scalarType | .void => .f32
+        let goElem (a b : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
+          match a, b with
+          | .float ft (.value flt), .bv _ (.value expBv) =>
+            let (flipZ, o1) := o0.nextBool
+            match handleFMF fmf true flipZ flt with
+            | .poison => .ok (.float ft .poison, o1)
+            | .value f' =>
+              let raw := f'.ldexp cfg.roundingMode expBv.toInt
+              let (nanSign, o2) := o1.nextBool
+              let (nanPick, o3) := o2.nextNat
+              let final := applyNaNPropagation cfg.nanMode raw [f'] nanSign nanPick
+              .ok (.float ft (handleFMF fmf false false final), o3)
+          | .float ft _, .bv _ _ => .ok (.float ft .poison, o0)
+          | _, _ => .error (.staticError "Expected (float, int) in llvm.ldexp")
+        match v1, v2 with
+        | .vector _ es1, .vector _ es2 =>
+          if es1.length != es2.length then .error (.staticError "Vector length mismatch in llvm.ldexp")
+          else
+            let rec goLdexp : List RegisterValue → List RegisterValue → OracleState →
+                Except ExecError (List RegisterValue × OracleState)
+              | x :: xs, y :: ys, o0 => do
+                let (r, o1) ← goElem x y o0
+                let (rs, o2) ← goLdexp xs ys o1
+                .ok (r :: rs, o2)
+              | _, _, o0 => .ok ([], o0)
+            match goLdexp es1 es2 o with
+            | .ok (rs, o') => .ok (.vector resElemTy rs, o')
+            | .error e => .error e
+        | _, _ => goElem v1 v2 o
+      | _ => .error (.staticError "llvm.ldexp expects 2 arguments")
+  else if strHasPrefix name "llvm.vector.reduce.fadd" || strHasPrefix name "llvm.vector.reduce.fmul" then
+    some <| match argVals with
+      | [startV, .vector _ elems] =>
+        let isAdd := strHasPrefix name "llvm.vector.reduce.fadd"
+        let rec goFold (acc : RegisterValue) (es : List RegisterValue) (o0 : OracleState) :
+            Except ExecError (RegisterValue × OracleState) :=
+          match es with
+          | [] => .ok (acc, o0)
+          | e :: rest =>
+            match acc, e with
+            | .float ft1 (.value a), .float ft2 (.value b) =>
+              if h : ft1 = ft2 then
+                let a' : IEEEFloat ft2.format := h ▸ a
+                let (flipL, o1) := o0.nextBool
+                let (flipR, o2) := o1.nextBool
+                match handleFMF fmf true flipL a', handleFMF fmf true flipR b with
+                | .value fa, .value fb =>
+                  let raw := if isAdd then IEEEFloat.add cfg.roundingMode fa fb
+                             else IEEEFloat.mul cfg.roundingMode fa fb
+                  let (nanSign, o3) := o2.nextBool
+                  let (nanPick, o4) := o3.nextNat
+                  let final := applyNaNPropagation cfg.nanMode raw [fa, fb] nanSign nanPick
+                  goFold (.float ft2 (handleFMF fmf false false final)) rest o4
+                | _, _ => goFold (.float ft2 .poison) rest o2
+              else .error (.staticError s!"Mismatched float types in {name}")
+            | .float ft _, .float _ _ => goFold (.float ft .poison) rest o0
+            | _, _ => .error (.staticError s!"Expected float elements in {name}")
+        goFold startV elems o
+      | _ => .error (.staticError s!"{name} expects (float, vector) arguments")
+  else if strHasPrefix name "llvm.vector.reduce.fmaximumnum" || strHasPrefix name "llvm.vector.reduce.fminimumnum" ||
+          strHasPrefix name "llvm.vector.reduce.fmaximum" || strHasPrefix name "llvm.vector.reduce.fminimum" ||
+          strHasPrefix name "llvm.vector.reduce.fmax" || strHasPrefix name "llvm.vector.reduce.fmin" then
+    some <| match argVals with
+      | [.vector _ (first :: rest)] =>
+        let combine {fmt : FloatFormat} (x y : IEEEFloat fmt) : IEEEFloat fmt :=
+          if strHasPrefix name "llvm.vector.reduce.fminimumnum" || strHasPrefix name "llvm.vector.reduce.fmin" then
+            IEEEFloat.minimumnum x y
+          else if strHasPrefix name "llvm.vector.reduce.fmaximumnum" || strHasPrefix name "llvm.vector.reduce.fmax" then
+            IEEEFloat.maximumnum x y
+          else if strHasPrefix name "llvm.vector.reduce.fminimum" then
+            IEEEFloat.minimum x y
+          else
+            IEEEFloat.maximum x y
+        let rec goRed (acc : RegisterValue) (es : List RegisterValue) (o0 : OracleState) :
+            Except ExecError (RegisterValue × OracleState) :=
+          match es with
+          | [] => .ok (acc, o0)
+          | e :: tl =>
+            match acc, e with
+            | .float ft1 (.value a), .float ft2 (.value b) =>
+              if h : ft1 = ft2 then
+                let a' : IEEEFloat ft2.format := h ▸ a
+                let raw := combine a' b
+                let (nanSign, o1) := o0.nextBool
+                let (nanPick, o2) := o1.nextNat
+                let final := applyNaNPropagation cfg.nanMode raw [a', b] nanSign nanPick
+                goRed (.float ft2 (handleFMF fmf false false final)) tl o2
+              else .error (.staticError s!"Mismatched float types in {name}")
+            | .float ft _, .float _ _ => goRed (.float ft .poison) tl o0
+            | _, _ => .error (.staticError s!"Expected float elements in {name}")
+        goRed first rest o
+      | _ => .error (.staticError s!"{name} expects a non-empty float vector argument")
   else
     none
 

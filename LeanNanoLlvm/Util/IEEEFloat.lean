@@ -511,6 +511,83 @@ def maximumnum (x y : IEEEFloat fmt) : IEEEFloat fmt :=
     | .lt => y
     | _ => x
 
+/-- Exact IEEE-754 round-to-integral-value under rounding mode `rm` (preserves signed zero). -/
+def roundToIntegral (rm : RoundingMode) (x : IEEEFloat fmt) : IEEEFloat fmt :=
+  if x.isNaN then x.makeQuiet
+  else if x.isInf || x.isZero then x
+  else
+    let (sign, sig, exp) := x.toDyadic
+    if exp ≥ 0 then x
+    else
+      let shift := (-exp).toNat
+      let denom := 1 <<< shift
+      let q := sig / denom
+      let r := sig % denom
+      let roundUp :=
+        if r == 0 then false
+        else match rm with
+          | .RTZ => false
+          | .RTP => !sign
+          | .RTN => sign
+          | .RNA => 2 * r ≥ denom
+          | .RNE => 2 * r > denom || (2 * r == denom && q % 2 == 1)
+      let intMag := q + if roundUp then 1 else 0
+      if intMag == 0 then zero fmt sign
+      else roundExact fmt rm sign intMag 1 0
+
+def ceil (x : IEEEFloat fmt) : IEEEFloat fmt := roundToIntegral .RTP x
+def floor (x : IEEEFloat fmt) : IEEEFloat fmt := roundToIntegral .RTN x
+def trunc (x : IEEEFloat fmt) : IEEEFloat fmt := roundToIntegral .RTZ x
+def round (x : IEEEFloat fmt) : IEEEFloat fmt := roundToIntegral .RNA x
+def roundeven (x : IEEEFloat fmt) : IEEEFloat fmt := roundToIntegral .RNE x
+
+/-- IEEE-754 canonicalize (quiets signaling NaN, otherwise identity). -/
+def canonicalize (x : IEEEFloat fmt) : IEEEFloat fmt :=
+  if x.isNaN then x.makeQuiet else x
+
+/-- Exact IEEE-754 `ldexp(x, expDelta) = x * 2^expDelta` under rounding mode `rm`. -/
+def ldexp (rm : RoundingMode) (x : IEEEFloat fmt) (expDelta : Int) : IEEEFloat fmt :=
+  if x.isNaN then x.makeQuiet
+  else if x.isInf || x.isZero then x
+  else
+    let (sign, sig, exp) := x.toDyadic
+    roundExact fmt rm sign sig 1 (exp + expDelta)
+
+/-- Exact, kernel-reducible integer square root `⌊√n⌋` via binary restoring algorithm. -/
+private def natSqrtAux (n : Nat) : Nat → Nat → Nat → Nat
+  | 0, res, _ => res
+  | k + 1, res, bit =>
+    let cand := res + bit
+    if cand * cand ≤ n then natSqrtAux n k cand (bit >>> 1)
+    else natSqrtAux n k res (bit >>> 1)
+
+private def natSqrt (n : Nat) : Nat :=
+  if n == 0 then 0
+  else
+    let halfBits := Nat.log2 n / 2
+    natSqrtAux n (halfBits + 1) 0 (1 <<< halfBits)
+
+/-- Exact IEEE-754 square root `√x` under rounding mode `rm` (kernel-reducible via `natSqrt`). -/
+def sqrt (rm : RoundingMode) (x : IEEEFloat fmt) : IEEEFloat fmt :=
+  if x.isNaN then x.makeQuiet
+  else if x.isZero then x
+  else if x.sign then qNaN fmt
+  else if x.isInf then x
+  else
+    let (_, sig, exp) := x.toDyadic
+    -- Shift so `√(sig * 2^radShift)` has at least `fmt.sigBits + 3` bits (2+ bits below LSB)
+    let minShift : Nat := 2 * (fmt.sigBits + 3)
+    let e0 : Int := exp - (minShift : Int)
+    let radShift : Nat := if e0 % 2 == 0 then minShift else minShift + 1
+    let halfExp : Int := (exp - (radShift : Int)) / 2
+    let n : Nat := sig <<< radShift
+    let q : Nat := natSqrt n
+    if q * q == n then
+      roundExact fmt rm false q 1 halfExp
+    else
+      -- `q < √n < q + 1`; since `q` has ≥ 2 bits below fmt's LSB, `q + 1/2` rounds identically to `√n`
+      roundExact fmt rm false (2 * q + 1) 2 halfExp
+
 /-- Exact, kernel-reducible conversion from decimal `(-1)^neg * mantissa * 10^exp10` to `IEEEFloat fmt`. -/
 def ofDecimal (fmt : FloatFormat) (rm : RoundingMode) (neg : Bool)
     (mantissa : Nat) (exp10 : Int) : IEEEFloat fmt :=

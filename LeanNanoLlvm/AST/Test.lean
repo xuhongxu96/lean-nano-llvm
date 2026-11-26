@@ -217,4 +217,27 @@ theorem example_syntax_correct : TopLevel.print [llvm|
   simp [TopLevel.print, llvm_0_plus_1]
   rfl
 
+-- Phase 2 syntax tests: named struct types, load metadata, sret/noalias/readonly, constexprs
+#check [llvm-type| %Pair]
+#check [llvm-instruction| load ptr, ptr %p, align 8, !nonnull]
+#check [llvm-instruction| load i32, ptr %p, align 4, !range(0, 10), !noundef]
+#check [llvm-exp| getelementptr inbounds (i32, ptr @g, i64 2)]
+#check [llvm-exp| ptrtoint (ptr @g to i64)]
+#check [llvm-exp| add (i32 1, i32 2)]
+#check [llvm-definition|
+define void @use_attrs(ptr sret(i32) noalias readonly %out) {
+entry:
+  ret void
+}
+]
+#check [llvm|
+%Pair = type { i32, i64 }
+define i64 @get_snd(ptr %p) {
+entry:
+  %q = getelementptr inbounds %Pair, ptr %p, i64 0, i32 1
+  %v = load i64, ptr %q, align 8
+  ret i64 %v
+}
+]
+
 end

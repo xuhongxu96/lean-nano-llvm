@@ -21,6 +21,7 @@ def LlvmType.print : LlvmType → String
   | .struct true fields =>
       let inner := String.intercalate ", " (LlvmType.printList fields)
       "<{ " ++ inner ++ " }>"
+  | .named nm => s!"%{nm.ToString}"
   | .function ret args isVarArg =>
       let argStrs := LlvmType.printList args ++ (if isVarArg then ["..."] else [])
       s!"{ret.print} ({String.intercalate ", " argStrs})"
@@ -81,6 +82,9 @@ def ValueAttr.print : ValueAttr → String
   | .range lo hi => s!"range({lo}, {hi})"
   | .nofpclass m => s!"nofpclass({m})"
   | .byval ty => s!"byval({ty.print})"
+  | .sret ty => s!"sret({ty.print})"
+  | .noalias => "noalias"
+  | .readonly => "readonly"
 
 def IntBinaryOp.printNameAndFlags : IntBinaryOp → String × List String
   | .add nuw nsw  => ("add",  (if nuw then ["nuw"] else []) ++ (if nsw then ["nsw"] else []))
@@ -198,13 +202,17 @@ def Instruction.print : Instruction → String
         | none => ""
       let asStr := if as == 0 then "" else s!", addrspace({as})"
       s!"alloca {allocTy.print}{numStr}{alignStr}{asStr}"
-  | .load ty ptrTy ptr align isVol noundef =>
+  | .load ty ptrTy ptr align isVol noundef metadata =>
       let volStr := if isVol then " volatile" else ""
       let alignStr := match align with
         | some a => s!", align {a}"
         | none => ""
       let nuStr := if noundef then ", !noundef !{}" else ""
-      s!"load{volStr} {ty.print}, {ptrTy.print} {ptr.print}{alignStr}{nuStr}"
+      let mdStr := String.join (metadata.map fun
+        | .nonnull => ", !nonnull !{}"
+        | .range lo hi => s!", !range !\{{ty.print} {lo}, {ty.print} {hi}}"
+        | other => s!", !{other.print}")
+      s!"load{volStr} {ty.print}, {ptrTy.print} {ptr.print}{alignStr}{nuStr}{mdStr}"
   | .store valTy val ptrTy ptr align isVol =>
       let volStr := if isVol then " volatile" else ""
       let alignStr := match align with
@@ -326,6 +334,7 @@ def GlobalVariable.print (gv : GlobalVariable) : String :=
   s!"@{gv.name.ToString} = {asStr}{kind} {gv.ty.print}{initStr}{alignStr}"
 
 def TopLevelEntity.print : TopLevelEntity → String
+  | .typeDef nm ty => s!"%{nm.ToString} = type {ty.print}"
   | .global gv => gv.print
   | .declaration decl => decl.print
   | .definition defn => defn.print

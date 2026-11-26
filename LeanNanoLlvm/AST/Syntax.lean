@@ -67,6 +67,7 @@ scoped syntax "<" num &"x" nanollvm_type ">" : nanollvm_type
 scoped syntax "[" num &"x" nanollvm_type "]" : nanollvm_type
 scoped syntax "{" nanollvm_type,* "}" : nanollvm_type
 scoped syntax "<{" nanollvm_type,* "}>" : nanollvm_type
+scoped syntax "%" nanollvm_rawid : nanollvm_type
 scoped syntax nanollvm_type "(" nanollvm_fn_param,* ")" : nanollvm_type
 
 mutual
@@ -120,6 +121,9 @@ partial def elabNanoLlvmType : Syntax → TermElabM Expr
     let fList ← mkListLit (mkConst ``LlvmType) fVals.toList
     mkAppM ``LlvmType.struct #[toExpr Bool.true, fList]
 
+  | `(nanollvm_type| %$nm:nanollvm_rawid) => do
+    mkAppM ``LlvmType.named #[← elabNanoLlvmRawId nm]
+
   | `(nanollvm_type| $ret:nanollvm_type ( $params:nanollvm_fn_param,* )) => do
     let ret ← elabNanoLlvmRetType ret
     let mut argVals : Array Expr := #[]
@@ -170,6 +174,9 @@ scoped syntax "dereferenceable_or_null(" num ")" : nanollvm_value_attr
 scoped syntax "range(" nanollvm_signed_int ", " nanollvm_signed_int ")" : nanollvm_value_attr
 scoped syntax "nofpclass(" num ")" : nanollvm_value_attr
 scoped syntax "byval(" nanollvm_type ")" : nanollvm_value_attr
+scoped syntax "sret(" nanollvm_type ")" : nanollvm_value_attr
+scoped syntax "noalias" : nanollvm_value_attr
+scoped syntax "readonly" : nanollvm_value_attr
 
 def elabNanoLlvmValueAttr : Syntax → TermElabM Expr
   | `(nanollvm_value_attr| noundef) => pure (mkConst ``ValueAttr.noundef)
@@ -188,6 +195,11 @@ def elabNanoLlvmValueAttr : Syntax → TermElabM Expr
   | `(nanollvm_value_attr| byval($ty:nanollvm_type)) => do
       let tyE ← elabNanoLlvmType ty
       mkAppM ``ValueAttr.byval #[tyE]
+  | `(nanollvm_value_attr| sret($ty:nanollvm_type)) => do
+      let tyE ← elabNanoLlvmType ty
+      mkAppM ``ValueAttr.sret #[tyE]
+  | `(nanollvm_value_attr| noalias) => pure (mkConst ``ValueAttr.noalias)
+  | `(nanollvm_value_attr| readonly) => pure (mkConst ``ValueAttr.readonly)
   | _ => throwUnsupportedSyntax
 
 private def elabValueAttrList (attrs : Array (TSyntax `nanollvm_value_attr)) : TermElabM Expr := do
@@ -218,6 +230,13 @@ scoped syntax "{" nanollvm_typed_exp,* "}" : nanollvm_exp
 scoped syntax "<{" nanollvm_typed_exp,* "}>" : nanollvm_exp
 scoped syntax "<" nanollvm_typed_exp,+ ">" : nanollvm_exp
 scoped syntax "splat" "(" nanollvm_typed_exp ")" : nanollvm_exp
+scoped syntax "getelementptr" (" inbounds ")? "(" nanollvm_type ", " nanollvm_typed_exp (", " nanollvm_typed_exp)* ")" : nanollvm_exp
+scoped syntax "ptrtoint" "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
+scoped syntax "ptrtoaddr" "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
+scoped syntax "inttoptr" "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
+scoped syntax "bitcast" "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
+scoped syntax "add" "(" nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ")" : nanollvm_exp
+scoped syntax "sub" "(" nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ")" : nanollvm_exp
 
 private def mkPairTyLlvmExp : MetaM Expr :=
   mkAppM ``Prod #[mkConst ``LlvmType, mkConst ``Exp]
@@ -285,6 +304,25 @@ partial def elabNanoLlvmExp : Syntax → TermElabM Expr
   | `(nanollvm_exp| splat ($te:nanollvm_typed_exp)) => do
     let e ← elabNanoLlvmTypedExp te
     mkAppM ``Exp.splat #[e]
+  | `(nanollvm_exp| getelementptr $[inbounds%$ib]? ($baseTy:nanollvm_type, $ptr:nanollvm_typed_exp $[, $idxs:nanollvm_typed_exp]*)) => do
+    let fl : GEPFlags := if ib.isSome then GEPFlags.mkInbounds else GEPFlags.none
+    let flE ← mkAppM ``GEPFlags.mk #[toExpr fl.inbounds, toExpr fl.nusw, toExpr fl.nuw]
+    let idxList ← mkListLit (← mkPairTyLlvmExp) (← idxs.toList.mapM (fun x => elabNanoLlvmTypedExp x.raw))
+    mkAppM ``Exp.gepConst #[flE, ← elabNanoLlvmType baseTy, ← elabNanoLlvmTypedExp ptr, idxList]
+  | `(nanollvm_exp| ptrtoint ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
+    mkAppM ``Exp.convConst #[mkConst ``ConversionOp.ptrtoint, ← elabNanoLlvmType fTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType tTy]
+  | `(nanollvm_exp| ptrtoaddr ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
+    mkAppM ``Exp.convConst #[mkConst ``ConversionOp.ptrtoaddr, ← elabNanoLlvmType fTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType tTy]
+  | `(nanollvm_exp| inttoptr ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
+    mkAppM ``Exp.convConst #[mkConst ``ConversionOp.inttoptr, ← elabNanoLlvmType fTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType tTy]
+  | `(nanollvm_exp| bitcast ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
+    mkAppM ``Exp.convConst #[mkConst ``ConversionOp.bitcast, ← elabNanoLlvmType fTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType tTy]
+  | `(nanollvm_exp| add ($ty:nanollvm_type $v1:nanollvm_exp, $_ty2:nanollvm_type $v2:nanollvm_exp)) => do
+    let op ← mkAppM ``IntBinaryOp.add #[toExpr Bool.false, toExpr Bool.false]
+    mkAppM ``Exp.binConst #[op, ← elabNanoLlvmType ty, ← elabNanoLlvmExp v1, ← elabNanoLlvmExp v2]
+  | `(nanollvm_exp| sub ($ty:nanollvm_type $v1:nanollvm_exp, $_ty2:nanollvm_type $v2:nanollvm_exp)) => do
+    let op ← mkAppM ``IntBinaryOp.sub #[toExpr Bool.false, toExpr Bool.false]
+    mkAppM ``Exp.binConst #[op, ← elabNanoLlvmType ty, ← elabNanoLlvmExp v1, ← elabNanoLlvmExp v2]
   | _ => throwUnsupportedSyntax
 end
 
@@ -472,6 +510,8 @@ scoped syntax nanollvm_typed_exp : nanollvm_alloca_opt
 declare_syntax_cat nanollvm_load_opt
 scoped syntax "align " num : nanollvm_load_opt
 scoped syntax "!noundef" : nanollvm_load_opt
+scoped syntax "!nonnull" : nanollvm_load_opt
+scoped syntax "!range(" nanollvm_signed_int ", " nanollvm_signed_int ")" : nanollvm_load_opt
 
 declare_syntax_cat nanollvm_call_arg
 scoped syntax nanollvm_type nanollvm_value_attr* ppHardSpace nanollvm_exp : nanollvm_call_arg
@@ -547,13 +587,20 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
   | `(nanollvm_instruction| load $[volatile%$vol]? $ty:nanollvm_type, $pTy:nanollvm_type $ptrExp:nanollvm_exp $[, $opts:nanollvm_load_opt]*) => do
     let mut alignOptVal : Option Expr := none
     let mut hasNoundef : Bool := Bool.false
+    let mut mdAttrs : Array Expr := #[]
     for opt in opts do
       match opt.raw with
       | `(nanollvm_load_opt| align $al:num) => alignOptVal := some (mkNatLit al.getNat)
       | `(nanollvm_load_opt| !noundef) => hasNoundef := Bool.true
+      | `(nanollvm_load_opt| !nonnull) => mdAttrs := mdAttrs.push (mkConst ``ValueAttr.nonnull)
+      | `(nanollvm_load_opt| !range($lo:nanollvm_signed_int, $hi:nanollvm_signed_int)) => do
+          let loE ← elabSignedInt lo
+          let hiE ← elabSignedInt hi
+          mdAttrs := mdAttrs.push (← mkAppM ``ValueAttr.range #[loE, hiE])
       | _ => throwUnsupportedSyntax
     let alignOpt ← mkOptionExpr (mkConst ``Nat) alignOptVal
-    mkAppM ``Instruction.load #[← elabNanoLlvmType ty, ← elabNanoLlvmType pTy, ← elabNanoLlvmExp ptrExp, alignOpt, toExpr vol.isSome, toExpr hasNoundef]
+    let mdList ← mkListLit (mkConst ``ValueAttr) mdAttrs.toList
+    mkAppM ``Instruction.load #[← elabNanoLlvmType ty, ← elabNanoLlvmType pTy, ← elabNanoLlvmExp ptrExp, alignOpt, toExpr vol.isSome, toExpr hasNoundef, mdList]
   | `(nanollvm_instruction| store $[volatile%$vol]? $vTy:nanollvm_type $v:nanollvm_exp, $pTy:nanollvm_type $ptrExp:nanollvm_exp $[, align $al:num]?) => do
     let alignOpt ← mkOptionExpr (mkConst ``Nat) (al.map fun a => mkNatLit a.getNat)
     mkAppM ``Instruction.store #[← elabNanoLlvmType vTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType pTy, ← elabNanoLlvmExp ptrExp, alignOpt, toExpr vol.isSome]
@@ -784,12 +831,21 @@ def elabNanoLlvmGlobal : Syntax → TermElabM Expr
 
 elab "[llvm-global|" p:nanollvm_global "]" : term => elabNanoLlvmGlobal p
 
+declare_syntax_cat nanollvm_typedef
+scoped syntax "%" nanollvm_rawid " = " "type " nanollvm_type : nanollvm_typedef
+
 declare_syntax_cat nanollvm_entity
+scoped syntax nanollvm_typedef : nanollvm_entity
 scoped syntax nanollvm_global : nanollvm_entity
 scoped syntax nanollvm_declaration : nanollvm_entity
 scoped syntax nanollvm_definition : nanollvm_entity
 
 def elabNanoLlvmEntity : Syntax → TermElabM Expr
+  | `(nanollvm_entity| $td:nanollvm_typedef) =>
+    match td.raw with
+    | `(nanollvm_typedef| %$nm:nanollvm_rawid = type $ty:nanollvm_type) => do
+      mkAppM ``TopLevelEntity.typeDef #[← elabNanoLlvmRawId nm, ← elabNanoLlvmType ty]
+    | _ => throwUnsupportedSyntax
   | `(nanollvm_entity| $gv:nanollvm_global) => do mkAppM ``TopLevelEntity.global #[← elabNanoLlvmGlobal gv]
   | `(nanollvm_entity| $decl:nanollvm_declaration) => do mkAppM ``TopLevelEntity.declaration #[← elabNanoLlvmDeclaration decl]
   | `(nanollvm_entity| $defn:nanollvm_definition) => do mkAppM ``TopLevelEntity.definition #[← elabNanoLlvmDefinition defn]

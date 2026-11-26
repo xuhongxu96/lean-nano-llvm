@@ -139,7 +139,7 @@ mutual
 /-- Returns `true` if `ty` is or recursively contains a `.function` type (disallowed in `undef`). -/
 @[simp]
 def LlvmType.hasFunction : LlvmType → Bool
-  | .function .. => true
+  | .function .. | .named _ => true
   | .vector _ elem => elem.hasFunction
   | .array _ elem => elem.hasFunction
   | .struct _ fields => LlvmType.hasFunctionList fields
@@ -697,41 +697,53 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       (∀ w iv, v ≠ .bv w iv) →
       StepInstr st frame callers iid rest (.alloca allocTy (some (nTy, nExp)) align? addrSpace) none (.staticError msg)
 
-  /- Load (relational via BytesToValueRel; volatile emits TraceEvent.volatileLoad) -/
-  | load_ok {ty ptrTy ptrExp align? isVol noundef as p m1 mo offset val hasUndef} :
+  /- Load (relational via BytesToValueRel; volatile emits TraceEvent.volatileLoad; supports !nonnull / !range / !noundef) -/
+  | load_ok {ty ptrTy ptrExp align? isVol noundef md as p m1 mo offset rawVal val hasUndef} :
       EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.ok (.ptr as (.value p), m1)) →
       m1.verifyMemAccess p (st.dataLayout.typeStoreSize ty) (align?.getD (st.dataLayout.typeABIAlign ty)) false = .ok (mo, offset) →
       BytesToValueRel st.dataLayout st.config
-        (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty val hasUndef →
+        (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty rawVal hasUndef →
+      applyValueAttrsPure st.dataLayout m1 ty rawVal md = .ok val →
       (noundef = true → hasUndef = false ∧ val.containsPoison = false) →
-      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef)
+      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md)
         (if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat
           (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty))) else none)
         (finishRegInstr st frame callers rest iid val m1)
-  | load_noundef_ub {ty ptrTy ptrExp align? isVol as p m1 mo offset val hasUndef msg} :
+  | load_md_err {ty ptrTy ptrExp align? isVol noundef md as p m1 mo offset rawVal hasUndef err} :
       EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.ok (.ptr as (.value p), m1)) →
       m1.verifyMemAccess p (st.dataLayout.typeStoreSize ty) (align?.getD (st.dataLayout.typeABIAlign ty)) false = .ok (mo, offset) →
       BytesToValueRel st.dataLayout st.config
-        (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty val hasUndef →
+        (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty rawVal hasUndef →
+      applyValueAttrsPure st.dataLayout m1 ty rawVal md = .error err →
+      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md)
+        (if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat
+          (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty))) else none)
+        (Config.ofError err)
+  | load_noundef_ub {ty ptrTy ptrExp align? isVol md as p m1 mo offset rawVal val hasUndef msg} :
+      EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.ok (.ptr as (.value p), m1)) →
+      m1.verifyMemAccess p (st.dataLayout.typeStoreSize ty) (align?.getD (st.dataLayout.typeABIAlign ty)) false = .ok (mo, offset) →
+      BytesToValueRel st.dataLayout st.config
+        (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty rawVal hasUndef →
+      applyValueAttrsPure st.dataLayout m1 ty rawVal md = .ok val →
       (hasUndef = true ∨ val.containsPoison = true) →
-      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol true)
+      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol true md)
         (if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat
           (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty))) else none)
         (.ub msg)
-  | load_ptr_err {ty ptrTy ptrExp align? isVol noundef err} :
+  | load_ptr_err {ty ptrTy ptrExp align? isVol noundef md err} :
       EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.error err) →
-      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef) none (Config.ofError err)
-  | load_ptr_poison {ty ptrTy ptrExp align? isVol noundef as m1 msg} :
+      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md) none (Config.ofError err)
+  | load_ptr_poison {ty ptrTy ptrExp align? isVol noundef md as m1 msg} :
       EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.ok (.ptr as .poison, m1)) →
-      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef) none (.ub msg)
-  | load_ptr_nonptr {ty ptrTy ptrExp align? isVol noundef v m1 msg} :
+      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md) none (.ub msg)
+  | load_ptr_nonptr {ty ptrTy ptrExp align? isVol noundef md v m1 msg} :
       EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.ok (v, m1)) →
       (∀ as pv, v ≠ .ptr as pv) →
-      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef) none (.staticError msg)
-  | load_mem_err {ty ptrTy ptrExp align? isVol noundef as p m1 err} :
+      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md) none (.staticError msg)
+  | load_mem_err {ty ptrTy ptrExp align? isVol noundef md as p m1 err} :
       EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.ok (.ptr as (.value p), m1)) →
       m1.verifyMemAccess p (st.dataLayout.typeStoreSize ty) (align?.getD (st.dataLayout.typeABIAlign ty)) false = .error err →
-      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef) none (Config.ofError err)
+      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md) none (Config.ofError err)
 
   /- Store (volatile emits TraceEvent.volatileStore) -/
   | store_ok {valTy valExp ptrTy ptrExp align? isVol val m1 as p m2 mo offset} :
@@ -942,21 +954,21 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       isAllocLibcall fid.ToString = false →
       (∃ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = some (.error err)) →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
-  | call_user_ok {retTy fmf calleeExp args retAttrs argVals m1 fid m2 calleeDef calleeFrame} :
+  | call_user_ok {retTy fmf calleeExp args retAttrs argVals m1 fid m2 calleeDef calleeFrame m3} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       isAllocLibcall fid.ToString = false →
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkEntryFrame st.dataLayout m2 calleeDef argVals = .ok calleeFrame →
+      mkEntryFrameWithMem st.dataLayout st.config m2 calleeDef argVals = .ok (calleeFrame, m3) →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none
         (.running (st.withFramesAndMemory
           (calleeFrame ::
             (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
               (some { destId := iid, retTy := retTy, fmf := fmf, retAttrs := retAttrs }) ::
             callers)
-          m2))
+          m3))
   | call_user_entry_err {retTy fmf calleeExp args retAttrs argVals m1 fid m2 calleeDef err} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
@@ -964,7 +976,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout st.config m2 fid.ToString retTy fmf argVals o = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkEntryFrame st.dataLayout m2 calleeDef argVals = .error err →
+      mkEntryFrameWithMem st.dataLayout st.config m2 calleeDef argVals = .error err →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs) none (Config.ofError err)
   | call_user_overflow {retTy fmf calleeExp args retAttrs argVals m1 fid m2 calleeDef} :
       EvalCallArgs st.dataLayout st.config frame.registers st.memory args (.ok (argVals, m1)) →
@@ -1160,7 +1172,7 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
       | none => rw [hcnt.2]; exact hwf
       | some p => obtain ⟨_, _, he, _⟩ := hcnt; exact EvalExp.preserves_wf hwf he
     exact finishRegInstr_wf (hspec.preserves_wf hm1)
-  | load_ok h1 _ _ _ => exact finishRegInstr_wf (EvalExp.preserves_wf hwf h1)
+  | load_ok h1 _ _ _ _ => exact finishRegInstr_wf (EvalExp.preserves_wf hwf h1)
   | store_ok h1 h2 _ =>
     exact MemoryState.writeObjectBytes_preserves_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2) _ _ _
   | gep_ok h1 h2 _ => exact finishRegInstr_wf (EvalExpList.preserves_wf (EvalExp.preserves_wf hwf h1) h2)
@@ -1176,8 +1188,8 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
   | call_intrinsic_ok ha hc _ hint _ =>
     obtain ⟨o, o', hev⟩ := hint
     exact finishCallResult_wf (evalNonAllocIntrinsicExec?_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hev)
-  | call_user_ok ha hc _ _ _ _ _ =>
-    exact EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc
+  | call_user_ok ha hc _ _ _ _ hmk =>
+    exact mkEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf hwf ha) hc) hmk
   | _ => first | exact configOfError_wf _ | trivial
 
 theorem StepTerm.preserves_wf {st frame callers tid term c'}

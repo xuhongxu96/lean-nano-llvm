@@ -162,7 +162,7 @@ def Instruction.WellFormedWith (cfg : SemanticsConfig) (locals : List LocalId)
       ∧ match numEl? with
         | none => True
         | some (nTy, nExp) => nTy.asInt?.isSome = true ∧ nExp.WellFormedFor cfg nTy ∧ nExp.WellScopedTo locals
-  | .load ty ptrTy ptr _ _ _ =>
+  | .load ty ptrTy ptr _ _ _ _ =>
       instrId.DefinesLocal
       ∧ ty.isFirstClass = true
       ∧ ptrTy.asPtr?.isSome = true

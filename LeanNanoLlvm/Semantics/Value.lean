@@ -142,7 +142,7 @@ def poisonOf : LlvmType → RegisterValue
   | .vector n elem => .vector elem (List.replicate n (poisonOf elem))
   | .array n elem => .array elem (List.replicate n (poisonOf elem))
   | .struct packed fields => .struct packed fields (poisonOfList fields)
-  | .function .. => .void
+  | .function .. | .named _ => .void
 
 def poisonOfList : List LlvmType → List RegisterValue
   | [] => []
@@ -158,7 +158,7 @@ def nullOf (dl : DataLayout) : LlvmType → RegisterValue
   | .vector n elem => .vector elem (List.replicate n (nullOf dl elem))
   | .array n elem => .array elem (List.replicate n (nullOf dl elem))
   | .struct packed fields => .struct packed fields (nullOfList dl fields)
-  | .function .. => .void
+  | .function .. | .named _ => .void
 
 def nullOfList (dl : DataLayout) : List LlvmType → List RegisterValue
   | [] => []
@@ -567,7 +567,7 @@ def valueToBytes (dl : DataLayout) (cfg : SemanticsConfig)
         | _ => fieldTys.map RegisterValue.poisonOf
       let arr := Array.replicate storeSize (MemByte.uninitFor cfg)
       valueToBytesStruct dl cfg fieldTys offsets fields arr
-  | .function .. => #[]
+  | .function .. | .named _ => #[]
 
 def valueToBytesStruct (dl : DataLayout) (cfg : SemanticsConfig) :
     List LlvmType → List Nat → List RegisterValue → Array MemByte → Array MemByte
@@ -626,7 +626,7 @@ def bytesToValue (dl : DataLayout) (cfg : SemanticsConfig)
     | (offsets, _) =>
       match bytesToValueStruct dl cfg bytes fieldTys offsets [] false oracle with
       | (fields, hasU, o') => (.struct packed fieldTys fields, hasU, o')
-  | .function .., oracle => (.void, false, oracle)
+  | .function .., oracle | .named _, oracle => (.void, false, oracle)
 
 def bytesToValueStruct (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemByte) :
     List LlvmType → List Nat → List RegisterValue → Bool → OracleState →
@@ -866,7 +866,7 @@ def genUndefZeroExec (dl : DataLayout) : LlvmType → Except ExecError RegisterV
     match genUndefZeroListExec dl fields with
     | .ok fs => .ok (.struct packed fields fs)
     | .error e => .error e
-  | .function .. => .error (.staticError "Cannot create undef of function type")
+  | .function .. | .named _ => .error (.staticError "Cannot create undef of function or unresolved named type")
 
 def genUndefZeroListExec (dl : DataLayout) : List LlvmType → Except ExecError (List RegisterValue)
   | [] => .ok []
@@ -914,7 +914,7 @@ def genUndefNondetExec (dl : DataLayout) : LlvmType → OracleState → Except E
     match genUndefListExec dl fields o with
     | .ok (fs, o') => .ok (.struct packed fields fs, o')
     | .error e => .error e
-  | .function .., _ => .error (.staticError "Cannot create undef of function type")
+  | .function .., _ | .named _, _ => .error (.staticError "Cannot create undef of function or unresolved named type")
 
 def genUndefListExec (dl : DataLayout) : List LlvmType → OracleState → Except ExecError (List RegisterValue × OracleState)
   | [], o => .ok ([], o)
@@ -980,7 +980,7 @@ private theorem genUndefZeroExec_sound (dl : DataLayout) (cfg : SemanticsConfig)
     | ok fs =>
       rw [hf] at h; cases h
       exact UndefValRel.struct packed fields fs (genUndefZeroListExec_sound dl cfg fields hf)
-  | .function .., _, h => by unfold genUndefZeroExec at h; cases h
+  | .function .., _, h | .named _, _, h => by unfold genUndefZeroExec at h; cases h
 
 private theorem genUndefZeroListExec_sound (dl : DataLayout) (cfg : SemanticsConfig) :
     ∀ (ts : List LlvmType) {vs : List RegisterValue},
@@ -1073,7 +1073,7 @@ private theorem genUndefNondetExec_sound (dl : DataLayout) (cfg : SemanticsConfi
     | ok p =>
       rw [hl] at h; cases h
       exact UndefValRel.struct packed fields p.1 (genUndefListExec_sound dl cfg hne fields o hl)
-  | .function .., _, _, _, h => by unfold genUndefNondetExec at h; cases h
+  | .function .., _, _, _, h | .named _, _, _, _, h => by unfold genUndefNondetExec at h; cases h
 
 private theorem genUndefListExec_sound (dl : DataLayout) (cfg : SemanticsConfig)
     (hne : cfg.undefMode ≠ .zero) :
@@ -1392,6 +1392,21 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
           else .ok (.ptr as (.value p))
     | other => .ok other
   | .byval _ => .ok val
+  | .sret ty =>
+    match val with
+    | .ptr as (.value p) =>
+      if p.isNull dl as then .ok (.ptr as .poison)
+      else match mem.resolveObject? p with
+        | none => .ok (.ptr as .poison)
+        | some mo =>
+          let sz := dl.typeStoreSize ty
+          if mo.state == .freed || sz > mo.size || p.addr.toNat < mo.baseAddr ||
+             p.addr.toNat - mo.baseAddr > mo.size - sz then
+            .ok (.ptr as .poison)
+          else .ok (.ptr as (.value p))
+    | other => .ok other
+  | .noalias => .ok val
+  | .readonly => .ok val
 
 def applyValueAttrsPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
     (val : RegisterValue) : List ValueAttr → Except ExecError RegisterValue
