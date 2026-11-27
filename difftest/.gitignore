@@ -1,0 +1,3 @@
+# Oracle builds and campaign working data (regenerable from pins.env + seeds).
+/.oracles/
+/work/
