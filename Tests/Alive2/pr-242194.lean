@@ -25,9 +25,6 @@ theorem pr_242194 :
         %r = icmp eq i32 %pos, %n
         ret i1 %r
       }
-    ] := by
-  llvm_refine
-  rw [Bool.eq_iff_iff]; simp only [beq_iff_eq]
-  rw [BitVec.shiftLeft_eq_mul_twoPow]; bv_omega
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Alive2

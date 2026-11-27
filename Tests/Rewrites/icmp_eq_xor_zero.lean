@@ -20,8 +20,6 @@ theorem icmp_eq_xor_zero (w : Nat) :
         %r = icmp eq i$(w) %x, %y
         ret i1 %r
       }
-    ] := by
-  llvm_refine
-  rw [Bool.eq_iff_iff]; simp [BitVec.xor_eq_zero_iff]
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Rewrites

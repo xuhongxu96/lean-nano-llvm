@@ -31,9 +31,6 @@ theorem issue_42398 :
         %r = add i32 %z, 9
         ret i32 %r
       }
-    ] := by
-  llvm_refine
-  by_cases h9 : 9 < arg0.toInt <;> (repeat' split) <;> simp_all [BitVec.slt] <;>
-    (apply BitVec.eq_of_toInt_eq; by_cases h9' : 9 < arg0.toInt <;> simp [h9'] <;> omega)
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Alive2

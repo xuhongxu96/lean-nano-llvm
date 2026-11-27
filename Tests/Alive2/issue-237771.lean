@@ -42,20 +42,10 @@ theorem issue_237771 :
         ret i32 %t6
       }
     ] := by
-  llvm_intro; llvm_symexec
-  all_goals
-    cases hc1 : decide (arg0 + 159#8 < 6#8)
-    · simp only [BitVec.ofBool, cond_false]; llvm_symexec
-      apply RegisterValue.isRefinedBy_bv_of_poisonOr
-      have hnsw : (BitVec.setWidth 32 arg0).saddOverflow 4294967241#32 = false := by
-        have := arg0.isLt; simp [BitVec.saddOverflow, BitVec.toInt_eq_toNat_cond, BitVec.toNat_setWidth]; omega
-      simp [simp_llvm, hnsw]
-      clear hnsw; revert arg0 hc1 h_ite_sym; decide
-    · simp only [BitVec.ofBool, cond_true]; llvm_symexec
-      apply RegisterValue.isRefinedBy_bv_of_poisonOr
-      have hnsw : (BitVec.setWidth 32 arg0).saddOverflow 4294967209#32 = false := by
-        have := arg0.isLt; simp [BitVec.saddOverflow, BitVec.toInt_eq_toNat_cond, BitVec.toNat_setWidth]; omega
-      simp [simp_llvm, hnsw]
-      clear hnsw; revert arg0 hc1 h_ite_sym; decide
+  llvm_refine
+  -- Every leaf is about the 8-bit argument alone; the `nsw` guards are not needed. Check all 256 values.
+  · revert arg0; decide
+  · clear h_1; revert arg0; decide
+  · clear h; revert arg0; decide
 
 end LeanNanoLlvm.Tests.Alive2

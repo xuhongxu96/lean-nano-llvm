@@ -18,8 +18,6 @@ theorem icmp_slt_self (w : Nat) :
       entry:
         ret i1 false
       }
-    ] := by
-  llvm_refine
-  simp [BitVec.slt]
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Rewrites

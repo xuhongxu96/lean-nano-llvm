@@ -37,10 +37,6 @@ theorem issue_245770 (w : Nat) (c1 c2 : Int) :
         %r = and i1 %cond0, %cmp2
         ret i1 %r
       }
-    ] := by
-  llvm_refine
-  cases h1 : (arg0 == BitVec.ofInt w c1 && arg1 == BitVec.ofInt w c1)
-  · simp only [BitVec.ofBool, cond_false]; llvm_refine
-  · simp only [BitVec.ofBool, cond_true]; llvm_refine
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Alive2

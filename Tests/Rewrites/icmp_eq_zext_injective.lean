@@ -21,10 +21,6 @@ theorem icmp_eq_zext_injective :
         %r = icmp eq i8 %x, %y
         ret i1 %r
       }
-    ] := by
-  llvm_refine
-  rw [Bool.eq_iff_iff]; simp; constructor <;> intro h
-  · apply BitVec.eq_of_toNat_eq; have := congrArg BitVec.toNat h; simp at this; bv_omega
-  · subst h; rfl
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Rewrites

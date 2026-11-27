@@ -29,9 +29,7 @@ theorem pr_243027_and_ult_sge :
         %r = and i1 %a, %b
         ret i1 %r
       }
-    ] := by
-  llvm_refine
-  rw [Bool.eq_iff_iff]; simp [BitVec.sle, BitVec.slt, BitVec.toInt_eq_toNat_cond]; bv_omega
+    ] := by llvm_refine
 
 theorem pr_243027_and_ugt_sle :
     [llvm-definition|
@@ -50,8 +48,6 @@ theorem pr_243027_and_ugt_sle :
         %r = and i1 %a, %b
         ret i1 %r
       }
-    ] := by
-  llvm_refine
-  rw [Bool.eq_iff_iff]; simp [BitVec.sle, BitVec.slt, BitVec.toInt_eq_toNat_cond]; bv_omega
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Alive2

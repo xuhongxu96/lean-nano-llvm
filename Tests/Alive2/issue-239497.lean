@@ -30,14 +30,6 @@ theorem issue_239497 :
       entry:
         ret i1 true
       }
-    ] := by
-  llvm_intro; llvm_symexec
-  cases hg : (decide (arg0 < arg1) && (0#32).slt arg0 && (0#32).slt arg1)
-  · llvm_refine
-  · llvm_refine
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hg
-    have ⟨⟨hult, hx⟩, hy⟩ := hg
-    simp [BitVec.slt, BitVec.lt_def, BitVec.toInt_eq_toNat_cond] at hult hx hy ⊢
-    bv_omega
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Alive2

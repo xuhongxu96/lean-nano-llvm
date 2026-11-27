@@ -15,7 +15,10 @@ whole pipeline and when to use each layer):
                     `conversionOp`, `floatUnaryOp`, `freeze`, `br`, `condBr`, `switch`, `phi`,
                     `ret`, `retVoid`, `unreachable`), short-circuiting on source `.ub` / `CanAbort`
                     and reducing `.halted` vs `.halted` to `RegisterValue.IsRefinedBy .id retX retY`.
-                    A goal it cannot advance stays as `Config.IsRefinedBy`.
+                    When a `condBr` depends on a symbolic `i1` value, it asks the step
+                    lemma which value that is and case-splits on it; the case is kept as a
+                    named hypothesis `h_br` (normalized from `BitVec.ofBool b` to a statement
+                    about `b`). A goal it cannot advance stays as `Config.IsRefinedBy`.
 
 `llvm_guard tac` is a helper used by the later layers: it turns runtime exceptions raised by
 `tac` into ordinary failures.
@@ -530,6 +533,82 @@ private def trySplitOneBoolBv : TacticM Bool := do
       return false
   return false
 
+/-- The value a `condBr` on side `source` (or the target) branches on, as computed by the step
+    lemma's own operand evaluation. Returns it only when it is symbolic (mentions free variables),
+    i.e. when the branch cannot be decided. -/
+private def condBrValue? (source : Bool) : TacticM (Option Expr) := do
+  let s ← saveState
+  let r ← try
+      if source then
+        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_step_left))
+        evalTactic (← `(tactic| apply Step.condBr_val_det rfl rfl rfl))
+      else
+        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
+        evalTactic (← `(tactic| apply Step.condBr_val_det_iff rfl rfl rfl))
+      let hcondTy ← (← getMainGoal).getType
+      evalTactic (← `(tactic| ((try llvm_step); rfl)))
+      -- `hcond : evalPureLeafExp? ... = some (.ok (.bv 1 (.value b)))`: read `b` from the rhs.
+      let rhs := (← instantiateMVars hcondTy).appArg!
+      let some b := (rhs.find? (·.isAppOfArity ``PoisonOr.value 2)).map (·.appArg!)
+        | pure none
+      if ← isDefEq (← inferType b) (mkApp (mkConst ``BitVec) (mkNatLit 1)) then pure (some b)
+      else pure none
+    catch _ => pure none
+  restoreState s
+  match r with
+  | some e => return if e.hasFVar && !e.hasMVar then some e else none
+  | none => return none
+
+/-- When a `condBr` is stuck because its condition is a symbolic `i1` value `e`, case-split on
+    `e = 0#1 ∨ e = 1#1`, rewrite `e` in the goal so the branch can be taken, and keep the case as
+    a named hypothesis (normalized from `BitVec.ofBool b = _` to a statement about `b`). -/
+private def trySplitBranchValue (actX actY : NextAction) : TacticM Bool := do
+  let isCondBr : NextAction → Bool
+    | .term nm => nm == ``AST.Terminator.condBr
+    | _ => false
+  let mut e? : Option Expr := none
+  if isCondBr actX then e? ← condBrValue? true
+  if e?.isNone && isCondBr actY then e? ← condBrValue? false
+  let some e := e? | return false
+  let s ← saveState
+  try
+    let g ← getMainGoal
+    let nm := (← g.getDecl).lctx.getUnusedName `h_br
+    let hId := mkIdent nm
+    let g ← g.assert nm (← inferType (mkApp (mkConst ``bitvec1_eq_zero_or_one) e))
+      (mkApp (mkConst ``bitvec1_eq_zero_or_one) e)
+    let (_, g) ← g.intro1P
+    setGoals [g]
+    evalTactic (← `(tactic| rcases $hId:ident with $hId:ident | $hId:ident))
+    let gs ← getGoals
+    let mut out : List MVarId := []
+    for sg in gs do
+      setGoals [sg]
+      evalTactic (← `(tactic| simp only [$hId:ident]))
+      try evalTactic (← `(tactic|
+        simp only [bitvec_ofBool_eq_zero, bitvec_ofBool_eq_one, bne_eq_false_iff_eq, bne_iff_ne,
+          beq_eq_false_iff_ne, beq_iff_eq, Bool.and_eq_true, Bool.or_eq_true, Bool.and_eq_false_iff,
+          Bool.or_eq_false_iff, Bool.not_eq_true', Bool.not_eq_false', decide_eq_true_eq,
+          decide_eq_false_iff_not] at $hId:ident)) catch _ => pure ()
+      -- Drop the new hypothesis if an earlier one already states the same fact.
+      try
+        let g ← getMainGoal
+        let dup ← g.withContext do
+          let lctx ← getLCtx
+          let some d := lctx.findFromUserName? nm | return false
+          lctx.anyM fun d' => do
+            if d'.fvarId == d.fvarId || d'.isImplementationDetail then return false
+            withReducible (isDefEq d'.type d.type)
+        if dup then evalTactic (← `(tactic| clear $hId:ident))
+      catch _ => pure ()
+      simpAfterStep
+      out := out ++ (← getGoals)
+    setGoals out
+    return true
+  catch _ =>
+    restoreState s
+    return false
+
 /-- Handle nondeterministic `freeze` on `.poison` (peeling target via `of_freeze_poison_right` first,
     then matching source via `freeze_bv_poison_step`). -/
 private def tryStepFreezePoison (actX actY : NextAction) : TacticM Bool := do
@@ -625,7 +704,10 @@ private def symexecLoop (fuel : Nat) : TacticM Unit := do
                   | .unknown, _ => true
                   | _, .unknown => true
                   | _, _ => false
-                if needsSplit then
+                if needsSplit && (← trySplitBranchValue actX actY) then
+                  anyProgress := true
+                  remaining := remaining ++ (← getGoals)
+                else if needsSplit then
                   let p4 ← trySplitOnePoisonOr
                   if p4 then
                     anyProgress := true

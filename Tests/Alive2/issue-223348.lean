@@ -28,8 +28,6 @@ theorem issue_223348 :
         %r = icmp sgt i32 %x, 0
         ret i1 %r
       }
-    ] := by
-  llvm_refine
-  rw [Bool.eq_iff_iff]; simp [BitVec.slt, BitVec.toInt_eq_toNat_cond]; bv_omega
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Alive2

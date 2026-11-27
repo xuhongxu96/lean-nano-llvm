@@ -23,8 +23,7 @@ theorem abs_nonneg_nsw (w : Nat) :
       }
     ] := by
   llvm_refine
-  · simp [BitVec.slt, BitVec.sle] at *; omega
-  · have hsub := BitVec.toInt_sub_of_not_ssubOverflow (x := 0#w) (y := arg0) (by simp_all)
-    simp [BitVec.slt, BitVec.sle] at *; omega
+  have hsub := BitVec.toInt_sub_of_not_ssubOverflow (x := 0#w) (y := arg0) (by simp_all)
+  simp [BitVec.slt, BitVec.sle] at *; omega
 
 end LeanNanoLlvm.Tests.Rewrites

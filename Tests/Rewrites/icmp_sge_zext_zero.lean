@@ -19,8 +19,6 @@ theorem icmp_sge_zext_zero :
       entry:
         ret i1 true
       }
-    ] := by
-  llvm_refine
-  simp [BitVec.sle, BitVec.toInt_eq_toNat_cond, -BitVec.toInt_setWidth]; bv_omega
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Rewrites
