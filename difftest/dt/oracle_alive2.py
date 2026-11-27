@@ -9,8 +9,9 @@ Each pair module defines ``@src`` and ``@tgt``; ``alive-tv`` checks that ``tgt``
   ``error_kind`` is one of ``ERROR_KINDS``; ``counterexample`` lists the input values of
   Alive2's (minimized) model, parsed where they are integers, floats, ``poison`` or ``undef``;
   ``unique`` records Alive2's "The counterexample is unique" note.
-* ``inconclusive``: Alive2 could not decide: SMT timeout or memory-out, or a counterexample
-  that depends on approximated semantics ("Couldn't prove the correctness"). ``reason`` says
+* ``inconclusive``: Alive2 could not decide: SMT timeout or memory-out, a counterexample
+  that depends on approximated semantics ("Couldn't prove the correctness"), or a function
+  with no path to ``ret`` within the loop-unrolling bound (``unroll-bound``). ``reason`` says
   which.
 * ``unsupported``: Alive2 does not model a feature of the input ("ERROR: Unsupported ...",
   type-check failure, signature mismatch).
@@ -117,6 +118,10 @@ def parse_output(out: str) -> dict[str, Any]:
             rec["verdict"], rec["reason"] = "inconclusive", "smt-memout"
         elif msg.startswith("SMT Error"):
             rec["verdict"], rec["reason"] = "inconclusive", "smt-error"
+        elif "program doesn't reach a return instruction" in msg:
+            # Alive2 unrolls loops a bounded number of times (--src-unroll/--tgt-unroll, default
+            # 0): it cannot decide functions whose every path within the bound loops.
+            rec["verdict"], rec["reason"] = "inconclusive", "unroll-bound"
         elif "Unsupported" in msg or "Signature mismatch" in msg or "unsupported" in msg:
             rec["verdict"], rec["reason"] = "unsupported", msg[:200]
         else:

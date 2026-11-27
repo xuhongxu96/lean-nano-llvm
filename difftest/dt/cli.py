@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterable
 
 from . import corpus as corpus_mod
 from . import drivers, ir, lean_emit, mutate, oracle_alive2, oracle_llubi, pairs, report
-from .common import WORK, provenance, read_jsonl, sha256, write_jsonl
+from .common import WORK, provenance, read_jsonl, read_results, sha256, shard_path, write_jsonl
 
 DEFAULT_SEED = 20261127
 
@@ -61,7 +61,9 @@ def _sort_jsonl(path: Path, key: str) -> None:
 
 
 def _resume(out: Path, key: str = "id") -> set[str]:
-    return {r[key] for r in read_jsonl(out)}
+    """Rows already done, in the unsharded file or any shard file (so a stage can be resumed
+    with a different sharding)."""
+    return {r[key] for r in read_results(out)}
 
 
 def _work(args) -> Path:
@@ -305,10 +307,11 @@ def cmd_run_llubi(args) -> int:
                 "categories": c["features"]["categories"], **r}
 
     n = 0
+    dest = shard_path(out, args.shard)
     for row in _parallel(one, todo, args.jobs):
-        write_jsonl(out, [row], append=True)
+        write_jsonl(dest, [row], append=True)
         n += 1
-    print(json.dumps({"ran": n, "output": str(out)}))
+    print(json.dumps({"ran": n, "output": str(dest)}))
     return 0
 
 
@@ -333,12 +336,13 @@ def cmd_run_alive2(args) -> int:
         return {"pair": p["id"], "origin": p["origin"], **r}
 
     n = 0
+    dest = shard_path(out, args.shard)
     for row in _parallel(one, todo, args.jobs):
         if row is None:
             continue
-        write_jsonl(out, [row], append=True)
+        write_jsonl(dest, [row], append=True)
         n += 1
-    print(json.dumps({"ran": n, "output": str(out)}))
+    print(json.dumps({"ran": n, "output": str(dest)}))
     return 0
 
 
@@ -346,7 +350,7 @@ def cmd_run_lean(args) -> int:
     w = _work(args)
     out = w / "results" / "lean.jsonl"
     done = _resume(out, "run_id")
-    alive = {r["pair"]: r for r in read_jsonl(w / "results" / f"alive2-{args.config}.jsonl")}
+    alive = {r["pair"]: r for r in read_results(w / "results" / f"alive2-{args.config}.jsonl", "pair")}
     kinds = args.obligations.split(",")
     todo = []
     for p in read_jsonl(w / "pairs" / "pairs.jsonl"):
@@ -359,7 +363,8 @@ def cmd_run_lean(args) -> int:
     if args.limit is not None:
         todo = todo[: args.limit]
 
-    def one(t):
+    def prepare(t):
+        """(row base, obligation block or None when not applicable)."""
         p, kind, rid = t
         src, tgt = pairs.load_pair(w / "pairs", p)
         sm, sf, tm, tf = pairs.lean_sides(src, tgt, p["src_fn"], p["tgt_fn"])
@@ -367,17 +372,43 @@ def cmd_run_lean(args) -> int:
                 "static_scope": lean_emit.pair_is_translatable(sm, tm)}
         a = alive.get(p["id"])
         witness = lean_emit.witness_term(a["counterexample"]) if a and a.get("counterexample") else None
-        text = lean_emit.obligation(kind, sm, sf, tm, tf, witness=witness, name=f"case_{p['id']}")
-        if text is None:
-            return {**base, "status": "not-applicable"}
-        r = lean_emit.check_obligation(text, w / "lean", timeout=args.timeout)
-        return {**base, **r, "witness": witness}
+        base["witness"] = witness
+        name = f"case_{p['id']}_{kind.replace('-', '_')}"
+        block = lean_emit.obligation_block(kind, sm, sf, tm, tf, witness=witness, name=name)
+        return base, block
 
+    def single(base, block):
+        r = lean_emit.check_obligation(lean_emit.PRELUDE + block, w / "lean", timeout=args.timeout)
+        return {**base, **r, "mode": "single"}
+
+    def one_batch(ts):
+        rows, blocks, bases = [], [], {}
+        for t in ts:
+            base, block = prepare(t)
+            if block is None:
+                rows.append({**base, "status": "not-applicable"})
+            else:
+                key = sha256(base["run_id"])[:16]
+                bases[key] = (base, block)
+                blocks.append((key, block))
+        if not blocks:
+            return rows
+        if len(blocks) == 1:
+            return rows + [single(*bases[blocks[0][0]])]
+        res, info = lean_emit.check_batch(blocks, w / "lean", timeout=args.batch_timeout)
+        if res is None:
+            # The batch did not complete: every obligation is re-checked in its own process.
+            return rows + [{**single(*bases[k]), "batch_fallback": info} for k, _ in blocks]
+        return rows + [{**bases[k][0], **res[k], "file": f"lean/{res[k]['file']}", "mode": "batch",
+                        "batch": info["batch_file"], "batch_size": info["batch_size"]} for k, _ in blocks]
+
+    chunks = [todo[i:i + args.batch] for i in range(0, len(todo), args.batch)]
+    dest = shard_path(out, args.shard)
     n = 0
-    for row in _parallel(one, todo, args.jobs):
-        write_jsonl(out, [row], append=True)
-        n += 1
-    print(json.dumps({"ran": n, "output": str(out)}))
+    for rows in _parallel(one_batch, chunks, args.jobs):
+        write_jsonl(dest, rows, append=True)
+        n += len(rows)
+    print(json.dumps({"ran": n, "output": str(dest)}))
     return 0
 
 
@@ -445,7 +476,11 @@ def main(argv: list[str]) -> int:
             s.add_argument("--config", choices=list(oracle_alive2.CONFIGS), default="no-undef-input",
                            help="which Alive2 results supply witnesses")
             s.add_argument("--obligations", default=",".join(lean_emit.OBLIGATIONS))
-            s.add_argument("--timeout", type=float, default=300)
+            s.add_argument("--timeout", type=float, default=300, help="s, per obligation checked alone")
+            s.add_argument("--batch", type=int, default=16,
+                           help="obligations per Lean process (1: one process per obligation)")
+            s.add_argument("--batch-timeout", type=float, default=900,
+                           help="s, per batch; on timeout the batch is re-checked one obligation per process")
 
     s = sub.add_parser("report")
     s.add_argument("--config", choices=list(oracle_alive2.CONFIGS), default="no-undef-input")

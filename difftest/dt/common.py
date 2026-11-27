@@ -149,13 +149,46 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]], append: bool = False
 
 
 def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+    """Rows of a JSONL file. A line that does not parse (a row cut short when a run was killed
+    mid-write) is skipped with a warning, so the row is simply re-run on resume."""
     if not path.exists():
         return
     with path.open() as f:
-        for line in f:
+        for n, line in enumerate(f, 1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 yield json.loads(line)
+            except ValueError:
+                print(f"warning: {path}:{n}: skipping malformed row", file=_sys.stderr)
+
+
+def shard_path(path: Path, shard: str | None) -> Path:
+    """Where a sharded run writes: ``results/x.jsonl`` -> ``results/x.shard-3-of-16.jsonl``, so
+    concurrent shards never write the same file."""
+    if not shard:
+        return path
+    i, n = shard.split("/")
+    return path.with_name(f"{path.stem}.shard-{i}-of-{n}{path.suffix}")
+
+
+def result_files(path: Path) -> list[Path]:
+    """The unsharded result file and every shard file of it."""
+    return [path, *sorted(path.parent.glob(f"{path.stem}.shard-*{path.suffix}"))]
+
+
+def read_results(path: Path, key: str | None = None) -> Iterator[dict[str, Any]]:
+    """Rows of a result file and all its shards. With ``key``, a row whose key was already seen
+    is dropped (first occurrence wins), so overlapping re-runs never double count."""
+    seen: set[str] = set()
+    for p in result_files(path):
+        for r in read_jsonl(p):
+            if key is not None:
+                if r[key] in seen:
+                    continue
+                seen.add(r[key])
+            yield r
 
 
 def git_rev(path: Path) -> str | None:
@@ -184,7 +217,33 @@ def tool_version(name: str) -> str | None:
     except FileNotFoundError:
         return None
     r = run([exe, "--version"], timeout=20)
-    return (r.stdout or r.stderr).strip().splitlines()[0] if (r.stdout or r.stderr).strip() else None
+    text = (r.stdout or r.stderr).strip()
+    # The whole banner: LLVM's first line is just "LLVM (http://llvm.org/):".
+    return " | ".join(l.strip() for l in text.splitlines() if l.strip()) or None
+
+
+def _cmd_version(argv: list[str]) -> str | None:
+    try:
+        r = run(argv, timeout=60, cwd=REPO)
+    except FileNotFoundError:
+        return None
+    return (r.stdout or r.stderr).strip() or None
+
+
+def _host() -> dict[str, Any]:
+    h: dict[str, Any] = {"cpus": os.cpu_count(), "uname": " ".join(os.uname())}
+    try:
+        lscpu = subprocess.run(["lscpu"], capture_output=True, text=True).stdout
+        for k in ("Model name", "Architecture", "Socket(s)", "NUMA node(s)"):
+            for line in lscpu.splitlines():
+                if line.startswith(k + ":"):
+                    h[k.lower().replace("(s)", "s").replace(" ", "_")] = line.split(":", 1)[1].strip()
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                h["mem_total_kb"] = int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return h
 
 
 def provenance(extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -197,7 +256,9 @@ def provenance(extra: dict[str, Any] | None = None) -> dict[str, Any]:
         "lean_nano_llvm_commit": git_rev(REPO),
         "lean_nano_llvm_dirty": git_dirty(REPO),
         "tools": {t: tool_version(t) for t in ("opt", "llubi", "alive-tv")},
-        "host": {"cpus": os.cpu_count(), "uname": " ".join(os.uname())},
+        "host": _host(),
+        "lean": _cmd_version(["lake", "env", "lean", "--version"]),
+        "python": _sys.version.split()[0],
         "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if extra:

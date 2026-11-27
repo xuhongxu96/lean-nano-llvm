@@ -88,9 +88,9 @@ def witness_term(cex: list[dict[str, Any]]) -> str | None:
         elif val.get("kind") == "int":
             terms.append(f"RegisterValue.bv {val['width']} (PoisonOr.value (BitVec.ofNat {val['width']} {val['bits']}))")
         elif val.get("kind") == "float":
-            terms.append(f"RegisterValue.float FloatType.{val['type']} (PoisonOr.value {{ bits := BitVec.ofNat _ {val['bits']} }})")
+            terms.append(f"RegisterValue.float AST.FloatType.{val['type']} (PoisonOr.value {{ bits := BitVec.ofNat _ {val['bits']} }})")
         elif val.get("kind") == "poison" and ty in ("half", "bfloat", "float", "double"):
-            terms.append(f"RegisterValue.float FloatType.{ty} PoisonOr.poison")
+            terms.append(f"RegisterValue.float AST.FloatType.{ty} PoisonOr.poison")
         else:
             return None
     return "[" + ", ".join(terms) + "]"
@@ -98,6 +98,13 @@ def witness_term(cex: list[dict[str, Any]]) -> str | None:
 
 def obligation(kind: str, src_mod: str, src_fn: str, tgt_mod: str, tgt_fn: str,
                witness: str | None = None, name: str = "case") -> str | None:
+    block = obligation_block(kind, src_mod, src_fn, tgt_mod, tgt_fn, witness, name)
+    return None if block is None else PRELUDE + block
+
+
+def obligation_block(kind: str, src_mod: str, src_fn: str, tgt_mod: str, tgt_fn: str,
+                     witness: str | None = None, name: str = "case") -> str | None:
+    """The theorem and its `#print axioms`, without the prelude (see `obligation`)."""
     src = f"ll_def% {lean_string(standalone_function(src_mod, src_fn))} \"f\""
     tgt = f"ll_def% {lean_string(standalone_function(tgt_mod, tgt_fn))} \"f\""
     if kind == "prove":
@@ -110,10 +117,15 @@ def obligation(kind: str, src_mod: str, src_fn: str, tgt_mod: str, tgt_fn: str,
         stmt, tac = f"¬ ({src} ⊒\n  {tgt})", "llvm_disprove"
     else:
         raise ValueError(kind)
-    return PRELUDE + f"\ntheorem {name} :\n  {stmt} := by\n  {tac}\n\n#print axioms {name}\n"
+    return f"\ntheorem {name} :\n  {stmt} := by\n  {tac}\n\n#print axioms {name}\n"
 
 
-LEAN_ERR_RE = re.compile(r"^(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+): error: (?P<msg>.*)$", re.M)
+# One elaboration thread per process: parallelism comes from running many processes, and a
+# single thread keeps each check's resource use (and `llvm_disprove`'s wall-clock search budget)
+# independent of the host's core count.
+LEAN_FLAGS = ["-j1"]
+
+LEAN_ERR_RE = re.compile(r"^(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+): error(?:\([^)\s]*\))?: (?P<msg>.*)$", re.M)
 
 
 def classify_lean(exit_code: int | None, timeout: bool, out: str) -> tuple[str, str]:
@@ -143,7 +155,7 @@ def check_obligation(text: str, workdir: Path, timeout: float = 300.0, mem_mb: i
     workdir.mkdir(parents=True, exist_ok=True)
     f = workdir / f"{sha256(text)[:16]}.lean"
     f.write_text(text)
-    r = run(["lake", "env", "lean", str(f)], timeout=timeout, mem_mb=mem_mb, cwd=REPO)
+    r = run(["lake", "env", "lean", *LEAN_FLAGS, str(f)], timeout=timeout, mem_mb=mem_mb, cwd=REPO)
     status, msg = classify_lean(r.exit, r.timeout, r.stdout + r.stderr)
     return {"status": status, "message": msg, "wall_s": r.wall_s, "file": str(f.relative_to(workdir.parent))
             if workdir.parent in f.parents else str(f)}
@@ -164,3 +176,93 @@ def pair_is_translatable(src_mod: str, tgt_mod: str) -> list[str]:
 
 def features_of_pair(src_mod: str) -> list[str]:
     return ir.features(src_mod).categories()
+
+
+MARK = "@@DT"
+
+
+def batch_text(blocks: list[tuple[str, str]]) -> str:
+    """One Lean file holding several obligations, ``blocks = [(key, obligation_block), ...]``.
+
+    The prelude (and so the import of the library) is elaborated once per file instead of once
+    per obligation. Each block is bracketed by ``#eval`` markers that print a monotonic
+    timestamp, which give each obligation's own wall time and delimit its messages. Blocks are
+    independent declarations with distinct names; none adds simp or grind lemmas, so a block's
+    outcome does not depend on the blocks before it (validated in `difftest/README.md`).
+    """
+    out = [PRELUDE]
+    for key, block in blocks:
+        out.append(f'\n#eval show IO Unit from do IO.println s!"{MARK} B {key} {{← IO.monoMsNow}}"\n')
+        out.append(block)
+        out.append(f'\n#eval show IO Unit from do IO.println s!"{MARK} E {key} {{← IO.monoMsNow}}"\n')
+    return "".join(out)
+
+
+def _status_of_messages(msgs: list[dict[str, Any]]) -> tuple[str, str]:
+    """Same rules as `classify_lean`, on the JSON messages of one block."""
+    errs = [m["data"] for m in msgs if m.get("severity") == "error"]
+    text = "\n".join(m["data"] for m in msgs)
+    if not errs:
+        ax = AXIOMS_RE.search(text)
+        if ax is None and "does not depend on any axioms" not in text:
+            return "error", "no #print axioms output"
+        used = {a.strip() for a in ax.group(1).split(",") if a.strip()} if ax else set()
+        if used - STANDARD_AXIOMS:
+            return "nonstandard-axioms", ", ".join(sorted(used - STANDARD_AXIOMS))
+        return "checked", ""
+    msg = errs[0].strip().splitlines()[0] if errs[0].strip() else ""
+    if "ll_def%" in text and ("parse error" in text or "no definition" in text):
+        return "translation-error", msg[:500]
+    return "failed", msg[:500]
+
+
+def check_batch(blocks: list[tuple[str, str]], workdir: Path, timeout: float,
+                mem_mb: int = 8192) -> tuple[dict[str, dict[str, Any]] | None, dict[str, Any]]:
+    """Check several obligation blocks in one `lake env lean` process.
+
+    Returns ``(results by key, batch info)``; results is ``None`` when the batch as a whole did
+    not complete (wall-clock timeout, crash, out of memory, unparsable output), in which case the
+    caller re-checks every block in its own process (`check_obligation`), so an obligation's
+    verdict never depends on its batch."""
+    import json as _json
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    text = batch_text(blocks)
+    f = workdir / f"batch-{sha256(text)[:16]}.lean"
+    f.write_text(text)
+    r = run(["lake", "env", "lean", *LEAN_FLAGS, "--json", str(f)], timeout=timeout, mem_mb=mem_mb, cwd=REPO)
+    info = {"batch_file": f.name, "batch_size": len(blocks), "batch_wall_s": r.wall_s,
+            "batch_exit": r.exit, "batch_timeout": r.timeout}
+    if r.timeout or r.exit is None or r.exit < 0:
+        return None, info
+    msgs = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                msgs.append(_json.loads(line))
+            except ValueError:
+                return None, info
+    # Attribute messages to blocks by the marker lines (messages are in source order with -j1).
+    res: dict[str, dict[str, Any]] = {}
+    cur: str | None = None
+    t0 = 0
+    acc: list[dict[str, Any]] = []
+    for m in msgs:
+        d = m.get("data", "")
+        if d.startswith(MARK + " "):
+            _, tag, key, ts = d.split()
+            if tag == "B":
+                cur, t0, acc = key, int(ts), []
+            elif tag == "E" and key == cur:
+                st, msg = _status_of_messages(acc)
+                res[key] = {"status": st, "message": msg, "wall_s": round((int(ts) - t0) / 1000, 3)}
+                cur = None
+            continue
+        if cur is not None:
+            acc.append(m)
+    if set(res) != {k for k, _ in blocks}:
+        return None, info
+    for k in res:
+        res[k]["file"] = f.name
+    return res, info

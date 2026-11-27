@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from .common import read_jsonl, write_jsonl
+from .common import read_jsonl, read_results, write_jsonl
 
 COMPARISON = {
     ("correct", "proved"): "agree",
@@ -128,7 +128,7 @@ def build(work: Path, out: Path, alive_config: str = "no-undef-input") -> list[P
         tables.append(t)
 
     # T3: llubi differential ----------------------------------------------------------------
-    ll = list(read_jsonl(work / "results" / "llubi.jsonl"))
+    ll = list(read_results(work / "results" / "llubi.jsonl", "run_id"))
     if ll:
         from .oracle_llubi import VERDICTS
         t = Table("llubi_verdicts", "Differential execution against llubi: verdict per case source",
@@ -147,7 +147,7 @@ def build(work: Path, out: Path, alive_config: str = "no-undef-input") -> list[P
         write_jsonl(out / "llubi-mismatches.jsonl", [r for r in ll if r["verdict"] in ("mismatch", "ours-crash")])
 
     # T4: Alive2 verdicts ---------------------------------------------------------------------
-    al = list(read_jsonl(work / "results" / f"alive2-{alive_config}.jsonl"))
+    al = list(read_results(work / "results" / f"alive2-{alive_config}.jsonl", "pair"))
     pairs = {p["id"]: p for p in read_jsonl(work / "pairs" / "pairs.jsonl")}
     if al:
         from .oracle_alive2 import VERDICTS as AV
@@ -157,7 +157,7 @@ def build(work: Path, out: Path, alive_config: str = "no-undef-input") -> list[P
             c = Counter(r["verdict"] for r in al if r["origin"] == o)
             t.add(o, sum(c.values()), *[c.get(v, 0) for v in AV])
         tables.append(t)
-    ta = list(read_jsonl(work / "results" / "alive2-test-args.jsonl"))
+    ta = list(read_results(work / "results" / "alive2-test-args.jsonl", "pair"))
     if ta:
         exp = [(pairs[r["pair"]]["expected"]["verdict"], r["verdict"]) for r in ta
                if r["pair"] in pairs and pairs[r["pair"]].get("expected")]
@@ -170,7 +170,7 @@ def build(work: Path, out: Path, alive_config: str = "no-undef-input") -> list[P
             tables.append(t)
 
     # T5: ours vs Alive2 ----------------------------------------------------------------------
-    le = list(read_jsonl(work / "results" / "lean.jsonl"))
+    le = list(read_results(work / "results" / "lean.jsonl", "run_id"))
     if le:
         from .lean_emit import OBLIGATIONS
         sts = ["checked", "failed", "timeout", "translation-error", "nonstandard-axioms", "error", "not-applicable"]
