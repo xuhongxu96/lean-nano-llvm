@@ -31,4 +31,4 @@ if [ -z "$DIR" ]; then
   DIR="$CHECKOUT/llvm/test/tools/llubi"
 fi
 
-exec lit -sv --param llubi_test_dir="$DIR" "$@" "$ROOT/tests/llubi"
+exec lit -sv --param llubi_test_dir="$DIR" "$@" "$ROOT/Tests/llubi"

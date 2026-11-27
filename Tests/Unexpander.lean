@@ -516,22 +516,22 @@ entry:
 
 /-! ### 9. Parsed `.ll` Regression Suite Round-Trips -/
 
-#test_unexpand_ll_file "tests/ll/attrs_assume.ll"
-#test_unexpand_ll_file "tests/ll/bitextract_poison_ub.ll"
-#test_unexpand_ll_file "tests/ll/br_poison_ub.ll"
-#test_unexpand_ll_file "tests/ll/bytes_vscale_fp.ll"
-#test_unexpand_ll_file "tests/ll/byval_copy.ll"
-#test_unexpand_ll_file "tests/ll/cf_libcalls.ll"
-#test_unexpand_ll_file "tests/ll/fib.ll"
-#test_unexpand_ll_file "tests/ll/fp_denorm_ppc128.ll"
-#test_unexpand_ll_file "tests/ll/fp_intrinsics.ll"
-#test_unexpand_ll_file "tests/ll/load_range_ub.ll"
-#test_unexpand_ll_file "tests/ll/loop_phi.ll"
-#test_unexpand_ll_file "tests/ll/named_struct_global.ll"
-#test_unexpand_ll_file "tests/ll/speculative_load_oracle.ll"
-#test_unexpand_ll_file "tests/ll/undef_zero.ll"
-#test_unexpand_ll_file "tests/ll/vec_intrinsics.ll"
-#test_unexpand_ll_file "tests/ll/wildcard_multiobj_ub.ll"
+#test_unexpand_ll_file "Tests/ll/attrs_assume.ll"
+#test_unexpand_ll_file "Tests/ll/bitextract_poison_ub.ll"
+#test_unexpand_ll_file "Tests/ll/br_poison_ub.ll"
+#test_unexpand_ll_file "Tests/ll/bytes_vscale_fp.ll"
+#test_unexpand_ll_file "Tests/ll/byval_copy.ll"
+#test_unexpand_ll_file "Tests/ll/cf_libcalls.ll"
+#test_unexpand_ll_file "Tests/ll/fib.ll"
+#test_unexpand_ll_file "Tests/ll/fp_denorm_ppc128.ll"
+#test_unexpand_ll_file "Tests/ll/fp_intrinsics.ll"
+#test_unexpand_ll_file "Tests/ll/load_range_ub.ll"
+#test_unexpand_ll_file "Tests/ll/loop_phi.ll"
+#test_unexpand_ll_file "Tests/ll/named_struct_global.ll"
+#test_unexpand_ll_file "Tests/ll/speculative_load_oracle.ll"
+#test_unexpand_ll_file "Tests/ll/undef_zero.ll"
+#test_unexpand_ll_file "Tests/ll/vec_intrinsics.ll"
+#test_unexpand_ll_file "Tests/ll/wildcard_multiobj_ub.ll"
 
 /-! ### 10. Formatting & Hygiene Snapshots (`#guard_msgs`) -/
 

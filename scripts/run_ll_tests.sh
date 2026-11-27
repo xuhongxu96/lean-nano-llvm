@@ -10,7 +10,7 @@ fi
 pass=0
 fail=0
 
-for f in tests/ll/*.ll; do
+for f in Tests/ll/*.ll; do
   expect_exit=$(grep -m1 '^; EXPECT_EXIT:' "$f" | sed 's/^; EXPECT_EXIT:[[:space:]]*//')
   expect_out=$(grep -m1 '^; EXPECT_OUT:' "$f" | sed 's/^; EXPECT_OUT:[[:space:]]*//' || true)
   expect_err=$(grep -m1 '^; EXPECT_ERR:' "$f" | sed 's/^; EXPECT_ERR:[[:space:]]*//' || true)

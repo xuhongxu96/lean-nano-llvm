@@ -91,29 +91,30 @@ The library `LeanNanoLlvm/` is layered; each layer imports only the ones above i
    - `Run` implements `lean-nano-llvm run`.
    - `Llubi/` is the `llubi`-compatible frontend: `AsmWriter` re-prints instructions as LLVM does, and `Driver` holds the CLI and the trace.
 
-The proof suites are a separate library, `Tests/` (`Tests.AST`, `Tests.Semantics`, `Tests.Refinement`), which `lake build` builds as a default target. `Main.lean` only dispatches to `Run` and `Llubi`.
+The proof suites are a separate library, `Tests/` (`Tests.AST`, `Tests.Unexpander`, `Tests.Semantics`, `Tests.Refinement`), which `lake build` builds as a default target. `Main.lean` only dispatches to `Run` and `Llubi`.
 
 ## Build, CLI & Tests
 
 ```bash
 lake build
 lake exe lean-nano-llvm --help                         # usage
-lake exe lean-nano-llvm run tests/ll/fib.ll            # parse & run a standalone .ll file
+lake exe lean-nano-llvm run Tests/ll/fib.ll            # parse & run a standalone .ll file
 bash scripts/run_ll_tests.sh                           # run standalone .ll regression suite
 lake env lean scripts/audit_axioms.lean                # verify standard-axioms-only audit
 bash scripts/run_llubi_tests.sh [llvm/test/tools/llubi] # LLVM's llubi suite via lit + FileCheck
-lake exe lean-nano-llvm llubi --verbose < tests/ll/fib.ll  # llubi-compatible trace
+lake exe lean-nano-llvm llubi --verbose < Tests/ll/fib.ll  # llubi-compatible trace
 ```
 
-`scripts/run_llubi_tests.sh` only invokes `lit` on [tests/llubi/lit.cfg.py](tests/llubi/lit.cfg.py), which substitutes `llubi` with `lean-nano-llvm llubi`; without a directory argument it fetches the tests from llvm-project at a pinned commit. It needs `lit` (`pip install lit`) and LLVM's `FileCheck` on `PATH` (e.g. Ubuntu's `llvm-18-tools`). All 246 tests pass. Any future known gap goes in [tests/llubi/xfail.txt](tests/llubi/xfail.txt), which is currently empty; lit reports an unexpected pass of a listed test as a failure.
+`scripts/run_llubi_tests.sh` only invokes `lit` on [Tests/llubi/lit.cfg.py](Tests/llubi/lit.cfg.py), which substitutes `llubi` with `lean-nano-llvm llubi`; without a directory argument it fetches the tests from llvm-project at a pinned commit. It needs `lit` (`pip install lit`) and LLVM's `FileCheck` on `PATH` (e.g. Ubuntu's `llvm-18-tools`). All 246 tests pass. Any future known gap goes in [Tests/llubi/xfail.txt](Tests/llubi/xfail.txt), which is currently empty; lit reports an unexpected pass of a listed test as a failure.
 
 Test suites (verified directly in Lean's kernel using only standard axioms — no `native_decide`):
 
-- [Tests/AST.lean](Tests/AST.lean) — syntax quasiquoters (`i$(w)`, attributes, volatile, varargs, named structs, load metadata, constexprs), printing, and unexpansion
+- [Tests/AST.lean](Tests/AST.lean) — syntax quasiquoters (`i$(w)`, attributes, volatile, varargs, named structs, load metadata, constexprs) and printing
+- [Tests/Unexpander.lean](Tests/Unexpander.lean) — round-trip unexpander checks (DSL, direct AST, `Tests/ll/*.ll` files) and `#guard_msgs` formatting snapshots
 - [Tests/Semantics.lean](Tests/Semantics.lean) — toggleable `undef`, Immediate UB vs `poison`, memory/provenance/endianness/heap/globals, IEEE-754 floats & rounding/reduction intrinsics, CFG/parallel `phi`/recursion, aggregates, vectors, volatile `TraceEvent`s, `load` metadata, `byval` copies, named structs, varargs, and `runSteps_sound`
 - [Tests/Refinement.lean](Tests/Refinement.lean) — width-generic (`i$(w)`) arithmetic & `undef` refinement, `poison`, Immediate UB, nondeterministic `freeze`, IEEE-754 `fneg` & FMF (`nnan`), `select`, arbitrary caller-memory store-to-load forwarding & dead `alloca` elimination, caller-memory dead-store elimination (+ negative bogus-store rejection test), `calc` transitivity chaining, loop simulation (`Config.IsRefinedBy.of_simulation`), and module-aware interprocedural refinement (`RefinementEnv.ofTopLevel` / `⊒⟨env⟩`)
-- [tests/ll/](tests/ll/) — standalone `.ll` regression tests executed via `lean-nano-llvm run` in CI
-- [tests/llubi/](tests/llubi/) — `lit` configuration running LLVM's `llvm/test/tools/llubi` suite against `lean-nano-llvm llubi` in CI
+- [Tests/ll/](Tests/ll/) — standalone `.ll` regression tests executed via `lean-nano-llvm run` in CI
+- [Tests/llubi/](Tests/llubi/) — `lit` configuration running LLVM's `llvm/test/tools/llubi` suite against `lean-nano-llvm llubi` in CI
 
 ## Acknowledgments
 
