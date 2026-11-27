@@ -246,6 +246,8 @@ def cmd_cases(args) -> int:
                 ds = drivers.make_drivers(sid, text, fn, n, args.seed)
             except drivers.Unsupported as e:
                 return [], [{"subject": sid, **origin, "reason": str(e)}]
+            except Exception as e:  # recorded, never silently dropped
+                return [], [{"subject": sid, **origin, "reason": f"driver-error: {type(e).__name__}: {e}"[:500]}]
             mods = [(d.module, "__dt_main", d.args, d.seed) for d in ds]
         rs, bad = [], []
         for k, (mod, entry, a, aseed) in enumerate(mods):
