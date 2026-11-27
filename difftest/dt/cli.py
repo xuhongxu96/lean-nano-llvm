@@ -39,10 +39,25 @@ def _shard_ok(rid: str, shard: str | None) -> bool:
 
 
 def _parallel(fn: Callable[[Any], Any], items: Iterable[Any], jobs: int) -> Iterable[Any]:
+    """Unordered parallel map with a bounded number of tasks in flight, so memory stays
+    proportional to `jobs`, not to the number of items."""
+    window = max(4 * jobs, 16)
     with cf.ThreadPoolExecutor(max_workers=jobs) as ex:
-        futs = [ex.submit(fn, it) for it in items]
-        for f in cf.as_completed(futs):
+        pending: set[cf.Future] = set()
+        for it in items:
+            pending.add(ex.submit(fn, it))
+            if len(pending) >= window:
+                done, pending = cf.wait(pending, return_when=cf.FIRST_COMPLETED)
+                for f in done:
+                    yield f.result()
+        for f in cf.as_completed(pending):
             yield f.result()
+
+
+def _sort_jsonl(path: Path, key: str) -> None:
+    """Sort a JSONL file by one field, so outputs are byte-identical across runs."""
+    rows = sorted(path.read_text().splitlines(), key=lambda l: json.loads(l)[key])
+    path.write_text("".join(r + "\n" for r in rows))
 
 
 def _resume(out: Path, key: str = "id") -> set[str]:
@@ -210,9 +225,6 @@ def cmd_cases(args) -> int:
                if m["status"] == "ok" and m["parent_kind"] == "function"]
     out_dir = w / "cases" / "files"
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows: list[dict[str, Any]] = []
-    unsupported: list[dict[str, Any]] = []
-
     # (subject id, origin, text, entry or function, is a whole program)
     subjects: list[tuple[str, dict[str, Any], str, str, bool]] = []
     for u in units:
@@ -248,18 +260,21 @@ def cmd_cases(args) -> int:
                        "features": {"categories": ir.features(mod).categories()}})
         return rs, bad
 
+    cases_p, bad_p = w / "cases" / "cases.jsonl", w / "cases" / "not-executable.jsonl"
+    write_jsonl(cases_p, [])
+    write_jsonl(bad_p, [])
+    n_cases = n_bad = 0
     for rs, bad in _parallel(one, subjects, args.jobs):
-        rows.extend(rs)
-        unsupported.extend(bad)
-    rows.sort(key=lambda r: r["id"])
-    write_jsonl(w / "cases" / "cases.jsonl", rows)
-    write_jsonl(w / "cases" / "not-executable.jsonl", unsupported)
+        n_cases += write_jsonl(cases_p, rs, append=True)
+        n_bad += write_jsonl(bad_p, bad, append=True)
+    _sort_jsonl(cases_p, "id")
+    _sort_jsonl(bad_p, "subject")
     (w / "cases" / "cases.json").write_text(json.dumps({
         "global_seed": args.seed, "args_per_function": args.args_per_function,
         "args_per_mutant": args.args_per_mutant,
         "arg_generator": vars(drivers.ArgGen()),
     }, indent=2))
-    print(json.dumps({"cases": len(rows), "not_executable": len(unsupported)}))
+    print(json.dumps({"cases": n_cases, "not_executable": n_bad}))
     return 0
 
 
