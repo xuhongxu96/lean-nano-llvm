@@ -37,6 +37,10 @@ from .common import derive_seed
 
 FP_BITS = {"half": 16, "bfloat": 16, "float": 32, "double": 64}
 UNSUPPORTED_ATTRS = ("byval", "sret", "inalloca", "preallocated", "byref", "swifterror", "swiftself")
+# Size bounds on generated constants (larger arguments occur only in LLVM's stress tests of
+# type limits, e.g. i8388608 or <4294967295 x i8>).
+MAX_INT_BITS = 4096
+MAX_VECTOR_LANES = 1024
 MEMSET = "declare void @llvm.memset.p0.i64(ptr writeonly, i8, i64, i1 immarg)"
 
 
@@ -85,6 +89,8 @@ class ArgGen:
         m = re.fullmatch(r"i(\d+)", ty)
         if m:
             w = int(m.group(1))
+            if w > MAX_INT_BITS:
+                raise Unsupported(f"argument type {ty} wider than {MAX_INT_BITS} bits")
             if w == 1:
                 return rng.choice(["true", "false"])
             smin, smax = -(1 << (w - 1)), (1 << (w - 1)) - 1
@@ -101,6 +107,8 @@ class ArgGen:
         m = re.fullmatch(r"<(\d+) x (.+)>", ty)
         if m:
             n, et = int(m.group(1)), m.group(2)
+            if n > MAX_VECTOR_LANES:
+                raise Unsupported(f"vector argument with {n} lanes")
             return "<" + ", ".join(f"{et} {self.scalar(rng, et, noundef)}" for _ in range(n)) + ">"
         if ty.startswith("<vscale"):
             raise Unsupported("scalable vector argument")

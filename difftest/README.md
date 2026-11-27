@@ -157,7 +157,8 @@ values from {±0, ±1, ±inf, qNaN, smallest subnormal, largest finite} with pro
 uniform bit patterns otherwise; vectors element-wise; `poison` with probability 0.05 except for
 `noundef` parameters. Pointers point to a fresh 64-byte buffer filled with a random byte.
 Functions with aggregate, scalable-vector, `byval`/`sret`/`inalloca`, non-zero address space or
-x86_fp80/fp128/ppc_fp128 parameters, or varargs, are recorded in `not-executable.jsonl`. Driver
+x86_fp80/fp128/ppc_fp128 parameters, integers wider than 4096 bits, vectors of more than 1024
+lanes, or varargs, are recorded in `not-executable.jsonl`. Driver
 modules are verified by the pinned LLVM before use. Default: 4 argument vectors per corpus
 function and 4 per mutant (`--args-per-function`, `--args-per-mutant`); the argument vector is
 drawn from the seed of the function or mutant itself, so mutants of one parent get different
