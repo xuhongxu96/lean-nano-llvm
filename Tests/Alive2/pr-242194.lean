@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 
 -- LLVM PR #242194: `[InstCombine] Treat shl X, 1 as X + X when cancelling icmp addends`

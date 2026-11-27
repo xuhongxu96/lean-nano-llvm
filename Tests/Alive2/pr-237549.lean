@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 
 -- LLVM PR #237549: `[InstCombine] Fold guarded comparisons of OR/XOR`

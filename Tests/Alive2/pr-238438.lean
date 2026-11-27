@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 
 -- LLVM PR #238438: `[KnownBits] Improve multiplication bounds for negative operands`

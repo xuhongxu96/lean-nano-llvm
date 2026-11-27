@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 
 namespace LeanNanoLlvm.Tests.Rewrites

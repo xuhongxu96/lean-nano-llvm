@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 
 -- LLVM Issue #239497: `[ConstraintElimination] Missing relational proofs across signed and unsigned comparisons`

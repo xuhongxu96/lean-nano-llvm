@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 
 -- LLVM Issue #237772: `[CVP] X urem Y is not expanded when the largest X is exactly 2*Y`

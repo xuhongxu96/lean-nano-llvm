@@ -86,12 +86,26 @@ The library `LeanNanoLlvm/` is layered; each layer imports only the ones above i
    - `Config.IsRefinedBy`, `of_simulation`, `RefinementEnv`, `Definition.IsRefinedByIn` and `Definition.IsRefinedByWith`;
    - the notations `x ⊒ y`, `x ⊒[cfg] y` and `x ⊒⟨env⟩ y`;
    - `refl`, `trans` and `Trans` instances.
+
+   The automation on top of it is split so that each piece rebuilds on its own:
+   - `Lemmas`: well-formedness destructuring and the `simp_llvm` / `simp_step` lemmas.
+   - `Tactic`: `llvm_intro`, `llvm_symexec`, `llvm_vc` and `llvm_refine`.
+   - `Disprove`: the `llvm_disprove` front end, over `Disprove/Lemmas` (kernel-pure refutation lemmas), `Disprove/Search` (witness search on the interpreter) and `Disprove/Stepper` (witness certification).
+   - The umbrella `LeanNanoLlvm.Refinement` re-exports all of them; proof files should not import it (see *Incremental builds* below).
 5. **`Tactic`**: the layered simp sets (`simp_llvm`, `simp_wellform`, `simp_step`) and tactics (`llvm_simp`, `llvm_wf`, `llvm_step`).
 6. **Frontends**: these are executable code outside the verified core.
    - `Run` implements `lean-nano-llvm run`.
    - `Llubi/` is the `llubi`-compatible frontend: `AsmWriter` re-prints instructions as LLVM does, and `Driver` holds the CLI and the trace.
 
 The proof suites are a separate library, `Tests/` (`Tests.AST`, `Tests.Unexpander`, `Tests.Semantics`, `Tests.Refinement`), which `lake build` builds as a default target. `Main.lean` only dispatches to `Run` and `Llubi`.
+
+### Incremental builds
+
+Lake rebuilds a module whenever the source of any module it transitively imports changes, so the import graph decides how much a small edit costs. The layout follows three rules:
+
+- **Import only what you use.** A proof that uses `llvm_refine` imports `LeanNanoLlvm.Refinement.Tactic`; only proofs that use `llvm_disprove` import `LeanNanoLlvm.Refinement.Disprove`. No file under `Tests/` imports the `LeanNanoLlvm.Refinement` umbrella. `scripts/check_imports.sh` enforces this in CI.
+- **Split at dependency boundaries, not at a line count.** A file is split when some of its dependents need only part of it (for example, lemmas versus the tactics that use them, or the disproof search versus its certifier), or when it holds independent topics (each test suite is one module per topic). Splitting a file without such a boundary does not reduce what rebuilds, and every extra module costs roughly a second of import loading in a clean build, so there is no hard size limit. As a guide, a new test file should cover one topic and stay under about 400 lines, and a library file over about 800 lines should be split when a clean boundary exists.
+- **Keep executable-only code out of the proof chain.** The interpreter (`Semantics/Exec`, `Semantics/Module`) is used by `llvm_disprove`'s witness search and by the semantics tests, but not by `llvm_refine`, so editing it does not rebuild refinement proofs.
 
 ## Build, CLI & Tests
 
@@ -110,9 +124,9 @@ lake exe lean-nano-llvm llubi --verbose < Tests/ll/fib.ll  # llubi-compatible tr
 Test suites (verified directly in Lean's kernel using only standard axioms — no `native_decide`):
 
 - [Tests/AST.lean](Tests/AST.lean) — syntax quasiquoters (`i$(w)`, attributes, volatile, varargs, named structs, load metadata, constexprs) and printing
-- [Tests/Unexpander.lean](Tests/Unexpander.lean) — round-trip unexpander checks (DSL, direct AST, `Tests/ll/*.ll` files) and `#guard_msgs` formatting snapshots
-- [Tests/Semantics.lean](Tests/Semantics.lean) — toggleable `undef`, Immediate UB vs `poison`, memory/provenance/endianness/heap/globals, IEEE-754 floats & rounding/reduction intrinsics, CFG/parallel `phi`/recursion, aggregates, vectors, volatile `TraceEvent`s, `load` metadata, `byval` copies, named structs, varargs, and `runSteps_sound`
-- [Tests/Refinement.lean](Tests/Refinement.lean) — width-generic (`i$(w)`) arithmetic & `undef` refinement, `poison`, Immediate UB, nondeterministic `freeze`, IEEE-754 `fneg` & FMF (`nnan`), `select`, arbitrary caller-memory store-to-load forwarding & dead `alloca` elimination, caller-memory dead-store elimination (+ negative bogus-store rejection test), `calc` transitivity chaining, loop simulation (`Config.IsRefinedBy.of_simulation`), and module-aware interprocedural refinement (`RefinementEnv.ofTopLevel` / `⊒⟨env⟩`)
+- [Tests/Unexpander/](Tests/Unexpander/) — round-trip unexpander checks (DSL, direct AST, `Tests/ll/*.ll` files) and `#guard_msgs` formatting snapshots
+- [Tests/Semantics/](Tests/Semantics/) (one module per topic) — toggleable `undef`, Immediate UB vs `poison`, memory/provenance/endianness/heap/globals, IEEE-754 floats & rounding/reduction intrinsics, CFG/parallel `phi`/recursion, aggregates, vectors, volatile `TraceEvent`s, `load` metadata, `byval` copies, named structs, varargs, and `runSteps_sound`
+- [Tests/Refinement/](Tests/Refinement/) (one module per topic) — width-generic (`i$(w)`) arithmetic & `undef` refinement, `poison`, Immediate UB, nondeterministic `freeze`, IEEE-754 `fneg` & FMF (`nnan`), `select`, arbitrary caller-memory store-to-load forwarding & dead `alloca` elimination, caller-memory dead-store elimination (+ negative bogus-store rejection test), `calc` transitivity chaining, loop simulation (`Config.IsRefinedBy.of_simulation`), and module-aware interprocedural refinement (`RefinementEnv.ofTopLevel` / `⊒⟨env⟩`)
 - [Tests/ll/](Tests/ll/) — standalone `.ll` regression tests executed via `lean-nano-llvm run` in CI
 - [Tests/llubi/](Tests/llubi/) — `lit` configuration running LLVM's `llvm/test/tools/llubi` suite against `lean-nano-llvm llubi` in CI
 

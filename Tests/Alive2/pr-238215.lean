@@ -1,4 +1,5 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
+import LeanNanoLlvm.Refinement.Disprove
 import LeanNanoLlvm.AST.Syntax
 
 /-!

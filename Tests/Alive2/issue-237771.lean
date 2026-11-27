@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 
 -- LLVM Issue #237771: `[InstCombine] Missed fold: two range checks differing by one bit, when each arm returns a value`

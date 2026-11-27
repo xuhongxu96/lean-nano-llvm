@@ -1,3 +1,5 @@
+import LeanNanoLlvm.Refinement.Tactic
+import LeanNanoLlvm.AST.Syntax
 import Tests.Rewrites.Common
 
 namespace LeanNanoLlvm.Tests.Rewrites

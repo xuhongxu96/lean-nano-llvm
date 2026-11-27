@@ -1,6 +1,3 @@
-import LeanNanoLlvm.Refinement
-import LeanNanoLlvm.AST.Syntax
-
 /-!
 # Shared Pure-`BitVec` Helpers for Alive2 Proofs
 

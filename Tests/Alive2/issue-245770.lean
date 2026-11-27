@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 
 -- LLVM Issue #245770: `[InstCombine] (x == c1 && y == c1) || (x == c2 && y == c2) => (x == c1 || x == c2) && (x == y)`

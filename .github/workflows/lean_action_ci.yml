@@ -18,6 +18,8 @@ jobs:
         run: bash scripts/run_ll_tests.sh
       - name: Verify transitive axioms
         run: lake env lean scripts/audit_axioms.lean
+      - name: Verify narrow imports in Tests
+        run: bash scripts/check_imports.sh
       - name: Verify no partial definitions outside Llubi
         run: |
           if grep -rnE '^[[:space:]]*((private|protected|noncomputable|scoped|local)[[:space:]]+)*partial\b' \
