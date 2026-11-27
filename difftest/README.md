@@ -227,9 +227,10 @@ Python, so the statement is about exactly the IR the oracles saw. Three obligati
 each checked by `lake env lean` (kernel-checked, standard axioms only) in its own process with a
 300 s limit:
 
-* `prove`: `src ⊒ tgt` by a fixed script: `llvm_refine`, then on every remaining goal the first
-  of `simp_all; done`, `bv_omega`, `grind` that succeeds (`bv_decide` is excluded because it
-  relies on `Lean.ofReduceBool`);
+* `prove`: `src ⊒ tgt` by `llvm_refine` alone: symbolic execution (`llvm_intro`,
+  `llvm_symexec`), poison elimination to pure `BitVec` goals (`llvm_bv`), then the library's
+  standard-axiom closers (`grind`, `bv_omega`, `ext; simp; grind`, if-splitting; `bv_decide` is
+  not used because it relies on `Lean.ofReduceBool`);
 * `disprove-witness`: `¬ (src ⊒ tgt)` by `llvm_disprove [w…]` with Alive2's counterexample, when
   all its inputs are integers, floats or `poison`;
 * `disprove-search`: `¬ (src ⊒ tgt)` by `llvm_disprove` (our bounded witness search).

@@ -56,14 +56,11 @@ open LeanNanoLlvm Semantics Refinement
 
 OBLIGATIONS = ["prove", "disprove-witness", "disprove-search"]
 
-# The fixed proof script of the `prove` obligation: symbolic execution and verification-condition
-# generation (`llvm_refine`), then a fixed portfolio of standard-axiom closers for the remaining
-# pure goals. `bv_decide` is deliberately absent: it relies on `Lean.ofReduceBool`.
-PROVE_SCRIPT = """llvm_refine
-  all_goals first
-    | (simp_all; done)
-    | bv_omega
-    | grind"""
+# The fixed proof script of the `prove` obligation: the project's own `llvm_refine`
+# (`llvm_intro`, `llvm_symexec`, `llvm_bv`, then its standard-axiom closers `grind`, `bv_omega`,
+# `ext; simp; grind` and if-splitting). Nothing is added on top, so a proof found here is a proof
+# a user of the library gets from the same one-line script.
+PROVE_SCRIPT = "llvm_refine"
 
 STANDARD_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
 AXIOMS_RE = re.compile(r"depends on axioms: \[([^\]]*)\]")
