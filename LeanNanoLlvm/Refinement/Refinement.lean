@@ -274,6 +274,66 @@ theorem Config.IsRefinedBy.of_det_step_both {callerIds : List AllocId}
     Config.IsRefinedBy callerIds (.running stX) (.running stY) :=
   Config.IsRefinedBy.of_step_left hsX (Config.IsRefinedBy.of_det_step_right hdetY h)
 
+/-- An immediately-UB source configuration is refined by any target configuration. -/
+theorem Config.IsRefinedBy.of_ub_left {callerIds : List AllocId} {msg : String} {cY : Config} :
+    Config.IsRefinedBy callerIds (.ub msg) cY :=
+  Or.inl (Or.inl ⟨[], msg, StarStep.refl _⟩)
+
+/-- Refinement between two halted configurations reduces directly to return value and memory refinement. -/
+theorem Config.IsRefinedBy.of_halted {callerIds : List AllocId}
+    {retX retY : RegisterValue} {memX memY : MemoryState}
+    (hret : RegisterValue.IsRefinedBy .id retX retY)
+    (hmem : MemoryState.IsRefinedBy .id callerIds memX memY) :
+    Config.IsRefinedBy callerIds (.halted retX memX) (.halted retY memY) :=
+  Config.IsRefinedBy.of_det_halted
+    ⟨not_canAbort_halted, not_diverges_halted, fun _ _ _ ht => (terminates_halted_iff _ _ _ _ _).mp ht⟩
+    (StarStep.refl _) hret hmem
+
+/-- Refinement between two halted configurations with identical memory reduces to return value refinement. -/
+theorem Config.IsRefinedBy.of_halted_same_mem {callerIds : List AllocId}
+    {retX retY : RegisterValue} {mem : MemoryState}
+    (hret : RegisterValue.IsRefinedBy .id retX retY) :
+    Config.IsRefinedBy callerIds (.halted retX mem) (.halted retY mem) :=
+  Config.IsRefinedBy.of_halted hret (MemoryState.IsRefinedBy.refl callerIds mem)
+
+/-- Peel a possibly nondeterministic silent target step: if every step from `.running stY`
+    is silent (`ev = none`) and leads to some `cY'` refined by `cX`, then `.running stY`
+    refines `cX`. -/
+theorem Config.IsRefinedBy.of_step_right_forall {callerIds : List AllocId}
+    {stY : MachineState} {cX : Config}
+    (hinv : ∀ ev cY', Step (.running stY) ev cY' → ev = none ∧ Config.IsRefinedBy callerIds cX cY') :
+    Config.IsRefinedBy callerIds cX (.running stY) := by
+  by_cases habX : CanAbort cX
+  · exact Or.inl habX
+  · refine Or.inr ⟨?_, ?_, ?_⟩
+    · rintro (⟨tr, msg, hstar⟩ | ⟨tr, err, hstar⟩)
+      · cases hstar with
+        | step hs hrest =>
+          have ⟨_, href⟩ := hinv _ _ hs
+          rcases href with hab | ⟨hnoY, _, _⟩
+          · exact habX hab
+          · exact hnoY (Or.inl ⟨_, msg, hrest⟩)
+      · cases hstar with
+        | step hs hrest =>
+          have ⟨_, href⟩ := hinv _ _ hs
+          rcases href with hab | ⟨hnoY, _, _⟩
+          · exact habX hab
+          · exact hnoY (Or.inr ⟨_, err, hrest⟩)
+    · intro trY retY memY htY
+      cases htY with
+      | step hs hrest =>
+        have ⟨heq, href⟩ := hinv _ _ hs
+        subst heq
+        rcases href with hab | ⟨_, hterm, _⟩
+        · exact absurd hab habX
+        · simpa using hterm _ _ _ hrest
+    · intro hdivY
+      obtain ⟨ev, cY', hs, hdiv'⟩ := Diverges.step_inv hdivY
+      have ⟨_, href⟩ := hinv ev cY' hs
+      rcases href with hab | ⟨_, _, hdiv⟩
+      · exact absurd hab habX
+      · exact hdiv hdiv'
+
 /-! ### General Backward Simulation Theorem (for CFG, Loops, Traces & Memory) -/
 
 /--

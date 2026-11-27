@@ -2,6 +2,8 @@ import Tests.AST
 import Tests.Unexpander
 import Tests.Semantics
 import Tests.Refinement
+import Tests.Rewrites
+import Tests.Alive2
 
 /-!
 # Test suites
@@ -13,4 +15,6 @@ library. `lake build` builds them as a default target.
 * `Tests.Unexpander`: round-trip unexpander checks (DSL, direct AST, `.ll` files) and formatting snapshots.
 * `Tests.Semantics`: execution of concrete programs and semantic lemmas.
 * `Tests.Refinement`: refinement proofs between programs.
+* `Tests.Rewrites`: manually constructed LLVM IR rewrite proofs and disproofs (`Tests/Rewrites/`).
+* `Tests.Alive2`: Alive2 proofs and disproofs from real `llvm/llvm-project` issues and PRs (`Tests/Alive2/`).
 -/

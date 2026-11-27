@@ -470,4 +470,305 @@ theorem Step.unreachable_iff {st frame callers tid}
   · rintro ⟨rfl, msg, rfl⟩
     exact ⟨rfl, StepTerm.unreachable_ub⟩
 
+/-- Deterministic inversion for `conversionOp` with pure leaf operand and oracle-independent result. -/
+theorem Step.conversionOp_leaf_iff {st frame callers iid op fromTy e toTy rest v res}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = (iid, .conversionOp op fromTy e toTy) :: rest)
+    (h1 : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory fromTy e = some (.ok v))
+    (hconv : ∀ o, evalConversionExec st.dataLayout st.config st.memory op fromTy v toTy o =
+      .ok (res, st.memory, o))
+    (ev : Option TraceEvent) (c' : Config) :
+    Step (.running st) ev c' ↔
+      ev = none ∧ c' = finishRegInstr st frame callers rest iid res st.memory := by
+  rw [Step.instr_iff hf hc]
+  constructor
+  · intro hi
+    cases hi with
+    | conversionOp_ok he1 hok =>
+      have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+      obtain ⟨o, o', ho⟩ := hok
+      rw [hconv o] at ho; cases ho; exact ⟨rfl, rfl⟩
+    | conversionOp_e_err he1 =>
+      have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+    | conversionOp_eval_err he1 herr =>
+      have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+      obtain ⟨o, ho⟩ := herr
+      rw [hconv o] at ho; cases ho
+  · rintro ⟨rfl, rfl⟩
+    exact StepInstr.conversionOp_ok (EvalExp.leaf_ok h1) ⟨default, default, hconv default⟩
+
+/-- Deterministic inversion for `floatUnaryOp` with pure leaf operand and oracle-independent result. -/
+theorem Step.floatUnaryOp_leaf_iff {st frame callers iid op ty e rest v res}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = (iid, .floatUnaryOp op ty e) :: rest)
+    (h1 : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory ty e = some (.ok v))
+    (hfp : ∀ o, evalFloatUnaryExec op ty v o = .ok (res, o))
+    (ev : Option TraceEvent) (c' : Config) :
+    Step (.running st) ev c' ↔
+      ev = none ∧ c' = finishRegInstr st frame callers rest iid res st.memory := by
+  rw [Step.instr_iff hf hc]
+  constructor
+  · intro hi
+    cases hi with
+    | floatUnaryOp_ok he1 hok =>
+      have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+      obtain ⟨o, o', ho⟩ := hok
+      rw [hfp o] at ho; cases ho; exact ⟨rfl, rfl⟩
+    | floatUnaryOp_e_err he1 =>
+      have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+    | floatUnaryOp_eval_err he1 herr =>
+      have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+      obtain ⟨o, ho⟩ := herr
+      rw [hfp o] at ho; cases ho
+  · rintro ⟨rfl, rfl⟩
+    exact StepInstr.floatUnaryOp_ok (EvalExp.leaf_ok h1) ⟨default, default, hfp default⟩
+
+/-- Deterministic inversion for `freeze` of a non-poison bitvector leaf operand. -/
+theorem Step.freeze_bv_val_iff {st frame callers iid ty e rest w b}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = (iid, .freeze (ty, e)) :: rest)
+    (h1 : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory ty e =
+      some (.ok (.bv w (.value b))))
+    (ev : Option TraceEvent) (c' : Config) :
+    Step (.running st) ev c' ↔
+      ev = none ∧ c' = finishRegInstr st frame callers rest iid (.bv w (.value b)) st.memory := by
+  rw [Step.instr_iff hf hc]
+  constructor
+  · intro hi
+    cases hi with
+    | freeze_ok he1 hfr =>
+      have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+      cases hfr; exact ⟨rfl, rfl⟩
+    | freeze_err he1 =>
+      have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+  · rintro ⟨rfl, rfl⟩
+    exact StepInstr.freeze_ok (EvalExp.leaf_ok h1) (FreezeRel.bv_val w b)
+
+/-- Stepping `freeze` of a poison bitvector leaf operand can produce any `BitVec w`
+    (when `freezeMode ≠ .zero`). -/
+theorem Step.freeze_bv_poison_step {st frame callers iid ty e rest w}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = (iid, .freeze (ty, e)) :: rest)
+    (h1 : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory ty e =
+      some (.ok (.bv w .poison)))
+    (b : BitVec w) (hmode : st.config.freezeMode = .zero → b = BitVec.ofNat w 0) :
+    Step (.running st) none
+      (finishRegInstr st frame callers rest iid (.bv w (.value b)) st.memory) :=
+  Step.instr hf hc (StepInstr.freeze_ok (EvalExp.leaf_ok h1) (FreezeRel.bv_poison w b hmode))
+
+/-- Inversion for `freeze` of a poison bitvector leaf operand. -/
+theorem Step.freeze_bv_poison_inv {st frame callers iid ty e rest w ev c'}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = (iid, .freeze (ty, e)) :: rest)
+    (h1 : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory ty e =
+      some (.ok (.bv w .poison)))
+    (hs : Step (.running st) ev c') :
+    ev = none ∧ ∃ b : BitVec w,
+      (st.config.freezeMode = .zero → b = BitVec.ofNat w 0) ∧
+      c' = finishRegInstr st frame callers rest iid (.bv w (.value b)) st.memory := by
+  rw [Step.instr_iff hf hc] at hs
+  cases hs with
+  | freeze_ok he1 hfr =>
+    have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+    cases hfr with
+    | bv_poison _ b hm => exact ⟨rfl, b, hm, rfl⟩
+  | freeze_err he1 =>
+    have hv1 := (EvalExp.leaf_iff h1 _).mp he1; cases hv1
+
+theorem EvalPhis.nil_iff {dl cfg regs predId mem res} :
+    EvalPhis dl cfg regs predId mem [] res ↔ res = .ok ([], mem) := by
+  constructor
+  · intro h; cases h; rfl
+  · rintro rfl; exact EvalPhis.nil
+
+theorem EvalPhis.cons_leaf_iff {dl cfg regs predId mem rid ty incs rest incExp b v ups}
+    (hlook : incs.find? (fun (_, b') => b' == predId) = some (incExp, b))
+    (he : evalPureLeafExp? dl cfg regs mem ty incExp = some (.ok v))
+    (hrest : ∀ res, EvalPhis dl cfg regs predId mem rest res ↔ res = .ok (ups, mem))
+    (res : Except ExecError (List (RawId × RegisterValue) × MemoryState)) :
+    EvalPhis dl cfg regs predId mem ((.id rid, .phi ty {} incs []) :: rest) res ↔
+      res = .ok ((rid, v) :: ups, mem) := by
+  constructor
+  · intro h
+    cases h with
+    | cons_ok hl' he' hfmf hmd hr' =>
+      rw [hlook] at hl'; cases hl'
+      have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
+      obtain ⟨o, o', ho⟩ := hfmf
+      simp only [applyInputFMFExec_none, Except.ok.injEq, Prod.mk.injEq] at ho
+      obtain ⟨rfl, _⟩ := ho
+      simp only [applyValueAttrsPure, Except.ok.injEq] at hmd; subst hmd
+      have hru := (hrest _).mp hr'; cases hru
+      rfl
+    | cons_missing_pred hl' => rw [hlook] at hl'; cases hl'
+    | cons_exp_err hl' he' =>
+      rw [hlook] at hl'; cases hl'
+      have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
+    | cons_fmf_err hl' he' hfmf =>
+      rw [hlook] at hl'; cases hl'
+      have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
+      obtain ⟨o, ho⟩ := hfmf; simp [applyInputFMFExec_none] at ho
+    | cons_md_err hl' he' hfmf hmd =>
+      rw [hlook] at hl'; cases hl'
+      have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
+      obtain ⟨o, o', ho⟩ := hfmf
+      simp only [applyInputFMFExec_none, Except.ok.injEq, Prod.mk.injEq] at ho
+      obtain ⟨rfl, _⟩ := ho
+      simp [applyValueAttrsPure] at hmd
+    | cons_tail_err hl' he' hfmf hmd hr' =>
+      rw [hlook] at hl'; cases hl'
+      have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
+      obtain ⟨o, o', ho⟩ := hfmf
+      simp only [applyInputFMFExec_none, Except.ok.injEq, Prod.mk.injEq] at ho
+      obtain ⟨rfl, _⟩ := ho
+      simp only [applyValueAttrsPure, Except.ok.injEq] at hmd; subst hmd
+      have hru := (hrest _).mp hr'; cases hru
+    | cons_nonphi_err hnp => exact False.elim (hnp _ _ _ _ rfl)
+  · rintro rfl
+    exact EvalPhis.cons_ok hlook (EvalExp.leaf_ok he) ⟨default, default, rfl⟩ rfl
+      ((hrest _).mpr rfl)
+
+theorem StepJump.det_iff {st frame callers mem dest nextBlk phis body ups c'}
+    (hfind : frame.defn.findBlock? dest = some nextBlk)
+    (hsplit : splitPhis nextBlk.code = (phis, body))
+    (hphis : ∀ res, EvalPhis st.dataLayout st.config frame.registers frame.curBlock mem phis res ↔
+      res = .ok (ups, mem)) :
+    StepJump st frame callers mem dest c' ↔
+      c' = .running (st.withFramesAndMemory
+        (frame.jumpTo nextBlk.id body nextBlk.terminator (commitPhiUpdates frame.registers ups) :: callers)
+        mem) := by
+  constructor
+  · intro hj
+    cases hj with
+    | ok hf' hs' hp' =>
+      rw [hfind] at hf'; cases hf'
+      rw [hsplit] at hs'; cases hs'
+      have hp := (hphis _).mp hp'; cases hp
+      rfl
+    | phi_err hf' hs' hp' =>
+      rw [hfind] at hf'; cases hf'
+      rw [hsplit] at hs'; cases hs'
+      have hp := (hphis _).mp hp'; cases hp
+    | missing_block hf' => rw [hfind] at hf'; cases hf'
+  · rintro rfl
+    exact StepJump.ok hfind hsplit ((hphis _).mpr rfl)
+
+/-- Deterministic inversion for unconditional `br label %dest`. -/
+theorem Step.br_det_iff {st frame callers tid dest nextBlk phis body ups}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = [])
+    (hterm : frame.terminator = (tid, .br dest))
+    (hfind : frame.defn.findBlock? dest = some nextBlk)
+    (hsplit : splitPhis nextBlk.code = (phis, body))
+    (hphis : ∀ res, EvalPhis st.dataLayout st.config frame.registers frame.curBlock st.memory phis res ↔
+      res = .ok (ups, st.memory))
+    (ev : Option TraceEvent) (c' : Config) :
+    Step (.running st) ev c' ↔
+      ev = none ∧
+      c' = .running (st.withFramesAndMemory
+        (frame.jumpTo nextBlk.id body nextBlk.terminator (commitPhiUpdates frame.registers ups) :: callers)
+        st.memory) := by
+  rw [Step.term_iff hf hc hterm]
+  constructor
+  · rintro ⟨rfl, ht⟩
+    cases ht with
+    | br_step hj => exact ⟨rfl, (StepJump.det_iff hfind hsplit hphis).mp hj⟩
+  · rintro ⟨rfl, rfl⟩
+    exact ⟨rfl, StepTerm.br_step ((StepJump.det_iff hfind hsplit hphis).mpr rfl)⟩
+
+/-- Deterministic inversion for `condBr` with a concrete `i1` value leaf operand. -/
+theorem Step.condBr_val_det_iff {st frame callers tid condExp tDest fDest b nextBlk phis body ups}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = [])
+    (hterm : frame.terminator = (tid, .condBr condExp tDest fDest))
+    (hcond : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory .i1 condExp =
+      some (.ok (.bv 1 (.value b))))
+    (hfind : frame.defn.findBlock? (if b != 0 then tDest else fDest) = some nextBlk)
+    (hsplit : splitPhis nextBlk.code = (phis, body))
+    (hphis : ∀ res, EvalPhis st.dataLayout st.config frame.registers frame.curBlock st.memory phis res ↔
+      res = .ok (ups, st.memory))
+    (ev : Option TraceEvent) (c' : Config) :
+    Step (.running st) ev c' ↔
+      ev = none ∧
+      c' = .running (st.withFramesAndMemory
+        (frame.jumpTo nextBlk.id body nextBlk.terminator (commitPhiUpdates frame.registers ups) :: callers)
+        st.memory) := by
+  rw [Step.term_iff hf hc hterm]
+  constructor
+  · rintro ⟨rfl, ht⟩
+    cases ht with
+    | condBr_ok he hj =>
+      have hv := (EvalExp.leaf_iff hcond _).mp he; cases hv
+      exact ⟨rfl, (StepJump.det_iff hfind hsplit hphis).mp hj⟩
+    | condBr_poison he =>
+      have hv := (EvalExp.leaf_iff hcond _).mp he; cases hv
+    | condBr_err he =>
+      have hv := (EvalExp.leaf_iff hcond _).mp he; cases hv
+    | condBr_nonbool he hnb =>
+      have hv := (EvalExp.leaf_iff hcond _).mp he; cases hv
+      exact False.elim (hnb _ rfl)
+  · rintro ⟨rfl, rfl⟩
+    exact ⟨rfl, StepTerm.condBr_ok (EvalExp.leaf_ok hcond)
+      ((StepJump.det_iff hfind hsplit hphis).mpr rfl)⟩
+
+/-- Branching on `poison` immediately causes UB (`CanAbort`). -/
+theorem Step.condBr_poison_canAbort {st frame callers tid condExp tDest fDest}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = [])
+    (hterm : frame.terminator = (tid, .condBr condExp tDest fDest))
+    (hcond : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory .i1 condExp =
+      some (.ok (.bv 1 .poison))) :
+    CanAbort (.running st) :=
+  Or.inl ⟨[], "Branch on poison condition",
+    StarStep.single (Step.term hf hc hterm (StepTerm.condBr_poison (EvalExp.leaf_ok hcond)))⟩
+
+/-- Deterministic single-step characterization of `switch` when its selector is a concrete bitvector. -/
+theorem Step.switch_val_det_iff {st frame callers tid ty condExp defDest cases w bv nextBlk phis body ups}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = [])
+    (hterm : frame.terminator = (tid, .switch ty condExp defDest cases))
+    (hcond : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory ty condExp =
+      some (.ok (.bv w (.value bv))))
+    (hfind : frame.defn.findBlock?
+      (match cases.find? (fun (cv, _) => BitVec.ofInt w cv == bv) with
+       | some (_, lbl) => lbl
+       | none => defDest) = some nextBlk)
+    (hsplit : splitPhis nextBlk.code = (phis, body))
+    (hphis : ∀ res, EvalPhis st.dataLayout st.config frame.registers frame.curBlock st.memory phis res ↔
+      res = .ok (ups, st.memory))
+    (ev : Option TraceEvent) (c' : Config) :
+    Step (.running st) ev c' ↔
+      ev = none ∧
+      c' = .running (st.withFramesAndMemory
+        (frame.jumpTo nextBlk.id body nextBlk.terminator (commitPhiUpdates frame.registers ups) :: callers)
+        st.memory) := by
+  rw [Step.term_iff hf hc hterm]
+  constructor
+  · rintro ⟨rfl, ht⟩
+    cases ht with
+    | switch_ok he hj =>
+      have hv := (EvalExp.leaf_iff hcond _).mp he; cases hv
+      exact ⟨rfl, (StepJump.det_iff hfind hsplit hphis).mp hj⟩
+    | switch_poison he =>
+      have hv := (EvalExp.leaf_iff hcond _).mp he; cases hv
+    | switch_err he =>
+      have hv := (EvalExp.leaf_iff hcond _).mp he; cases hv
+    | switch_nonint he hni =>
+      have hv := (EvalExp.leaf_iff hcond _).mp he; cases hv
+      exact False.elim (hni _ _ rfl)
+  · rintro ⟨rfl, rfl⟩
+    exact ⟨rfl, StepTerm.switch_ok (EvalExp.leaf_ok hcond)
+      ((StepJump.det_iff hfind hsplit hphis).mpr rfl)⟩
+
+/-- Switching on `poison` immediately causes UB (`CanAbort`). -/
+theorem Step.switch_poison_canAbort {st frame callers tid ty condExp defDest cases w}
+    (hf : st.frames = frame :: callers)
+    (hc : frame.remainingCode = [])
+    (hterm : frame.terminator = (tid, .switch ty condExp defDest cases))
+    (hcond : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory ty condExp =
+      some (.ok (.bv w .poison))) :
+    CanAbort (.running st) :=
+  Or.inl ⟨[], "Switch on poison condition",
+    StarStep.single (Step.term hf hc hterm (StepTerm.switch_poison (EvalExp.leaf_ok hcond)))⟩
+
 end LeanNanoLlvm.Semantics

@@ -115,42 +115,7 @@ def retAddX0Def (w : Nat) : AST.Definition := [llvm-definition|
 
 theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
     retAddX0Def w ⊒ retXDef w := by
-  refine ⟨rfl, ?_⟩
-  intro initMem args _ hargs
-  rcases args with _ | ⟨arg, _ | _⟩
-  · llvm_wf [retAddX0Def] at hargs
-  · cases arg <;>
-      llvm_wf [retAddX0Def] at hargs
-    subst hargs
-    rename_i v
-    have hm : (RegisterValue.bv w v).matchesType (.int w) = true := by
-      simp [RegisterValue.matchesType]
-    rw [initCallConfig_1 .modern .default64LE initMem (retXDef w) rfl (Or.inl rfl) rfl rfl rfl hm]
-    rw [initCallConfig_1 .modern .default64LE initMem (retAddX0Def w) rfl (Or.inl rfl) rfl rfl rfl hm]
-    have haddVal : liftBinaryPure (.int w) (.bv w v) (.bv w (.value (BitVec.ofInt w 0)))
-        (evalIntBinaryScalarPure (.add false false)) = .ok (.bv w v) := by
-      cases v using PoisonOr.casesOn' with
-      | poison => llvm_simp
-      | value bv => llvm_simp
-    refine Config.IsRefinedBy.of_det_halted
-      (det_step_to_halted fun ev c' => by
-        rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv w v) (by llvm_step)]
-        rfl)
-      (StarStep.step (ev := none)
-        (Step.instr rfl rfl
-          (StepInstr.intBinaryOp_ok
-            (EvalExp.leaf_ok (by llvm_step))
-            (EvalExp.leaf_ok (by simp [evalPureLeafExp?]))
-            haddVal))
-        (StarStep.step (ev := none)
-          (Step.term rfl rfl rfl
-            (StepTerm.ret_ok rfl
-              (EvalExp.leaf_ok (by llvm_step; rfl))
-              (StepRet.top_ok rfl (by llvm_step [retAddX0Def]))))
-          (StarStep.refl _)))
-      (RegisterValue.IsRefinedBy.refl _)
-      (MemoryState.IsRefinedBy.refl _ _)
-  · llvm_wf [retAddX0Def] at hargs
+  llvm_refine
 
 theorem ret_add_x_0_is_refined_by_ret_x :
     retAddX0Def 8 ⊒ retXDef 8 :=
@@ -419,16 +384,7 @@ private theorem poisonDef_det (cfg : SemanticsConfig) (initMem : MemoryState) :
   rfl
 
 theorem poison_is_refined_by_zero : poisonDef ⊒ zeroDef := by
-  refine ⟨rfl, ?_⟩
-  intro initMem args _ hargs
-  cases args with
-  | cons _ _ => llvm_wf [poisonDef] at hargs
-  | nil =>
-    have hY := det_step_to_halted (zeroDef_det .modern initMem)
-    have hX : Terminates (initCallConfig .modern .default64LE initMem ∅ ∅ poisonDef [])
-        [] (.bv 8 .poison) initMem :=
-      StarStep.step ((poisonDef_det .modern initMem _ _).mpr ⟨rfl, rfl⟩) (StarStep.refl _)
-    exact Config.IsRefinedBy.of_det_halted hY hX rfl (MemoryState.IsRefinedBy.refl _ _)
+  llvm_refine
 
 theorem zero_is_not_refined_by_poison : ¬ (zeroDef ⊒ poisonDef) := by
   rintro ⟨_, hbeh⟩
@@ -464,30 +420,7 @@ def udivZeroDef : AST.Definition := [llvm-definition|
 ]
 
 theorem ret_42_refines_udiv_by_zero : udivZeroDef ⊒ ret42Def := by
-  refine ⟨rfl, ?_⟩
-  intro initMem args _ hargs
-  rcases args with _ | ⟨arg, _ | _⟩
-  · llvm_wf [udivZeroDef] at hargs
-  · cases arg <;>
-      llvm_wf [udivZeroDef] at hargs
-    subst hargs
-    rename_i v
-    left; left
-    refine ⟨[], "Division by zero", ?_⟩
-    rw [initCallConfig_1 .modern .default64LE initMem udivZeroDef rfl (Or.inl rfl) rfl rfl rfl rfl]
-    have hub : liftBinaryPure (.int 8) (.bv 8 v) (.bv 8 (.value (BitVec.ofInt 8 0)))
-        (evalIntBinaryScalarPure (.udiv false)) = .error (.immediateUB "Division by zero") := by
-      cases v using PoisonOr.casesOn' with
-      | poison => rfl
-      | value bv => rfl
-    exact StarStep.step (ev := none)
-      (Step.instr rfl rfl
-        (StepInstr.intBinaryOp_eval_err
-          (EvalExp.leaf_ok (by llvm_step))
-          (EvalExp.leaf_ok (by simp [evalPureLeafExp?]))
-          hub))
-      (StarStep.refl _)
-  · llvm_wf [udivZeroDef] at hargs
+  llvm_refine
 
 /-! ### 5. True Nondeterministic `freeze` Refinement -/
 
@@ -500,115 +433,11 @@ def freezePoisonDef : AST.Definition := [llvm-definition|
   }
 ]
 
-private theorem step_freeze_poison_inv (initMem : MemoryState) :
-    ∀ ev c', Step (initCallConfig .modern .default64LE initMem ∅ ∅ freezePoisonDef []) ev c' →
-      ev = none ∧ ∃ b : BitVec 8,
-        c' = .running {
-          frames := [{
-            defn := freezePoisonDef
-            curBlock := .name "entry"
-            remainingCode := []
-            terminator := entryTerm freezePoisonDef
-            registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
-              (.local_id (.name "r")) (.bv 8 (.value b))
-          }]
-          memory := initMem
-          config := .modern
-          dataLayout := .default64LE
-        } := by
-  intro ev c' hs
-  rw [initCallConfig_0 .modern .default64LE initMem freezePoisonDef rfl rfl rfl rfl] at hs
-  rw [Step.instr_iff rfl rfl] at hs
-  cases hs with
-  | freeze_err he =>
-    dsimp only at he
-    rw [EvalExp.leaf_iff (v := .bv 8 .poison) (by simp [evalPureLeafExp?, RegisterValue.poisonOf])] at he
-    cases he
-  | freeze_ok he hfr =>
-    dsimp only at he
-    rw [EvalExp.leaf_iff (v := .bv 8 .poison) (by simp [evalPureLeafExp?, RegisterValue.poisonOf])] at he
-    cases he
-    cases hfr with
-    | bv_poison _ b _ => exact ⟨rfl, b, rfl⟩
-
-private theorem step_freeze_poison_ret (initMem : MemoryState) (b : BitVec 8) :
-    ∀ ev c',
-      Step (.running {
-        frames := [{
-          defn := freezePoisonDef
-          curBlock := .name "entry"
-          remainingCode := []
-          terminator := entryTerm freezePoisonDef
-          registers := (∅ : AssocMap AST.Identifier RegisterValue).insert
-            (.local_id (.name "r")) (.bv 8 (.value b))
-        }]
-        memory := initMem
-        config := .modern
-        dataLayout := .default64LE
-      }) ev c' ↔
-      ev = none ∧ c' = .halted (.bv 8 (.value b)) initMem := by
-  intro ev c'
-  rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 (.value b)) (by llvm_step)]
-  rfl
-
 theorem zero_refines_freeze_poison : freezePoisonDef ⊒ zeroDef := by
-  refine ⟨rfl, ?_⟩
-  intro initMem args _ hargs
-  cases args with
-  | cons _ _ => llvm_wf [freezePoisonDef] at hargs
-  | nil =>
-    have hY := det_step_to_halted (zeroDef_det .modern initMem)
-    have hTermX : Terminates (initCallConfig .modern .default64LE initMem ∅ ∅ freezePoisonDef [])
-        [] (.bv 8 (.value (0 : BitVec 8))) initMem := by
-      rw [initCallConfig_0 .modern .default64LE initMem freezePoisonDef rfl rfl rfl rfl]
-      exact StarStep.step (ev := none)
-        (Step.instr rfl rfl
-          (StepInstr.freeze_ok
-            (EvalExp.leaf_ok (by simp [evalPureLeafExp?, RegisterValue.poisonOf]))
-            (FreezeRel.bv_poison 8 (0 : BitVec 8) (by intro h; cases h))))
-        (StarStep.step (ev := none)
-          (Step.term rfl rfl rfl
-            (StepTerm.ret_ok rfl
-              (EvalExp.leaf_ok (by llvm_step; rfl))
-              (StepRet.top_ok rfl (by llvm_step [freezePoisonDef]))))
-          (StarStep.refl _))
-    exact Config.IsRefinedBy.of_det_halted hY hTermX
-      (RegisterValue.IsRefinedBy.refl _)
-      (MemoryState.IsRefinedBy.refl _ _)
+  llvm_refine
 
 theorem freeze_poison_refines_poison : poisonDef ⊒ freezePoisonDef := by
-  refine ⟨rfl, ?_⟩
-  intro initMem args _ hargs
-  cases args with
-  | cons _ _ => llvm_wf [poisonDef] at hargs
-  | nil =>
-    right
-    have hstep1 := step_freeze_poison_inv initMem
-    refine ⟨?_, ?_, ?_⟩
-    · rintro (⟨tr, msg, hstar⟩ | ⟨tr, err, hstar⟩)
-      · cases hstar with
-        | step hs hrest =>
-          obtain ⟨rfl, b, rfl⟩ := hstep1 _ _ hs
-          exact (det_step_to_halted (step_freeze_poison_ret initMem b)).1 (Or.inl ⟨_, msg, hrest⟩)
-      · cases hstar with
-        | step hs hrest =>
-          obtain ⟨rfl, b, rfl⟩ := hstep1 _ _ hs
-          exact (det_step_to_halted (step_freeze_poison_ret initMem b)).1 (Or.inr ⟨_, err, hrest⟩)
-    · intro trY retY memY htY
-      cases htY with
-      | step hs hrest =>
-        obtain ⟨rfl, b, rfl⟩ := hstep1 _ _ hs
-        obtain ⟨rfl, rfl, hmemEq⟩ := (det_step_to_halted (step_freeze_poison_ret initMem b)).2.2 _ _ _ hrest
-        rw [hmemEq]
-        have hX : Terminates (initCallConfig .modern .default64LE initMem ∅ ∅ poisonDef [])
-            [] (.bv 8 .poison) initMem :=
-          StarStep.step ((poisonDef_det .modern initMem _ _).mpr ⟨rfl, rfl⟩) (StarStep.refl _)
-        exact ⟨[], .bv 8 .poison, initMem, .id,
-          MemoryInjection.id_idOn _, hX, trivial, rfl, MemoryState.IsRefinedBy.refl _ _⟩
-    · intro hdiv
-      obtain ⟨ev, c1, hs, hdiv1⟩ := Diverges.step_inv hdiv
-      obtain ⟨rfl, b, rfl⟩ := hstep1 ev c1 hs
-      exact False.elim ((det_step_to_halted (step_freeze_poison_ret initMem b)).2.1 hdiv1)
+  llvm_refine
 
 theorem freeze_poison_not_refines_zero : ¬ (zeroDef ⊒ freezePoisonDef) := by
   rintro ⟨_, hbeh⟩
@@ -656,55 +485,9 @@ def fnegFnegDef : AST.Definition := [llvm-definition|
 ]
 
 theorem fneg_fneg_is_refined_by_id : fnegFnegDef ⊒ idFloatDef := by
-  refine ⟨rfl, ?_⟩
-  intro initMem args _ hargs
-  rcases args with _ | ⟨arg, _ | _⟩
-  · llvm_wf [fnegFnegDef] at hargs
-  · cases arg <;>
-      llvm_wf [fnegFnegDef] at hargs
-    subst hargs
-    rename_i v
-    rw [initCallConfig_1 .modern .default64LE initMem idFloatDef rfl (Or.inl rfl) rfl rfl rfl rfl]
-    rw [initCallConfig_1 .modern .default64LE initMem fnegFnegDef rfl (Or.inl rfl) rfl rfl rfl rfl]
-    have hneg : ∀ w : FloatW .float,
-        evalFloatUnaryExec (.fneg {}) (.float .float) (.float .float w) default =
-          .ok (.float .float (evalFloatUnaryOp (.fneg {}) w default).1,
-               (evalFloatUnaryOp (.fneg {}) w default).2) := fun _ => rfl
-    have hinv : (evalFloatUnaryOp (.fneg {})
-        (evalFloatUnaryOp (ft := .float) (.fneg {}) v default).1 default).1 = v := by
-      cases v using PoisonOr.casesOn' with
-      | poison => rfl
-      | value flt => simp [evalFloatUnaryOp, handleFMF]
-    have hfneg1 := hneg v
-    have hfneg2 : evalFloatUnaryExec (.fneg {}) (.float .float)
-        (.float .float (evalFloatUnaryOp (.fneg {}) v default).1) default =
-        .ok (.float .float v, (evalFloatUnaryOp (.fneg {})
-          (evalFloatUnaryOp (ft := .float) (.fneg {}) v default).1 default).2) := by
-      rw [hneg, hinv]
-    exact Config.IsRefinedBy.of_det_halted
-      (det_step_to_halted fun ev c' => by
-        rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .float .float v)
-          (by llvm_step)]
-        rfl)
-      (StarStep.step (ev := none)
-        (Step.instr rfl rfl
-          (StepInstr.floatUnaryOp_ok
-            (EvalExp.leaf_ok (by llvm_step))
-            ⟨default, _, hfneg1⟩))
-        (StarStep.step (ev := none)
-          (Step.instr rfl rfl
-            (StepInstr.floatUnaryOp_ok
-              (EvalExp.leaf_ok (by llvm_step))
-              ⟨default, _, hfneg2⟩))
-          (StarStep.step (ev := none)
-            (Step.term rfl rfl rfl
-              (StepTerm.ret_ok rfl
-                (EvalExp.leaf_ok (by llvm_step; rfl))
-                (StepRet.top_ok rfl (by llvm_step [fnegFnegDef]))))
-            (StarStep.refl _))))
-      (RegisterValue.IsRefinedBy.refl _)
-      (MemoryState.IsRefinedBy.refl _ _)
-  · llvm_wf [fnegFnegDef] at hargs
+  llvm_refine
+  simp [handleFMF, PoisonOr.IsRefinedBy] at *
+  subst_vars; exact ieeeFloat_neg_neg _
 
 private theorem handleDenormal_ieee (x : IEEEFloat FloatFormat.single) (b1 b2 : Bool) :
     handleDenormal .ieee b1 b2 x = x := by
@@ -925,42 +708,7 @@ def selectTrueDef : AST.Definition := [llvm-definition|
 ]
 
 theorem ret_a_refines_select_true : selectTrueDef ⊒ retADef := by
-  refine ⟨rfl, ?_⟩
-  intro initMem args _ hargs
-  rcases args with _ | ⟨a, _ | ⟨b, _ | _⟩⟩
-  · llvm_wf [selectTrueDef] at hargs
-  · llvm_wf [selectTrueDef] at hargs
-  · cases a <;> cases b <;>
-      llvm_wf [selectTrueDef] at hargs
-    rcases hargs with ⟨rfl, rfl⟩
-    rename_i va vb
-    have hba : (AST.Identifier.local_id (.name "b") == AST.Identifier.local_id (.name "a")) = false := rfl
-    rw [initCallConfig_2 .modern .default64LE initMem retADef
-          rfl (Or.inl rfl) rfl rfl rfl rfl rfl]
-    rw [initCallConfig_2 .modern .default64LE initMem selectTrueDef
-          rfl (Or.inl rfl) rfl rfl rfl rfl rfl]
-    exact Config.IsRefinedBy.of_det_halted
-      (det_step_to_halted fun ev c' => by
-        rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 32 va)
-          (by llvm_step [hba])]
-        rfl)
-      (StarStep.step (ev := none)
-        (Step.instr rfl rfl
-          (StepInstr.select_ok
-            (EvalExp.leaf_ok (by simp [evalPureLeafExp?]; rfl))
-            (EvalExp.leaf_ok (by llvm_step [hba]; rfl))
-            (EvalExp.leaf_ok (by llvm_step; rfl))
-            (by rfl)
-            ⟨default, default, rfl⟩))
-        (StarStep.step (ev := none)
-          (Step.term rfl rfl rfl
-            (StepTerm.ret_ok rfl
-              (EvalExp.leaf_ok (by llvm_step; rfl))
-              (StepRet.top_ok rfl (by llvm_step [selectTrueDef]))))
-          (StarStep.refl _)))
-      (RegisterValue.IsRefinedBy.refl _)
-      (MemoryState.IsRefinedBy.refl _ _)
-  · llvm_wf [selectTrueDef] at hargs
+  llvm_refine
 
 /-! ### 8. Arbitrary Caller-Memory Store-to-Load Forwarding & Dead `alloca` Elimination -/
 
