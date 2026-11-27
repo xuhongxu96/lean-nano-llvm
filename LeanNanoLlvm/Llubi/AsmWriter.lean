@@ -214,10 +214,6 @@ def isPoison : CVal → Bool
   | .poison => true
   | _ => false
 
-def isUndefLike : CVal → Bool
-  | .undef | .poison => true
-  | _ => false
-
 /-- Element is a simple `ConstantInt` / `ConstantFP` / `ConstantByte`. -/
 def isSimple : CVal → Bool
   | .int _ | .fpBits _ | .fpDec .. | .fpSpec .. | .bool _ => true

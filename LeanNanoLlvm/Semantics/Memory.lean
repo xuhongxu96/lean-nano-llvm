@@ -41,14 +41,8 @@ def null (dl : DataLayout) (addrSpace : Nat := 0) : Pointer :=
 def isNull (p : Pointer) (dl : DataLayout) (addrSpace : Nat := 0) : Bool :=
   p.addr.toNat == dl.getNullPtrValue addrSpace
 
-def withNewAddr : Pointer → (w : Nat) → BitVec w → Pointer
-  | ⟨prov, _, _⟩, w, newAddr => ⟨prov, w, newAddr⟩
-
-def withNewProv : Pointer → Provenance → Pointer
-  | ⟨_, w, addr⟩, newProv => ⟨newProv, w, addr⟩
-
 def toString (p : Pointer) : String :=
-  let hex := String.ofList (Nat.toDigits 16 p.addr.toNat)
+  let hex := Hex.lower p.addr.toNat
   let provStr := match p.prov with
     | .nullary => "nullary"
     | .concrete id => s!"alloc#{id}"
@@ -146,26 +140,6 @@ def setBit : MemByte → Nat → MemBit → MemByte
   | ⟨b0, b1, b2, b3, b4, _, b6, b7⟩, 5, v => ⟨b0, b1, b2, b3, b4, v, b6, b7⟩
   | ⟨b0, b1, b2, b3, b4, b5, _, b7⟩, 6, v => ⟨b0, b1, b2, b3, b4, b5, v, b7⟩
   | ⟨b0, b1, b2, b3, b4, b5, b6, _⟩, _, v => ⟨b0, b1, b2, b3, b4, b5, b6, v⟩
-
-/-- Extract all 8 bits LSB-first as a list. -/
-def toBits (b : MemByte) : List MemBit :=
-  [b.b0, b.b1, b.b2, b.b3, b.b4, b.b5, b.b6, b.b7]
-
-/-- Build a `MemByte` from an 8-element LSB-first list (missing bits default to `.poison`). -/
-def ofBits (bs : List MemBit) : MemByte :=
-  ⟨bs.getD 0 .poison, bs.getD 1 .poison, bs.getD 2 .poison, bs.getD 3 .poison,
-   bs.getD 4 .poison, bs.getD 5 .poison, bs.getD 6 .poison, bs.getD 7 .poison⟩
-
-/-- Check whether a byte is fully concrete and return its `UInt8` value if so. -/
-def asConcreteUInt8? (b : MemByte) : Option UInt8 :=
-  let rec go (i : Nat) (acc : Nat) : Option Nat :=
-    match i with
-    | 0 => some acc
-    | k + 1 =>
-      match b.getBit k with
-      | .concrete bit _ => go k (acc ||| (if bit then 1 <<< k else 0))
-      | _ => none
-  (go 8 0).map UInt8.ofNat
 
 /--
 Check `llubi::Byte::isCanonicalPaddingByte`:
@@ -411,12 +385,6 @@ structure AllocSpec (mem : MemoryState) (dl : DataLayout) (cfg : SemanticsConfig
      mem.inaccessible.filter (· != obj.allocId)⟩
 
 /-- A freshly allocated object is accessible. -/
-theorem AllocSpec.not_inaccessible {mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem'}
-    (hspec : AllocSpec mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem') :
-    mem'.isInaccessible obj.allocId = false := by
-  rw [hspec.mem'_eq]
-  simp [isInaccessible, List.contains_eq_any_beq, List.any_filter]
-
 theorem AllocSpec.not_mem_inaccessible {mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem'}
     (hspec : AllocSpec mem dl cfg size align name addrSpace initKind allocKind isConstant obj mem') :
     obj.allocId ∉ mem'.inaccessible := by

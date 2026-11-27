@@ -1,4 +1,5 @@
 import LeanNanoLlvm.AST.AST
+import LeanNanoLlvm.Util.Hex
 
 /-!
 # Printing the AST as LLVM IR text
@@ -154,15 +155,15 @@ def Exp.print : Exp → String
   | .identifier id => id.print
   | .bool b => s!"{b}"
   | .int i => s!"{i}"
-  | .floatBits b => s!"0x{String.ofList (Nat.toDigits 16 b)}"
+  | .floatBits b => s!"0x{Hex.lower b}"
   | .floatDec neg m e =>
       let sgn := if neg then "-" else ""
       if e == 0 then s!"{sgn}{m}.0" else s!"{sgn}{m}e{e}"
   | .floatSpecial neg isInf quiet payload =>
       let sgn := if neg then "-" else "+"
       if isInf then s!"{sgn}inf"
-      else if quiet then if payload == 0 then s!"{sgn}qnan" else s!"{sgn}qnan(0x{String.ofList (Nat.toDigits 16 payload)})"
-      else if payload == 0 then s!"{sgn}snan" else s!"{sgn}snan(0x{String.ofList (Nat.toDigits 16 payload)})"
+      else if quiet then if payload == 0 then s!"{sgn}qnan" else s!"{sgn}qnan(0x{Hex.lower payload})"
+      else if payload == 0 then s!"{sgn}snan" else s!"{sgn}snan(0x{Hex.lower payload})"
   | .blockAddress fn blk =>
       s!"blockaddress(@{fn.toString}, %{blk.toString})"
   | .null => "null"

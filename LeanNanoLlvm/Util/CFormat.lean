@@ -1,4 +1,5 @@
 import LeanNanoLlvm.Util.IEEEFloat
+import LeanNanoLlvm.Util.Hex
 
 /-!
 # Exact C `printf` conversions
@@ -147,7 +148,7 @@ def fmtDouble (sp : Spec) (spec : Char) (x : IEEEFloat FloatFormat.double) : Str
         else
           let (lead, sig, ex) : Nat × Nat × Int :=
             if x.rawExp == 0 then (0, x.rawSig, -1022) else (1, x.rawSig, (x.rawExp : Int) - 1023)
-          let hex := padZerosLeft (String.ofList (Nat.toDigits 16 sig)) 13
+          let hex := Hex.lowerPadded 13 sig
           let hex := String.ofList (hex.toList.reverse.dropWhile (· == '0')).reverse
           toString lead ++ (if hex.isEmpty && !sp.alt then "" else "." ++ hex) ++
             "p" ++ (if ex < 0 then "-" else "+") ++ toString ex.natAbs

@@ -668,18 +668,18 @@ theorem fneg_fneg_is_refined_by_id : fnegFnegDef ⊒ idFloatDef := by
     rw [initCallConfig_1 .modern .default64LE initMem fnegFnegDef rfl (Or.inl rfl) rfl rfl rfl rfl]
     have hneg : ∀ w : FloatW .float,
         evalFloatUnaryExec (.fneg {}) (.float .float) (.float .float w) default =
-          .ok (.float .float (evalFloatUnaryOpO (.fneg {}) w default).1,
-               (evalFloatUnaryOpO (.fneg {}) w default).2) := fun _ => rfl
-    have hinv : (evalFloatUnaryOpO (.fneg {})
-        (evalFloatUnaryOpO (ft := .float) (.fneg {}) v default).1 default).1 = v := by
+          .ok (.float .float (evalFloatUnaryOp (.fneg {}) w default).1,
+               (evalFloatUnaryOp (.fneg {}) w default).2) := fun _ => rfl
+    have hinv : (evalFloatUnaryOp (.fneg {})
+        (evalFloatUnaryOp (ft := .float) (.fneg {}) v default).1 default).1 = v := by
       cases v using PoisonOr.casesOn' with
       | poison => rfl
-      | value flt => simp [evalFloatUnaryOpO, handleFMF]
+      | value flt => simp [evalFloatUnaryOp, handleFMF]
     have hfneg1 := hneg v
     have hfneg2 : evalFloatUnaryExec (.fneg {}) (.float .float)
-        (.float .float (evalFloatUnaryOpO (.fneg {}) v default).1) default =
-        .ok (.float .float v, (evalFloatUnaryOpO (.fneg {})
-          (evalFloatUnaryOpO (ft := .float) (.fneg {}) v default).1 default).2) := by
+        (.float .float (evalFloatUnaryOp (.fneg {}) v default).1) default =
+        .ok (.float .float v, (evalFloatUnaryOp (.fneg {})
+          (evalFloatUnaryOp (ft := .float) (.fneg {}) v default).1 default).2) := by
       rw [hneg, hinv]
     exact Config.IsRefinedBy.of_det_halted
       (det_step_to_halted fun ev c' => by
@@ -741,12 +741,12 @@ private theorem evalFloatBinary_fadd_refines_nnan (va vb : FloatW .float) (o : O
     | poison => exact hpoisonL _
     | value fb =>
       by_cases ha : fa.isNaN = true
-      · simp only [evalFloatBinaryOpO, hinP fa o ha]; exact hpoisonL _
+      · simp only [evalFloatBinaryOp, hinP fa o ha]; exact hpoisonL _
       · have ha' : fa.isNaN = false := Bool.eq_false_iff.mpr ha
         by_cases hb : fb.isNaN = true
-        · simp only [evalFloatBinaryOpO, hinV fa o ha', hinP fb o hb]; exact hpoisonL _
+        · simp only [evalFloatBinaryOp, hinV fa o ha', hinP fb o hb]; exact hpoisonL _
         · have hb' : fb.isNaN = false := Bool.eq_false_iff.mpr hb
-          simp only [evalFloatBinaryOpO, fmfIn_none, hinV fa o ha', hinV fb o hb',
+          simp only [evalFloatBinaryOp, fmfIn_none, hinV fa o ha', hinV fb o hb',
             SemanticsConfig.modern, denormIn_ieee_fst, handleDenormal_ieee]
           by_cases hr : (IEEEFloat.add RoundingMode.RNE fa fb).isNaN = true
           · simp only [handleFMF, hr, Bool.and_true, ↓reduceIte]; exact hpoisonL _

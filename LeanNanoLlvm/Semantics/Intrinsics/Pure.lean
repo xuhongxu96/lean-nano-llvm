@@ -361,30 +361,6 @@ def evalPureDetIntrinsic? (cfg : SemanticsConfig) (name : String) (retTy : LlvmR
   else
     none
 
-/-- Map an oracle-threading function over a list. -/
-def mapListOracleI (f : RegisterValue → OracleState → Except ExecError (RegisterValue × OracleState)) :
-    List RegisterValue → OracleState → Except ExecError (List RegisterValue × OracleState)
-  | [], o => .ok ([], o)
-  | e :: es, o =>
-    match f e o with
-    | .error err => .error err
-    | .ok (r, o1) =>
-      match mapListOracleI f es o1 with
-      | .error err => .error err
-      | .ok (rs, o2) => .ok (r :: rs, o2)
-
-/-- Map an oracle-threading function over two lists pairwise. -/
-def mapList2OracleI (f : RegisterValue → RegisterValue → OracleState → Except ExecError (RegisterValue × OracleState)) :
-    List RegisterValue → List RegisterValue → OracleState → Except ExecError (List RegisterValue × OracleState)
-  | x :: xs, y :: ys, o =>
-    match f x y o with
-    | .error err => .error err
-    | .ok (r, o1) =>
-      match mapList2OracleI f xs ys o1 with
-      | .error err => .error err
-      | .ok (rs, o2) => .ok (r :: rs, o2)
-  | _, _, o => .ok ([], o)
-
 /-- The float payloads of `es` if all are floats of type `ft`. -/
 def floatsOf (ft : FloatType) : List RegisterValue → Option (List (PoisonOr (IEEEFloat ft.format)))
   | [] => some []
@@ -628,7 +604,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           | other => .error (.staticError s!"Expected float in llvm.fabs, got {other}")
         match v with
         | .vector _ elems =>
-          (mapListOracleI goElem elems o).map fun (rs, o') => (.vector resElemTy rs, o')
+          (mapListOracle goElem elems o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _ => goElem v o
       | _ => .error (.staticError "llvm.fabs expects 1 argument")
   else if strHasPrefix name "llvm.copysign" then
@@ -651,7 +627,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           | _, _ => .error (.staticError "Expected floats in llvm.copysign")
         match v1, v2 with
         | .vector _ es1, .vector _ es2 =>
-          (mapList2OracleI goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
+          (mapList2Oracle goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _, _ => goElem v1 v2 o
       | _ => .error (.staticError "llvm.copysign expects 2 arguments")
   else if strHasPrefix name "llvm.fma" || strHasPrefix name "llvm.fmuladd" then
@@ -747,7 +723,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
         match v1, v2 with
         | .vector _ es1, .vector _ es2 =>
           if es1.length != es2.length then .error (.staticError "Vector length mismatch in FP min/max")
-          else (mapList2OracleI goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
+          else (mapList2Oracle goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _, _ => goElem v1 v2 o
       | _ => .error (.staticError s!"{name} expects 2 arguments")
   else if strHasPrefix name "llvm.is.fpclass" then
@@ -809,7 +785,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           | other => .error (.staticError s!"Expected float in {name}, got {other}")
         match v with
         | .vector _ elems =>
-          (mapListOracleI goElem elems o).map fun (rs, o') => (.vector resElemTy rs, o')
+          (mapListOracle goElem elems o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _ => goElem v o
       | _ => .error (.staticError s!"{name} expects 1 argument")
   else if strHasPrefix name "llvm.ldexp" then
@@ -832,7 +808,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
         match v1, v2 with
         | .vector _ es1, .vector _ es2 =>
           if es1.length != es2.length then .error (.staticError "Vector length mismatch in llvm.ldexp")
-          else (mapList2OracleI goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
+          else (mapList2Oracle goElem es1 es2 o).map fun (rs, o') => (.vector resElemTy rs, o')
         | _, _ => goElem v1 v2 o
       | _ => .error (.staticError "llvm.ldexp expects 2 arguments")
   else if strHasPrefix name "llvm.vector.reduce.fadd" || strHasPrefix name "llvm.vector.reduce.fmul" then
@@ -849,7 +825,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
             | .float _ .poison, _ => .ok (acc, o0)
             | .float ft1 fa, .float ft2 fb =>
               if h : ft1 = ft2 then
-                match evalFloatBinaryOpO cfg op (h ▸ fa) fb o0 with
+                match evalFloatBinaryOp cfg op (h ▸ fa) fb o0 with
                 | (.poison, o1) => .ok (.float ft2 .poison, o1)
                 | (r, o1) => goFold (.float ft2 r) rest o1
               else .error (.staticError s!"Mismatched float types in {name}")

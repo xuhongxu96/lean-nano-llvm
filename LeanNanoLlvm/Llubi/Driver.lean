@@ -344,7 +344,6 @@ structure DState where
   tables   : SrcTables
   dl       : DataLayout
   modName  : String
-  entry    : String
   verbose  : Bool
   maxSteps : Nat
 
@@ -846,7 +845,7 @@ def llubiMain (args : List String) : IO UInt32 := do
   let w1 := { w0 with mdDefs := collectMdDefs w0 }
   let w := { w1 with mdSlots := computeMdSlots w1 pm.fnSrcs }
   let tables := buildSrcTables w pm fns
-  let d : DState := { tables, dl, modName, entry := opts.entry, verbose := opts.verbose,
+  let d : DState := { tables, dl, modName, verbose := opts.verbose,
                       maxSteps := opts.maxSteps }
   let initCfg := initCallConfig cfg dl mem fns decls defn entryArgs
   -- Function entry for the entry point

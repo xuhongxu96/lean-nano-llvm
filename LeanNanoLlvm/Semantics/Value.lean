@@ -7,6 +7,7 @@ import LeanNanoLlvm.AST.Print
 import LeanNanoLlvm.Semantics.IntOps
 import LeanNanoLlvm.Semantics.FloatOps
 import LeanNanoLlvm.Semantics.MemoryRefinement
+import LeanNanoLlvm.Util.Hex
 
 /-!
 # Runtime values
@@ -35,32 +36,35 @@ inductive RegisterValue : Type where
 
 namespace RegisterValue
 
-mutual
-def toStringAux : RegisterValue → String
-  | .bv _ .poison => "poison"
-  | .bv _ (.value v) => s!"{v}"
-  | .byte w bits =>
-    let bitStr := String.ofList (bits.reverse.map fun
-      | .concrete true _ => '1'
-      | .concrete false _ => '0'
-      | .poison | .undef => '!')
-    s!"b{w} {bitStr}"
-  | .float _ .poison => "poison"
-  | .float ft (.value f) => s!"{ft.print} {f}"
-  | .ptr _ .poison => "poison"
-  | .ptr _ (.value p) => s!"{p}"
-  | .vector _ elems => "<" ++ String.intercalate ", " (toStringList elems) ++ ">"
-  | .array _ elems => "[" ++ String.intercalate ", " (toStringList elems) ++ "]"
-  | .struct false _ fields => "{ " ++ String.intercalate ", " (toStringList fields) ++ " }"
-  | .struct true _ fields => "<{ " ++ String.intercalate ", " (toStringList fields) ++ " }>"
+/-- Debug rendering of a value: its type and payload, with integers in decimal and floats and
+pointers as hexadecimal bit patterns (e.g. `i32 5`, `<i8 1, poison>`, `ptr(as=0) 0x8`). This is
+the format of `lean-nano-llvm run` and of internal error messages; `llubiString` (`Display.lean`)
+is `llubi`'s format. -/
+def toString : RegisterValue → String
   | .void => "void"
+  | .bv w pv => s!"i{w} {poisonOr pv fun bv => ToString.toString bv.toNat}"
+  | .byte w bits => s!"b{w} {String.ofList (bits.reverse.map bitChar)}"
+  | .float ft pv =>
+    s!"{ft.print} {poisonOr pv fun f => "0x" ++ Hex.lowerPadded ((ft.bitWidth + 3) / 4) f.bits.toNat}"
+  | .ptr as pv => s!"ptr(as={as}) {poisonOr pv fun p => "0x" ++ Hex.lower p.addr.toNat}"
+  | .vector _ elems => "<" ++ list elems ++ ">"
+  | .array _ elems => "[" ++ list elems ++ "]"
+  | .struct packed _ fields => if packed then "<{ " ++ list fields ++ " }>" else "{ " ++ list fields ++ " }"
+where
+  poisonOr {α : Type} (pv : PoisonOr α) (f : α → String) : String :=
+    match pv with
+    | .poison => "poison"
+    | .value v => f v
+  bitChar : MemBit → Char
+    | .concrete true _ => '1'
+    | .concrete false _ => '0'
+    | _ => '!'
+  list : List RegisterValue → String
+    | [] => ""
+    | [v] => toString v
+    | v :: vs => toString v ++ ", " ++ list vs
 
-def toStringList : List RegisterValue → List String
-  | [] => []
-  | v :: vs => toStringAux v :: toStringList vs
-end
-
-instance : ToString RegisterValue := ⟨toStringAux⟩
+instance : ToString RegisterValue := ⟨toString⟩
 
 
 mutual
@@ -217,12 +221,6 @@ def isScalarPoison : RegisterValue → Bool
 /-- Convert an integer `BitVec w` into a concrete `RegisterValue.byte w` (LSB-first, no provenance). -/
 def byteOfBitVec {w : Nat} (bv : BitVec w) : RegisterValue :=
   .byte w ((List.range w).map fun i => .concrete (bv.getLsbD i) none)
-
-/-- Extract boolean tri-state (`poison` or `value b`) from an `i1` `RegisterValue`. -/
-def asBool? : RegisterValue → Option (PoisonOr Bool)
-  | .bv 1 .poison => some .poison
-  | .bv 1 (.value b) => some (.value (b != 0))
-  | _ => none
 
 /-! ### Value Refinement (under `MemoryInjection`, poison-aware) -/
 
@@ -427,10 +425,5 @@ theorem IsRefinedByList.mono {f g : MemoryInjection} (hext : f.Extends g) :
 end
 
 end RegisterValue
-
-def castRegValue? (w : Nat) : RegisterValue → Option (IntW w)
-  | .bv w' v =>
-    if h : w' = w then some (h ▸ v) else none
-  | _ => none
 
 end LeanNanoLlvm.Semantics

@@ -229,7 +229,4 @@ def tokenizeWithLines (input : String) : Array Tok × Array Nat :=
   let acc := go (cs.length + 1) {} cs
   (acc.toks, acc.lines)
 
-/-- Lex an LLVM IR source string into a token array. -/
-def tokenize (input : String) : Array Tok := (tokenizeWithLines input).1
-
 end LeanNanoLlvm.AST.Parser

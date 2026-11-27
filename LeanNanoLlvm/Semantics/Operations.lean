@@ -370,16 +370,26 @@ private theorem evalPtrToIntList_wf {dstW es m rs m'} (hwf : MemoryState.WellFor
         cases h
         exact ih hm1 h2
 
-private def mapListOracle (f : RegisterValue → OracleState → Except ExecError (RegisterValue × OracleState)) :
+/-- Map an oracle-threading function over a list, left to right. -/
+def mapListOracle (f : RegisterValue → OracleState → Except ExecError (RegisterValue × OracleState)) :
     List RegisterValue → OracleState → Except ExecError (List RegisterValue × OracleState)
-  | [], o0 => .ok ([], o0)
-  | e :: es, o0 =>
-    match f e o0 with
-    | .error err => .error err
-    | .ok (r, o1) =>
-      match mapListOracle f es o1 with
-      | .error err => .error err
-      | .ok (rs, o2) => .ok (r :: rs, o2)
+  | [], o => .ok ([], o)
+  | e :: es, o => do
+    let (r, o1) ← f e o
+    let (rs, o2) ← mapListOracle f es o1
+    return (r :: rs, o2)
+
+/-- Map an oracle-threading function over two lists pairwise, left to right (stopping at the
+shorter list). -/
+def mapList2Oracle
+    (f : RegisterValue → RegisterValue → OracleState → Except ExecError (RegisterValue × OracleState)) :
+    List RegisterValue → List RegisterValue → OracleState →
+      Except ExecError (List RegisterValue × OracleState)
+  | x :: xs, y :: ys, o => do
+    let (r, o1) ← f x y o
+    let (rs, o2) ← mapList2Oracle f xs ys o1
+    return (r :: rs, o2)
+  | _, _, o => .ok ([], o)
 
 /-- Conversions that do not modify `MemoryState` (everything except `ptrtoint`). -/
 def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
@@ -423,7 +433,7 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
       let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
         match v with
         | .float _ fw =>
-          match evalFPConvO dstFt cfg fmf fw o0 with
+          match evalFPConv dstFt cfg fmf fw o0 with
           | (r, o1) => .ok (.float dstFt r, o1)
         | other => .error (.staticError s!"Expected float in fptrunc/fpext, got {other}")
       match val with
@@ -455,7 +465,7 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
       let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
         match v with
         | .bv _ iv =>
-          match evalIntToFPO dstFt cfg false nneg fmf iv o0 with
+          match evalIntToFP dstFt cfg false nneg fmf iv o0 with
           | (r, o1) => .ok (.float dstFt r, o1)
         | other => .error (.staticError s!"Expected integer in uitofp, got {other}")
       match val with
@@ -471,7 +481,7 @@ def evalConversionNoMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
       let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
         match v with
         | .bv _ iv =>
-          match evalIntToFPO dstFt cfg true false fmf iv o0 with
+          match evalIntToFP dstFt cfg true false fmf iv o0 with
           | (r, o1) => .ok (.float dstFt r, o1)
         | other => .error (.staticError s!"Expected integer in sitofp, got {other}")
       match val with
@@ -551,7 +561,7 @@ def evalFloatUnaryExec (op : FloatUnaryOp) (ty : LlvmType) (val : RegisterValue)
   let goElem (v : RegisterValue) (o0 : OracleState) : Except ExecError (RegisterValue × OracleState) :=
     match v with
     | .float ft fw =>
-      let r := evalFloatUnaryOpO op fw o0
+      let r := evalFloatUnaryOp op fw o0
       .ok (.float ft r.1, r.2)
     | _ => .error (.staticError s!"Expected float value for fneg, got {v}")
   match val with
@@ -575,7 +585,7 @@ def evalFloatBinaryExec (cfg : SemanticsConfig) (op : FloatBinaryOp) (ty : LlvmT
     match a, b with
     | .float ft1 fw1, .float ft2 fw2 =>
       if h : ft1 = ft2 then
-        let r := evalFloatBinaryOpO cfg op (h ▸ fw1) fw2 o0
+        let r := evalFloatBinaryOp cfg op (h ▸ fw1) fw2 o0
         .ok (.float ft2 r.1, r.2)
       else .error (.staticError s!"Mismatched float types: {ft1.print} vs {ft2.print}")
     | _, _ => .error (.staticError s!"Expected float values for FP binary op, got {a}, {b}")

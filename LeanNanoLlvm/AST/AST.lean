@@ -283,7 +283,6 @@ abbrev LlvmType.f32 : LlvmType := .float .float
 abbrev LlvmType.f64 : LlvmType := .float .double
 abbrev LlvmType.f128 : LlvmType := .float .fp128
 
-abbrev TypedIdentifier := Identifier × LlvmType
 
 mutual
 /-- Returns `true` if `ty` is or recursively contains a `.function` type (disallowed in `undef`). -/

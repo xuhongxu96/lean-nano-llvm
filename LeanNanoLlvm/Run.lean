@@ -1,6 +1,5 @@
 import LeanNanoLlvm.AST
 import LeanNanoLlvm.Semantics
-import LeanNanoLlvm.Util.Hex
 
 /-!
 # `lean-nano-llvm run`
@@ -116,30 +115,6 @@ Options of `run`:
 
 /-! ### Output -/
 
-/-- The CLI rendering of a value: its type and payload, with integers in decimal and floats and
-pointers as hexadecimal bit patterns. -/
-partial def formatValue : RegisterValue → String
-  | .void => "void"
-  | .bv w pv => s!"i{w} {poisonOr pv fun bv => toString bv.toNat}"
-  | .byte w bits =>
-    let bitChar : MemBit → Char
-      | .concrete true _ => '1'
-      | .concrete false _ => '0'
-      | _ => '!'
-    s!"b{w} {String.ofList (bits.reverse.map bitChar)}"
-  | .float ft pv =>
-    s!"{ft.print} {poisonOr pv fun f => "0x" ++ Hex.lowerPadded ((ft.bitWidth + 3) / 4) f.bits.toNat}"
-  | .ptr as pv => s!"ptr(as={as}) {poisonOr pv fun p => "0x" ++ Hex.lower p.addr.toNat}"
-  | .vector _ elems => "<" ++ list elems ++ ">"
-  | .array _ elems => "[" ++ list elems ++ "]"
-  | .struct packed _ fields => if packed then "<{ " ++ list fields ++ " }>" else "{ " ++ list fields ++ " }"
-where
-  poisonOr {α : Type} (pv : PoisonOr α) (f : α → String) : String :=
-    match pv with
-    | .poison => "poison"
-    | .value v => f v
-  list (vs : List RegisterValue) : String := ", ".intercalate (vs.map formatValue)
-
 /-- Report an execution error on stderr and return its exit code. -/
 def reportError : ExecError → IO UInt32
   | .immediateUB msg => do IO.eprintln s!"UB: {msg}"; return 1
@@ -177,7 +152,7 @@ def runVerbose (verbose : Bool) : Nat → OracleState → Config → IO Config
     let (_, c', o') := execStep o c
     if verbose then
       if let some (rid, v) := definedValue? st c' then
-        IO.println s!"VAL: %{rid} => {formatValue v}"
+        IO.println s!"VAL: %{rid} => {v}"
     runVerbose verbose fuel o' c'
   | _, _, c => return c
 
@@ -245,7 +220,7 @@ def main (args : List String) : IO UInt32 := do
     if opts.entry == "main" && val.containsPoison then
       IO.eprintln "STATIC_ERROR: Execution of function 'main' resulted in poison return value."
       return 2
-    IO.println s!"OK: {formatValue val}"
+    IO.println s!"OK: {val}"
     return 0
 
 end LeanNanoLlvm.Run

@@ -32,35 +32,6 @@ def handleFMF {fmt : FloatFormat} (fmf : FastMathFlags) (isInput : Bool)
   else
     .value x
 
-/-- Apply NaN propagation mode (matches `llubi::applyNaNPropagation`). -/
-def applyNaNPropagation {fmt : FloatFormat} (mode : NaNPropagationMode)
-    (res : IEEEFloat fmt) (inputs : List (IEEEFloat fmt))
-    (signChoice : Bool) (pickIdx : Nat) : IEEEFloat fmt :=
-  if !res.isNaN then res
-  else
-    let preferred := IEEEFloat.qNaN fmt signChoice 0
-    let inputNaNs := inputs.filter IEEEFloat.isNaN
-    let quietCandidates := inputNaNs.map fun n =>
-      let n' := if signChoice then n.neg else n
-      n'.makeQuiet
-    let unchangedCandidates := inputNaNs.map fun n =>
-      if signChoice then n.neg else n
-    let pick (cands : List (IEEEFloat fmt)) : IEEEFloat fmt :=
-      match cands with
-      | [] => preferred
-      | _ => cands.getD (pickIdx % cands.length) preferred
-    match mode with
-    | .preferred      => preferred
-    | .quieting       => pick quietCandidates
-    | .unchanged      => pick unchangedCandidates
-    | .nondet         => pick (preferred :: quietCandidates ++ unchangedCandidates)
-    | .sparcPreferred => IEEEFloat.qNaN fmt signChoice fmt.sigMask
-    | .wasm =>
-      if inputNaNs.all (fun n => n.isQNaN && n.rawSig == fmt.quietBit) then
-        IEEEFloat.qNaN fmt signChoice 0
-      else
-        IEEEFloat.qNaN fmt signChoice ((pickIdx ||| 1) &&& fmt.sigMask)
-
 /-- Unpack a 128-bit `ppc_fp128` (`lo64 || hi64` in LLVM APInt order) into `(hi, lo)` IEEE doubles. -/
 def unpackPPC128 (x : IEEEFloat .fp128) : IEEEFloat .double × IEEEFloat .double :=
   let n := x.bits.toNat
@@ -137,69 +108,6 @@ def evalFCmpPred {fmt : FloatFormat} (pred : FCmpPred) (x y : IEEEFloat fmt) : B
   | .ule    => unordered || IEEEFloat.compareNonNaN x y != .gt
   | .une    => unordered || IEEEFloat.compareNonNaN x y != .eq
 
-/-- Evaluate bitwise unary FP op (`fneg`) with FMF (no denormal flushing, matches `llubi`). -/
-def evalFloatUnaryOp {ft : FloatType} (op : FloatUnaryOp)
-    (flipZero : Bool) (v : FloatW ft) : FloatW ft := do
-  let x ← v
-  match ft, x with
-  | .ppc_fp128, x =>
-    match op with
-    | .fneg fmf =>
-      let (hi, lo) := unpackPPC128 x
-      let hi ← handleFMF fmf true flipZero hi
-      let rHi := hi.neg
-      let rLo := lo.neg
-      let rHi ← handleFMF fmf false false rHi
-      pure (packPPC128 rHi rLo)
-  | ft, x =>
-    match op with
-    | .fneg fmf =>
-      let x ← handleFMF fmf true flipZero x
-      let r := x.neg
-      handleFMF fmf false false r
-
-/-- Evaluate binary FP op (`fadd`/`fsub`/`fmul`/`fdiv`/`frem`) with FMF, denormals, rounding, and NaN propagation. -/
-def evalFloatBinaryOp {ft : FloatType} (cfg : SemanticsConfig) (op : FloatBinaryOp)
-    (flipL flipR denormL denormR nanSign : Bool) (nanPick : Nat)
-    (lhs rhs : FloatW ft) : FloatW ft := do
-  let x ← lhs
-  let y ← rhs
-  let fmf := match op with
-    | .fadd f | .fsub f | .fmul f | .fdiv f | .frem f => f
-  match ft, x, y with
-  | .ppc_fp128, x, y =>
-    let (a, aa) := unpackPPC128 x
-    let (c, cc) := unpackPPC128 y
-    let a ← handleFMF fmf true flipL a
-    let c ← handleFMF fmf true flipR c
-    let (rHi, rLo) := match op with
-      | .fadd _ => ppcAdd cfg.roundingMode a aa c cc
-      | .fsub _ =>
-        let (h, l) := ppcAdd cfg.roundingMode a aa c.neg cc.neg
-        -- Match LLVM DoubleAPFloat::subtract zero-lo sign when subtracting exact doubles
-        (h, if l.isZero && !l.sign && aa.isZero && cc.isZero && !a.isZero && !c.isZero then l.neg else l)
-      | .fmul _ => ppcMul cfg.roundingMode a aa c cc
-      | .fdiv _ => ppcDiv cfg.roundingMode a aa c cc
-      | .frem _ => (IEEEFloat.rem a c, IEEEFloat.zero .double false)
-    let rHi ← handleFMF fmf false false rHi
-    let rHi := applyNaNPropagation cfg.nanMode rHi [a, c] nanSign nanPick
-    pure (packPPC128 rHi rLo)
-  | ft, x, y =>
-    let x ← handleFMF fmf true flipL x
-    let y ← handleFMF fmf true flipR y
-    let fx := handleDenormal cfg.denormalMode.input true denormL x
-    let fy := handleDenormal cfg.denormalMode.input true denormR y
-    let raw := match op with
-      | .fadd _ => IEEEFloat.add cfg.roundingMode fx fy
-      | .fsub _ => IEEEFloat.sub cfg.roundingMode fx fy
-      | .fmul _ => IEEEFloat.mul cfg.roundingMode fx fy
-      | .fdiv _ => IEEEFloat.div cfg.roundingMode fx fy
-      | .frem _ => IEEEFloat.rem fx fy
-    let flushed := handleDenormal cfg.denormalMode.output false false raw
-    let validated ← handleFMF fmf false false flushed
-    let final := applyNaNPropagation cfg.nanMode validated [fx, fy] nanSign nanPick
-    pure final
-
 /-- Evaluate `fcmp` with FMF and input denormal flushing. -/
 def evalFCmp {ft : FloatType} (cfg : SemanticsConfig) (fmf : FastMathFlags)
     (pred : FCmpPred) (flipL flipR denormL denormR : Bool)
@@ -235,26 +143,12 @@ def evalFCmp {ft : FloatType} (cfg : SemanticsConfig) (fmf : FastMathFlags)
       | .ule    => unordered || cmpOrd != .gt
       | .une    => unordered || cmpOrd != .eq
     pure (BitVec.ofBool b)
-  | ft, x, y =>
+  | _, x, y =>
     let x ← handleFMF fmf true flipL x
     let y ← handleFMF fmf true flipR y
     let fx := handleDenormal cfg.denormalMode.input true denormL x
     let fy := handleDenormal cfg.denormalMode.input true denormR y
     pure (BitVec.ofBool (evalFCmpPred pred fx fy))
-
-/-- Evaluate `fpext` / `fptrunc` with FMF, denormals, rounding, and NaN propagation. -/
-def evalFPConv {srcFt : FloatType} (dstFt : FloatType) (cfg : SemanticsConfig)
-    (fmf : FastMathFlags) (flipIn denormIn nanSign : Bool) (nanPick : Nat)
-    (v : FloatW srcFt) : FloatW dstFt := do
-  let x ← v
-  let x ← handleFMF fmf true flipIn x
-  let fx := handleDenormal cfg.denormalMode.input true denormIn x
-  let conv := fx.convert dstFt.format cfg.roundingMode
-  let validated ← handleFMF fmf false false conv
-  let flushed := handleDenormal cfg.denormalMode.output false false validated
-  -- NaN propagation in destination format
-  let inputConvNaNs := if fx.isNaN then [conv] else []
-  pure (applyNaNPropagation cfg.nanMode flushed inputConvNaNs nanSign nanPick)
 
 /-- Evaluate `fptoui` / `fptosi` (truncates toward zero, poison on NaN/Inf/out-of-range). -/
 def evalFPToInt {ft : FloatType} (dstW : Nat) (isSigned : Bool)
@@ -264,20 +158,6 @@ def evalFPToInt {ft : FloatType} (dstW : Nat) (isSigned : Bool)
   match res? with
   | some bv => .value bv
   | none => .poison
-
-/-- Evaluate `uitofp` / `sitofp` with `nneg` (for `uitofp`) and `FMF`. -/
-def evalIntToFP {srcW : Nat} (dstFt : FloatType) (cfg : SemanticsConfig)
-    (isSigned nneg : Bool) (fmf : FastMathFlags) (flipZero : Bool)
-    (v : PoisonOr (BitVec srcW)) : FloatW dstFt := do
-  let x ← v
-  if !isSigned && nneg && x.msb then
-    .poison
-  else
-    let res := if isSigned
-      then IEEEFloat.ofSignedBitVec dstFt.format cfg.roundingMode x
-      else IEEEFloat.ofUnsignedBitVec dstFt.format cfg.roundingMode x
-    -- `nsz` applies to the output zero of int-to-fp (matches `llubi::visitIntToFPInst`)
-    handleFMF fmf true flipZero res
 
 /-! ### Lazily drawn nondeterministic choices (in `llubi`'s order)
 
@@ -345,7 +225,7 @@ def nanPropagate {fmt : FloatFormat} (mode : NaNPropagationMode) (res : IEEEFloa
         else (preferred, o1)
 
 /-- Scalar `fneg` with lazily drawn choices. -/
-def evalFloatUnaryOpO {ft : FloatType} (op : FloatUnaryOp) (v : FloatW ft) (o : OracleState) :
+def evalFloatUnaryOp {ft : FloatType} (op : FloatUnaryOp) (v : FloatW ft) (o : OracleState) :
     FloatW ft × OracleState :=
   match v with
   | .poison => (.poison, o)
@@ -389,7 +269,7 @@ def evalFloatUnaryOpO {ft : FloatType} (op : FloatUnaryOp) (v : FloatW ft) (o : 
   simp only [h, Bool.not_false, ↓reduceIte]
 
 /-- Scalar FP binary op with lazily drawn choices (order of `llubi`'s `visitFPBinOpWithResult`). -/
-def evalFloatBinaryOpO {ft : FloatType} (cfg : SemanticsConfig) (op : FloatBinaryOp)
+def evalFloatBinaryOp {ft : FloatType} (cfg : SemanticsConfig) (op : FloatBinaryOp)
     (lhs rhs : FloatW ft) (o : OracleState) : FloatW ft × OracleState :=
   let fmf := match op with
     | .fadd f | .fsub f | .fmul f | .fdiv f | .frem f => f
@@ -464,7 +344,7 @@ def evalFCmpO {ft : FloatType} (cfg : SemanticsConfig) (fmf : FastMathFlags) (pr
   | _, _ => (.poison, o)
 
 /-- Scalar `fpext`/`fptrunc` with lazily drawn choices (`llubi`'s `visitFPConvInst`). -/
-def evalFPConvO {srcFt : FloatType} (dstFt : FloatType) (cfg : SemanticsConfig)
+def evalFPConv {srcFt : FloatType} (dstFt : FloatType) (cfg : SemanticsConfig)
     (fmf : FastMathFlags) (v : FloatW srcFt) (o : OracleState) : FloatW dstFt × OracleState :=
   match v with
   | .poison => (.poison, o)
@@ -484,7 +364,7 @@ def evalFPConvO {srcFt : FloatType} (dstFt : FloatType) (cfg : SemanticsConfig)
           | (r, o3) => (.value r, o3)
 
 /-- `uitofp`/`sitofp` with a lazily drawn `nsz` sign choice for a zero result. -/
-def evalIntToFPO {srcW : Nat} (dstFt : FloatType) (cfg : SemanticsConfig)
+def evalIntToFP {srcW : Nat} (dstFt : FloatType) (cfg : SemanticsConfig)
     (isSigned nneg : Bool) (fmf : FastMathFlags) (v : PoisonOr (BitVec srcW)) (o : OracleState) :
     FloatW dstFt × OracleState :=
   match v with

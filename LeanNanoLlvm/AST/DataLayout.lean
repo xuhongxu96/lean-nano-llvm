@@ -215,9 +215,6 @@ def globalAlign (dl : DataLayout) (ty : LlvmType) (explicit? : Option Nat) (isDe
       if a < 16 && (dl.typeLayout ty).1 > 128 then 16 else a
     else dl.typeABIAlign ty
 
-def structFieldsMaxAlign (dl : DataLayout) (fields : List LlvmType) : Nat :=
-  (dl.structLayoutAux false 0 1 fields).2.2
-
 /-- Exact size in bits (matches `DataLayout::getTypeSizeInBits`). -/
 def typeSizeInBits (dl : DataLayout) (ty : LlvmType) : Nat :=
   (dl.typeLayout ty).1
