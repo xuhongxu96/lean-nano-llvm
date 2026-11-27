@@ -1,4 +1,5 @@
 import LeanNanoLlvm.AST.Parser
+import LeanNanoLlvm.AST.Print
 import LeanNanoLlvm.AST.FloatLiteral
 
 /-!
@@ -1107,7 +1108,7 @@ partial def mangleTy (c : WCtx) : PTy → String
   | .vec sc n e => (if sc then "nxv" else "v") ++ toString n ++ mangleTy c e
   | .arr n e => s!"a{n}" ++ mangleTy c e
   | .struct _ fs => "sl_" ++ String.join (fs.map (mangleTy c)) ++ "s"
-  | .named nm => "s_" ++ nm.ToString
+  | .named nm => "s_" ++ nm.toString
   | .void => "isVoid"
   | t => t.print
 

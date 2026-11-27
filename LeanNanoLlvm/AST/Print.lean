@@ -1,10 +1,34 @@
 import LeanNanoLlvm.AST.AST
 
+/-!
+# Printing the AST as LLVM IR text
+
+`print` functions for every AST node, producing LLVM's textual syntax. (The `llubi` frontend
+re-prints instructions from their source tokens instead; see `Llubi/AsmWriter.lean`.)
+-/
+
 namespace LeanNanoLlvm.AST
 
+def FloatType.print : FloatType → String
+  | .half      => "half"
+  | .bfloat    => "bfloat"
+  | .float     => "float"
+  | .double    => "double"
+  | .x86_fp80  => "x86_fp80"
+  | .fp128     => "fp128"
+  | .ppc_fp128 => "ppc_fp128"
+
+/-- The fast-math flag keywords set in `f` (`fast` when all are). -/
+def FastMathFlags.toStrings (f : FastMathFlags) : List String :=
+  if f == .fast then ["fast"]
+  else
+    [(f.nnan, "nnan"), (f.ninf, "ninf"), (f.nsz, "nsz"), (f.arcp, "arcp"),
+     (f.contract, "contract"), (f.afn, "afn"), (f.reassoc, "reassoc")].filterMap
+      fun (set, name) => if set then Option.some name else Option.none
+
 def Identifier.print : Identifier → String
-  | .global_id id => s!"@{id.ToString}"
-  | .local_id id => s!"%{id.ToString}"
+  | .global_id id => s!"@{id.toString}"
+  | .local_id id => s!"%{id.toString}"
 
 mutual
 
@@ -22,7 +46,7 @@ def LlvmType.print : LlvmType → String
   | .struct true fields =>
       let inner := String.intercalate ", " (LlvmType.printList fields)
       "<{ " ++ inner ++ " }>"
-  | .named nm => s!"%{nm.ToString}"
+  | .named nm => s!"%{nm.toString}"
   | .function ret args isVarArg =>
       let argStrs := LlvmType.printList args ++ (if isVarArg then ["..."] else [])
       s!"{ret.print} ({String.intercalate ", " argStrs})"
@@ -140,7 +164,7 @@ def Exp.print : Exp → String
       else if quiet then if payload == 0 then s!"{sgn}qnan" else s!"{sgn}qnan(0x{String.ofList (Nat.toDigits 16 payload)})"
       else if payload == 0 then s!"{sgn}snan" else s!"{sgn}snan(0x{String.ofList (Nat.toDigits 16 payload)})"
   | .blockAddress fn blk =>
-      s!"blockaddress(@{fn.ToString}, %{blk.ToString})"
+      s!"blockaddress(@{fn.toString}, %{blk.toString})"
   | .null => "null"
   | .zeroinitializer => "zeroinitializer"
   | .undef => "undef"
@@ -209,7 +233,7 @@ def Instruction.print : Instruction → String
   | .select fmf cTy c vTy tv fv =>
       s!"select{formatFlags fmf.toStrings} {cTy.print} {c.print}, {vTy.print} {tv.print}, {vTy.print} {fv.print}"
   | .phi ty fmf incoming _ =>
-      let incStr := String.intercalate ", " (incoming.map fun (e, b) => s!"[ {e.print}, %{b.ToString} ]")
+      let incStr := String.intercalate ", " (incoming.map fun (e, b) => s!"[ {e.print}, %{b.toString} ]")
       s!"phi{formatFlags fmf.toStrings} {ty.print} {incStr}"
   | .alloca allocTy numEl align as =>
       let numStr := match numEl with
@@ -270,13 +294,13 @@ def Instruction.print : Instruction → String
 def Terminator.print : Terminator → String
   | .retVoid => "ret void"
   | .ret ⟨ty, v⟩ => s!"ret {ty.print} {v.print}"
-  | .br dest => s!"br label %{dest.ToString}"
-  | .condBr cond tDest fDest => s!"br i1 {cond.print}, label %{tDest.ToString}, label %{fDest.ToString}"
+  | .br dest => s!"br label %{dest.toString}"
+  | .condBr cond tDest fDest => s!"br i1 {cond.print}, label %{tDest.toString}, label %{fDest.toString}"
   | .switch ty cond defDest cases =>
-      let caseStr := String.intercalate " " (cases.map fun (v, lbl) => s!"{ty.print} {v}, label %{lbl.ToString}")
-      s!"switch {ty.print} {cond.print}, label %{defDest.ToString} [ {caseStr} ]"
+      let caseStr := String.intercalate " " (cases.map fun (v, lbl) => s!"{ty.print} {v}, label %{lbl.toString}")
+      s!"switch {ty.print} {cond.print}, label %{defDest.toString} [ {caseStr} ]"
   | .indirectBr addr dests =>
-      let dStr := String.intercalate ", " (dests.map fun lbl => s!"label %{lbl.ToString}")
+      let dStr := String.intercalate ", " (dests.map fun lbl => s!"label %{lbl.toString}")
       s!"indirectbr ptr {addr.print}, [ {dStr} ]"
   | .unreachable => "unreachable"
 
@@ -303,7 +327,7 @@ def printCode (indent : Nat) : Code → String
 
 def Block.print (block : Block) : String :=
   let indentSize := 2
-  s!"{block.id.ToString}:\n"
+  s!"{block.id.toString}:\n"
   ++ printCode indentSize block.code
   ++ indentString indentSize " " ++ printInstructionWithId block.terminator.fst (.inr block.terminator.snd) ++ "\n"
 
@@ -356,10 +380,10 @@ def GlobalVariable.print (gv : GlobalVariable) : String :=
   let alignStr := match gv.align with
     | some a => s!", align {a}"
     | none => ""
-  s!"@{gv.name.ToString} = {asStr}{kind} {gv.ty.print}{initStr}{alignStr}"
+  s!"@{gv.name.toString} = {asStr}{kind} {gv.ty.print}{initStr}{alignStr}"
 
 def TopLevelEntity.print : TopLevelEntity → String
-  | .typeDef nm ty => s!"%{nm.ToString} = type {ty.print}"
+  | .typeDef nm ty => s!"%{nm.toString} = type {ty.print}"
   | .global gv => gv.print
   | .declaration decl => decl.print
   | .definition defn => defn.print

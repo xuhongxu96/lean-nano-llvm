@@ -3,6 +3,7 @@ import LeanNanoLlvm.Util.Oracle
 import LeanNanoLlvm.Util.AssocMap
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.AST.DataLayout
+import LeanNanoLlvm.AST.Resolve
 import LeanNanoLlvm.AST.Print
 import LeanNanoLlvm.Semantics.IntOps
 import LeanNanoLlvm.Semantics.FloatOps
@@ -991,7 +992,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     | .ok (count, m1, o1) =>
       let totalSize := dl.typeAllocSize allocTy * count
       let effAlign := align?.getD (dl.typePrefAlign allocTy)
-      let name := match iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}"
+      let name := match iid with | .id rid => rid.toString | .void n => s!"alloca.{n}"
       match m1.allocate dl cfg totalSize effAlign name addrSpace (allocaInitKind frame.defn iid) .stack false with
       | .ok (obj, mem') =>
         (none, finishRegInstr st frame callers rest iid
@@ -1138,7 +1139,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
       match execCallee dl cfg regs m1 calleeExp o1 with
       | .error err => (none, Config.ofError err, o1)
       | .ok (fid, m2, o2) =>
-        let fname := fid.ToString
+        let fname := fid.toString
         let allowLib := st.allowLibcallsFor fid
         if allowLib && isAllocLibcall fname then
           match execAllocLibcall dl cfg m2 (heapObjName iid) fname retTy argVals with
@@ -1402,7 +1403,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
               count = bv.toNat) →
         (match m1.allocate st.dataLayout st.config (st.dataLayout.typeAllocSize allocTy * count)
             (align?.getD (st.dataLayout.typePrefAlign allocTy))
-            (match (generalizing := false) iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}")
+            (match (generalizing := false) iid with | .id rid => rid.toString | .void n => s!"alloca.{n}")
             addrSpace (allocaInitKind frame.defn iid) .stack false with
           | .ok (obj, mem') =>
             (none, finishRegInstr st frame callers rest iid
@@ -1413,7 +1414,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       intro count m1 o1 hwf1 hcnt ha
       cases halloc : m1.allocate st.dataLayout st.config (st.dataLayout.typeAllocSize allocTy * count)
           (align?.getD (st.dataLayout.typePrefAlign allocTy))
-          (match (generalizing := false) iid with | .id rid => rid.ToString | .void n => s!"alloca.{n}")
+          (match (generalizing := false) iid with | .id rid => rid.toString | .void n => s!"alloca.{n}")
           addrSpace (allocaInitKind frame.defn iid) .stack false with
       | ok p =>
         rw [halloc] at ha; obtain ⟨obj, mem'⟩ := p; cases ha
@@ -1665,9 +1666,9 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
       | ok pc =>
         rw [hc] at ihc h; obtain ⟨fid, m2, o2⟩ := pc; dsimp only at ihc h
         have hwf2 := EvalCallee.preserves_wf hwf1 ihc
-        by_cases halloc : (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = true
+        by_cases halloc : (st.allowLibcallsFor fid && isAllocLibcall fid.toString) = true
         · rw [if_pos halloc] at h
-          have hisAlloc : isAllocLibcall fid.ToString = true := (Bool.and_eq_true _ _ |>.mp halloc).2
+          have hisAlloc : isAllocLibcall fid.toString = true := (Bool.and_eq_true _ _ |>.mp halloc).2
           obtain ⟨res, hres⟩ := execAllocLibcall_isSome_of_isAlloc (dl := st.dataLayout)
             (cfg := st.config) (mem := m2) (objName := heapObjName iid) (retTy := retTy) (argVals := argVals) hisAlloc
           rw [hres] at h
@@ -1679,9 +1680,9 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
             cases hattr : applyRetFMFAndAttrsPure st.dataLayout m3 retTy fmf retAttrs rawRet with
             | error err => rw [hattr] at h; cases h; exact StepInstr.call_alloc_retattr_err iha ihc halloc hspec hattr
             | ok finalRet => rw [hattr] at h; cases h; exact StepInstr.call_alloc_ok iha ihc halloc hspec hattr
-        · have hallocF : (st.allowLibcallsFor fid && isAllocLibcall fid.ToString) = false := Bool.eq_false_iff.mpr halloc
+        · have hallocF : (st.allowLibcallsFor fid && isAllocLibcall fid.toString) = false := Bool.eq_false_iff.mpr halloc
           rw [if_neg halloc] at h
-          cases hspec : specLoadOracleCall? st m2 fid.ToString argVals with
+          cases hspec : specLoadOracleCall? st m2 fid.toString argVals with
           | some pspec =>
             rw [hspec] at h
             obtain ⟨oracleDef, ptrVal, revVal, oracleArgs⟩ := pspec; dsimp only at h
@@ -1702,14 +1703,14 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                 exact StepInstr.call_spec_oracle_ok iha ihc hallocF hspec hdepth hmk
           | none =>
           rw [hspec] at h; dsimp only at h
-          cases hint : evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o2 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) with
+          cases hint : evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.toString retTy fmf argVals o2 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) with
           | some r =>
             rw [hint] at h
             cases r with
             | error err => cases h; exact StepInstr.call_intrinsic_err iha ihc hallocF ⟨_, hint⟩
             | ok pm =>
               obtain ⟨rawRet, m3, o3⟩ := pm; dsimp only at h
-              let effBundles := if fid.ToString == "llvm.assume" then bundles else []
+              let effBundles := if fid.toString == "llvm.assume" then bundles else []
               have ihb := execAssumeBundles_sound st.dataLayout st.config frame.registers m3 effBundles o3
               cases hb : execAssumeBundles st.dataLayout st.config frame.registers m3 effBundles o3 with
               | error err =>
@@ -1726,7 +1727,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                   exact StepInstr.call_intrinsic_ok iha ihc hallocF ⟨_, _, hint⟩ ihb hattr
           | none =>
             rw [hint] at h; dsimp only at h
-            have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.ToString retTy fmf argVals o0 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none :=
+            have hnoneAll : ∀ o0, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.toString retTy fmf argVals o0 (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none :=
               fun o0 => evalNonAllocIntrinsicExec?_none_indep hint
             cases hfn : st.functions.get? fid with
             | none => rw [hfn] at h; cases h; exact StepInstr.call_external_err iha ihc hallocF hnoneAll hfn
@@ -2050,7 +2051,7 @@ private def registerBlockAddrs (dl : DataLayout) (cfg : SemanticsConfig)
   | blk :: rest, mem =>
     let key := blockAddrKey fnName blk.id
     if takenBlks.contains key then
-      match mem.allocate dl cfg 0 1 key.ToString dl.programAddrSpace .zeroed .func true with
+      match mem.allocate dl cfg 0 1 key.toString dl.programAddrSpace .zeroed .func true with
       | .error e => .error e
       | .ok (obj, mem') =>
         let ptr := MemoryState.derivePointer dl obj
@@ -2068,7 +2069,7 @@ private theorem registerBlockAddrs_wf {dl cfg takenBlks fnName blks mem mem'}
     unfold registerBlockAddrs at h
     dsimp only at h
     split at h
-    · cases ha : mem.allocate dl cfg 0 1 (blockAddrKey fnName blk.id).ToString dl.programAddrSpace .zeroed .func true with
+    · cases ha : mem.allocate dl cfg 0 1 (blockAddrKey fnName blk.id).toString dl.programAddrSpace .zeroed .func true with
       | error e => rw [ha] at h; cases h
       | ok p =>
         rw [ha] at h; obtain ⟨obj, m1⟩ := p
@@ -2089,7 +2090,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
     match ent with
     | .declaration decl =>
       if takenFns.contains decl.name then
-        match mem.allocate dl cfg 0 1 decl.name.ToString dl.programAddrSpace .zeroed .func true with
+        match mem.allocate dl cfg 0 1 decl.name.toString dl.programAddrSpace .zeroed .func true with
         | .error e => .error e
         | .ok (obj, mem') =>
           let ptr := MemoryState.derivePointer dl obj
@@ -2100,7 +2101,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
     | .definition defn =>
       let afterFn : Except ExecError MemoryState :=
         if takenFns.contains defn.prototype.name then
-          match mem.allocate dl cfg 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+          match mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func true with
           | .error e => .error e
           | .ok (obj, mem') =>
             let ptr := MemoryState.derivePointer dl obj
@@ -2116,7 +2117,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
       let size := dl.typeAllocSize gv.ty
       let effAlign := dl.globalAlign gv.ty gv.align gv.initializer.isSome
       let initKind := if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized
-      match mem.allocate dl cfg size effAlign gv.name.ToString gv.addrSpace initKind .global gv.isConstant with
+      match mem.allocate dl cfg size effAlign gv.name.toString gv.addrSpace initKind .global gv.isConstant with
       | .error e => .error e
       | .ok (obj, mem') =>
         let ptr := MemoryState.derivePointer dl obj
@@ -2174,7 +2175,7 @@ private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls
     | declaration decl =>
       dsimp only at h
       split at h
-      · cases ha : mem.allocate dl cfg 0 1 decl.name.ToString dl.programAddrSpace .zeroed .func true with
+      · cases ha : mem.allocate dl cfg 0 1 decl.name.toString dl.programAddrSpace .zeroed .func true with
         | error e => rw [ha] at h; cases h
         | ok p =>
           rw [ha] at h; obtain ⟨obj, m1⟩ := p
@@ -2183,13 +2184,13 @@ private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls
     | definition defn =>
       dsimp only at h
       have hwfAfter : ∀ m2, ((if takenFns.contains defn.prototype.name then
-            match mem.allocate dl cfg 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+            match mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func true with
             | .error e => .error e
             | .ok (obj, mem') => .ok (mem'.insertFuncAddr defn.prototype.name obj.baseAddr (MemoryState.derivePointer dl obj))
           else .ok mem) : Except ExecError MemoryState) = .ok m2 → MemoryState.WellFormed m2 := by
         intro m2 hm2
         split at hm2
-        · cases ha : mem.allocate dl cfg 0 1 defn.prototype.name.ToString dl.programAddrSpace .zeroed .func true with
+        · cases ha : mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func true with
           | error e => rw [ha] at hm2; cases hm2
           | ok p =>
             rw [ha] at hm2; obtain ⟨obj, m1⟩ := p; cases hm2
@@ -2205,7 +2206,7 @@ private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls
     | global gv =>
       dsimp only at h
       cases ha : mem.allocate dl cfg (dl.typeAllocSize gv.ty) (dl.globalAlign gv.ty gv.align gv.initializer.isSome)
-          gv.name.ToString gv.addrSpace
+          gv.name.toString gv.addrSpace
           (if gv.initializer.isSome then MemInitKind.zeroed else MemInitKind.uninitialized)
           .global gv.isConstant with
       | error e => rw [ha] at h; cases h

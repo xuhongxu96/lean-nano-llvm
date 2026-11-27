@@ -320,7 +320,7 @@ def buildSrcTables (w : WCtx) (pm : ParsedModule) (fns : AssocMap FunctionId Def
       | some d => computeLocalSlots pm.tokens fs d
       | none => []
     let w := { w with localSlots := slots }
-    t := { t with slots := t.slots.insert fs.name.ToString slots }
+    t := { t with slots := t.slots.insert fs.name.toString slots }
     for e in fs.entries do
       let k := iidKey fs.name e.iid
       let hints : InstrHints :=
@@ -329,7 +329,7 @@ def buildSrcTables (w : WCtx) (pm : ParsedModule) (fns : AssocMap FunctionId Def
         | none => {}
       t := { t with text := t.text.insert k (printInstruction w e.startTok e.endTok hints (some e.iid)),
                     line := t.line.insert k e.line }
-    t := { t with params := t.params.insert fs.name.ToString (printParams w fs.paramsStart fs.paramsEnd) }
+    t := { t with params := t.params.insert fs.name.toString (printParams w fs.paramsStart fs.paramsEnd) }
   -- resolve attribute-group markers in source order of the instructions
   let ordered : List (String × String) := pm.fnSrcs.toList.foldl (fun acc fs =>
     acc ++ fs.entries.toList.map fun e =>
@@ -396,7 +396,7 @@ private def libOutput? (st : MachineState) (fr : CallFrame) (ins : Instruction) 
     Option String :=
   match ins with
   | .call _ _ (.identifier (.global_id g)) args .. =>
-    let nm := g.ToString
+    let nm := g.toString
     if (st.functions.get? g).isSome || !st.allowLibcallsFor g then none
     else if nm == "puts" || nm == "printf" || nm == "putchar" then
       match execCallArgs st.dataLayout st.config fr.registers st.memory args o with
@@ -464,7 +464,7 @@ private def contextualMessage (st : MachineState) (fr : CallFrame) (o : OracleSt
     else msg
   | .inl (.call _ _ callee args ..) =>
     let calleeName := match callee with
-      | .identifier (.global_id g) => g.ToString
+      | .identifier (.global_id g) => g.toString
       | _ => ""
     let base := intrinsicBase calleeName
     if msg.startsWith "Allocation size " then
@@ -523,8 +523,8 @@ private def printPhis (d : DState) (mem : MemoryState) (fr : CallFrame) (tags : 
 /-- Print `Entering function:` and its argument lines for a freshly pushed frame. -/
 private def printEntry (d : DState) (mem : MemoryState) (fr : CallFrame) (tags : List (Nat × Nat)) : IO Unit := do
   let fn := fr.defn.prototype.name
-  errLine s!"Entering function: {fn.ToString}"
-  let params := d.tables.params.getD fn.ToString []
+  errLine s!"Entering function: {fn.toString}"
+  let params := d.tables.params.getD fn.toString []
   for (arg, ptxt) in fr.defn.args.zip params do
     match fr.registers.get? (.local_id arg) with
     | some v => errLine s!"  {ptxt} = {printValue mem d.dl v tags}"
@@ -581,7 +581,7 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
           -- returned from a callee into its caller
           if d.verbose then
             errLine (textOf d fn iid)
-            errLine s!"Exiting function: {fn.ToString}"
+            errLine s!"Exiting function: {fn.toString}"
             match sites, st'.frames with
             | site :: _, caller :: _ =>
               let ctext := textOf d caller.defn.prototype.name site
@@ -616,7 +616,7 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
               match st'.frames with
               | fr' :: _ =>
                 let w : WCtx := { toks := #[], dl := d.dl, typeDefs := [], mdDefs := [], mdSlots := [],
-                                  fnTypes := [], localSlots := d.tables.slots.getD fn.ToString [] }
+                                  fnTypes := [], localSlots := d.tables.slots.getD fn.toString [] }
                 errLine s!"{textOf d fn iid} jump to {w.loc fr'.curBlock}"
                 printPhis d st'.memory fr' o'.tags
               | [] => pure ()
@@ -624,7 +624,7 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
       | .halted v _ =>
         if d.verbose then
           errLine (textOf d fn iid)
-          errLine s!"Exiting function: {fn.ToString}"
+          errLine s!"Exiting function: {fn.toString}"
         return .returned v
       | .ub msg0 =>
         let msg := contextualMessage st fr o pend msg0
@@ -633,7 +633,7 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
           -- return-time checks happen in the caller after the callee has exited
           if d.verbose then
             errLine (textOf d fn iid)
-            errLine s!"Exiting function: {fn.ToString}"
+            errLine s!"Exiting function: {fn.toString}"
           reportFailure d callers sites s!"Immediate UB detected: {withPeriod msg}" (topIsSite := true)
         | .inr term, _ =>
           -- UB while evaluating phi nodes happens after `llubi` has reported the jump
@@ -658,7 +658,7 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
           | some b =>
             if destHasPhi then
               let w : WCtx := { toks := #[], dl := d.dl, typeDefs := [], mdDefs := [], mdSlots := [],
-                                fnTypes := [], localSlots := d.tables.slots.getD fn.ToString [] }
+                                fnTypes := [], localSlots := d.tables.slots.getD fn.toString [] }
               if d.verbose then errLine s!"{textOf d fn iid} jump to {w.loc b}"
               -- the failing phi is reported at the head of the destination block
               let phiIid := match fr.defn.findBlock? b with
@@ -838,8 +838,8 @@ def llubiMain (args : List String) : IO UInt32 := do
     | .typeDef nm ty => some (nm, PTy.ofLlvmType ty)
     | _ => none
   let fnTypes : List (String × LlvmType) := pm.topLevel.entities.filterMap fun
-    | .declaration decl => some (decl.name.ToString, decl.type)
-    | .definition d => some (d.prototype.name.ToString, d.prototype.type)
+    | .declaration decl => some (decl.name.toString, decl.type)
+    | .definition d => some (d.prototype.name.toString, d.prototype.type)
     | _ => none
   let w0 : WCtx := { toks := pm.tokens, dl, typeDefs, mdDefs := [], mdSlots := [], fnTypes,
                      vscale := opts.vscale }

@@ -366,7 +366,7 @@ def applyByValCopies (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
         match regs.get? (.local_id nm) with
         | some (.ptr as (.value p)) =>
           let allocSize := dl.typeAllocSize byvalTy
-          match m.allocate dl cfg allocSize allocAlign nm.ToString as .uninitialized .stack false with
+          match m.allocate dl cfg allocSize allocAlign nm.toString as .uninitialized .stack false with
           | .error err => .error err
           | .ok (newObj, m1) =>
             match (m1.unhide visible).verifyMemAccess p allocSize (max allocAlign (siteAlign.getD 1)) false with
@@ -396,7 +396,7 @@ private theorem applyByValCopies_go_wf {dl cfg defn frame siteAttrs visible i m 
     split at h
     · exact ih hwf h
     · split at h
-      · cases ha : m.allocate dl cfg (dl.typeAllocSize _) _ nm.ToString _ .uninitialized .stack false with
+      · cases ha : m.allocate dl cfg (dl.typeAllocSize _) _ nm.toString _ .uninitialized .stack false with
         | error e => rw [ha] at h; cases h
         | ok p =>
           rw [ha] at h

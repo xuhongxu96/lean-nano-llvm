@@ -1,4 +1,5 @@
-import LeanNanoLlvm.AST.AST
+import LeanNanoLlvm.AST.Lexer
+import LeanNanoLlvm.AST.Resolve
 import LeanNanoLlvm.AST.DataLayout
 
 /-!
@@ -22,229 +23,7 @@ Supports:
 
 namespace LeanNanoLlvm.AST.Parser
 
-/-- Lexer tokens for LLVM IR text. -/
-inductive Tok where
-  | ident   (s : String)
-  | localId (id : RawId)
-  | globalId (id : RawId)
-  | metaId  (s : String)      -- `!foo` or `!0` (without leading `!`)
-  | attrGrp (n : Nat)         -- `#0`
-  | intLit  (n : Int)
-  | hexLit  (tag : Char) (val : Nat) -- `0x...` (`tag = 'd'`), `0xH...`, `0xR...`, `0xK...`
-  | fltLit  (neg : Bool) (mantissa : Nat) (exp10 : Int)
-  | strLit  (s : String)
-  | eq | comma | colon | lparen | rparen | lbrack | rbrack | lbrace | rbrace
-  | langle | rangle | lpacked | rpacked | ellipsis | bang | star
-  | eof
-deriving Repr, DecidableEq, Inhabited
-
-private def isIdentStart (c : Char) : Bool :=
-  c.isAlpha || c == '_' || c == '.' || c == '$'
-
-private def isIdentCont (c : Char) : Bool :=
-  c.isAlphanum || c == '_' || c == '.' || c == '$' || c == '-'
-
-private def isHexDigit (c : Char) : Bool :=
-  c.isDigit || ('a' ≤ c && c ≤ 'f') || ('A' ≤ c && c ≤ 'F')
-
-private def hexVal (c : Char) : Nat :=
-  if c.isDigit then c.toNat - '0'.toNat
-  else if 'a' ≤ c && c ≤ 'f' then 10 + (c.toNat - 'a'.toNat)
-  else if 'A' ≤ c && c ≤ 'F' then 10 + (c.toNat - 'A'.toNat)
-  else 0
-
-private def parseNatStr (s : String) : Option Nat :=
-  if s.isEmpty then none
-  else
-    s.toList.foldl (init := some 0) fun acc c =>
-      match acc with
-      | none => none
-      | some n => if c.isDigit then some (n * 10 + (c.toNat - '0'.toNat)) else none
-
-private def parseHexNat (cs : List Char) : Nat :=
-  cs.foldl (init := 0) fun acc c => acc * 16 + hexVal c
-
-private def mkRawId (s : String) : RawId :=
-  match parseNatStr s with
-  | some n => .anonymous n
-  | none => .name s
-
-/-- Token accumulator that also records the (0-based) source line of every token. -/
-structure LexAcc where
-  toks  : Array Tok := #[]
-  lines : Array Nat := #[]
-  line  : Nat := 0
-
-namespace LexAcc
-@[inline] def push (a : LexAcc) (t : Tok) : LexAcc :=
-  { a with toks := a.toks.push t, lines := a.lines.push a.line }
-@[inline] def nl (a : LexAcc) : LexAcc := { a with line := a.line + 1 }
-end LexAcc
-
-/-- Lex an LLVM IR source string into a token array plus per-token 0-based line numbers
-(total via structural recursion on `List Char`). -/
-def tokenizeWithLines (input : String) : Array Tok × Array Nat :=
-  let rec skipComment : List Char → List Char
-    | [] => []
-    | '\n' :: cs => cs
-    | _ :: cs => skipComment cs
-  let rec readQuoted (acc : List Char) : List Char → String × List Char
-    | [] => (String.ofList acc.reverse, [])
-    | '"' :: cs => (String.ofList acc.reverse, cs)
-    | '\\' :: c :: cs => readQuoted (c :: '\\' :: acc) cs
-    | c :: cs => readQuoted (c :: acc) cs
-  let rec readIdent (acc : List Char) : List Char → String × List Char
-    | c :: cs =>
-      if isIdentCont c then readIdent (c :: acc) cs
-      else (String.ofList acc.reverse, c :: cs)
-    | [] => (String.ofList acc.reverse, [])
-  let rec readDigits (acc : List Char) : List Char → List Char × List Char
-    | c :: cs =>
-      if c.isDigit then readDigits (c :: acc) cs
-      else (acc.reverse, c :: cs)
-    | [] => (acc.reverse, [])
-  let rec readHex (acc : List Char) : List Char → List Char × List Char
-    | c :: cs =>
-      if isHexDigit c then readHex (c :: acc) cs
-      else (acc.reverse, c :: cs)
-    | [] => (acc.reverse, [])
-  let rec readIdAfterSigil : List Char → RawId × List Char
-    | '"' :: cs =>
-      let (s, rest) := readQuoted [] cs
-      (.name s, rest)
-    | cs =>
-      let (s, rest) := readIdent [] cs
-      (mkRawId s, rest)
-  let rec go (fuel : Nat) (acc : LexAcc) : List Char → LexAcc
-    | [] => acc.push .eof
-    | cs =>
-      match fuel with
-      | 0 => acc.push .eof
-      | fuel' + 1 =>
-        match cs with
-        | [] => acc.push .eof
-        | c :: rest =>
-          if c.isWhitespace then go fuel' (if c == '\n' then acc.nl else acc) rest
-          else if c == ';' then go fuel' acc.nl (skipComment rest)
-          else if c == '=' then go fuel' (acc.push .eq) rest
-          else if c == ',' then go fuel' (acc.push .comma) rest
-          else if c == ':' then go fuel' (acc.push .colon) rest
-          else if c == '(' then go fuel' (acc.push .lparen) rest
-          else if c == ')' then go fuel' (acc.push .rparen) rest
-          else if c == '[' then go fuel' (acc.push .lbrack) rest
-          else if c == ']' then go fuel' (acc.push .rbrack) rest
-          else if c == '{' then go fuel' (acc.push .lbrace) rest
-          else if c == '}' then
-            match rest with
-            | '>' :: rest2 => go fuel' (acc.push .rpacked) rest2
-            | _ => go fuel' (acc.push .rbrace) rest
-          else if c == '<' then
-            match rest with
-            | '{' :: rest2 => go fuel' (acc.push .lpacked) rest2
-            | _ => go fuel' (acc.push .langle) rest
-          else if c == '>' then go fuel' (acc.push .rangle) rest
-          else if c == '*' then go fuel' (acc.push .star) rest
-          else if c == '.' then
-            match rest with
-            | '.' :: '.' :: rest2 => go fuel' (acc.push .ellipsis) rest2
-            | _ =>
-              let (s, rest2) := readIdent ['.'] rest
-              go fuel' (acc.push (.ident s)) rest2
-          else if c == '%' then
-            let (rid, rest2) := readIdAfterSigil rest
-            go fuel' (acc.push (.localId rid)) rest2
-          else if c == '@' then
-            let (rid, rest2) := readIdAfterSigil rest
-            go fuel' (acc.push (.globalId rid)) rest2
-          else if c == '!' then
-            match rest with
-            | c2 :: _ =>
-              if c2.isAlphanum || c2 == '_' || c2 == '.' then
-                let (s, rest2) := readIdent [] rest
-                go fuel' (acc.push (.metaId s)) rest2
-              else
-                go fuel' (acc.push .bang) rest
-            | [] => go fuel' (acc.push .bang) rest
-          else if c == '#' then
-            let (ds, rest2) := readDigits [] rest
-            let n := (parseNatStr (String.ofList ds)).getD 0
-            go fuel' (acc.push (.attrGrp n)) rest2
-          else if c == '"' then
-            let (s, rest2) := readQuoted [] rest
-            go fuel' (acc.push (.strLit s)) rest2
-          else if c == '0' then
-            match rest with
-            | 'x' :: tag :: rest2 =>
-              if tag == 'H' || tag == 'R' || tag == 'K' || tag == 'L' || tag == 'M' then
-                let (hs, rest3) := readHex [] rest2
-                go fuel' (acc.push (.hexLit tag (parseHexNat hs))) rest3
-              else
-                let (hs, rest3) := readHex [] (tag :: rest2)
-                go fuel' (acc.push (.hexLit 'd' (parseHexNat hs))) rest3
-            | _ =>
-              -- Decimal int or float starting with 0
-              let (intDs, rest1) := readDigits ['0'] rest
-              match rest1 with
-              | '.' :: rest2 =>
-                let (fracDs, rest3) := readDigits [] rest2
-                let allDs := intDs ++ fracDs
-                let mant := (parseNatStr (String.ofList allDs)).getD 0
-                let baseExp : Int := - (Int.ofNat fracDs.length)
-                let (exp10, rest4) :=
-                  match rest3 with
-                  | 'e' :: '+' :: r | 'E' :: '+' :: r =>
-                    let (eds, r') := readDigits [] r
-                    (baseExp + Int.ofNat ((parseNatStr (String.ofList eds)).getD 0), r')
-                  | 'e' :: '-' :: r | 'E' :: '-' :: r =>
-                    let (eds, r') := readDigits [] r
-                    (baseExp - Int.ofNat ((parseNatStr (String.ofList eds)).getD 0), r')
-                  | 'e' :: r | 'E' :: r =>
-                    let (eds, r') := readDigits [] r
-                    (baseExp + Int.ofNat ((parseNatStr (String.ofList eds)).getD 0), r')
-                  | _ => (baseExp, rest3)
-                go fuel' (acc.push (.fltLit false mant exp10)) rest4
-              | _ =>
-                let n := (parseNatStr (String.ofList intDs)).getD 0
-                go fuel' (acc.push (.intLit (Int.ofNat n))) rest1
-          else if c.isDigit || (c == '-' && match rest with | d :: _ => d.isDigit | [] => false) then
-            let (neg, startRest) := if c == '-' then (true, rest) else (false, c :: rest)
-            let (intDs, rest1) := readDigits [] startRest
-            match rest1 with
-            | '.' :: rest2 =>
-              let (fracDs, rest3) := readDigits [] rest2
-              let allDs := intDs ++ fracDs
-              let mant := (parseNatStr (String.ofList allDs)).getD 0
-              let baseExp : Int := - (Int.ofNat fracDs.length)
-              let (exp10, rest4) :=
-                match rest3 with
-                | 'e' :: '+' :: r | 'E' :: '+' :: r =>
-                  let (eds, r') := readDigits [] r
-                  (baseExp + Int.ofNat ((parseNatStr (String.ofList eds)).getD 0), r')
-                | 'e' :: '-' :: r | 'E' :: '-' :: r =>
-                  let (eds, r') := readDigits [] r
-                  (baseExp - Int.ofNat ((parseNatStr (String.ofList eds)).getD 0), r')
-                | 'e' :: r | 'E' :: r =>
-                  let (eds, r') := readDigits [] r
-                  (baseExp + Int.ofNat ((parseNatStr (String.ofList eds)).getD 0), r')
-                | _ => (baseExp, rest3)
-              go fuel' (acc.push (.fltLit neg mant exp10)) rest4
-            | _ =>
-              let n := (parseNatStr (String.ofList intDs)).getD 0
-              let v : Int := if neg then - (Int.ofNat n) else Int.ofNat n
-              go fuel' (acc.push (.intLit v)) rest1
-          else if isIdentStart c || ((c == '+' || c == '-') && match rest with | d :: _ => d.isAlpha | [] => false) then
-            let (s, rest2) := readIdent [c] rest
-            go fuel' (acc.push (.ident s)) rest2
-          else
-            -- Skip unrecognized single punctuation character
-            go fuel' acc rest
-  let cs := input.toList
-  let acc := go (cs.length + 1) {} cs
-  (acc.toks, acc.lines)
-
-/-- Lex an LLVM IR source string into a token array. -/
-def tokenize (input : String) : Array Tok := (tokenizeWithLines input).1
-
+/-! ### `target datalayout` strings -/
 
 /-- Parse an LLVM `target datalayout = "..."` string into `DataLayout`. -/
 def parseDataLayoutString (s : String) : DataLayout :=
@@ -308,6 +87,8 @@ def parseDataLayoutString (s : String) : DataLayout :=
       | some n => { dl with globalsAddrSpace := n }
       | none => dl
     else dl
+
+/-! ### Parser state and token primitives -/
 
 /-- Source location of one parsed instruction / terminator: its token range and 0-based line. -/
 structure SrcEntry where
@@ -411,6 +192,8 @@ private def parseRawGlobalId (ctx : String) : ParseM RawId := do
   match ← bump with
   | .globalId id => return id
   | t => throw s!"parse error ({ctx}): expected @id, got {repr t}"
+
+/-! ### Types, flags and attributes -/
 
 /-- Parse an LLVM type (total on `fuel`). -/
 def parseType : Nat → ParseM LlvmType
@@ -687,6 +470,8 @@ private def parseFCmpPred (ctx : String) : ParseM FCmpPred := do
   | .ident "uno" => return .uno
   | .ident "true" => return .ftrue
   | t => throw s!"parse error ({ctx}): expected fcmp predicate, got {repr t}"
+
+/-! ### Operands and constants -/
 
 /-- Convert an LLVM 64-bit hex float literal (`0x...`) to bit representation for `ty` if needed. -/
 private def decodeHexFloatForType (tag : Char) (val : Nat) : Exp :=
@@ -1076,6 +861,8 @@ private def parseWrapFlags : ParseM (Bool × Bool) := do
     else if ← tryEatIdent "nsw" then nsw := true
   return (nuw, nsw)
 
+/-! ### Metadata attachments -/
+
 /-- Skip trailing metadata attachments like `, !dbg !12`, `, !tbaa !3`. -/
 private def skipTrailingMetadata (fuel : Nat) : ParseM Unit := do
   let mut guard := 16
@@ -1206,18 +993,7 @@ private def parseTrailingValueAttrs (fuel : Nat) : ParseM (List ValueAttr) := do
     | _, _ => guard := 0
   return md.reverse
 
-/-- Replace named types by their definitions (to depth `fuel`). -/
-def substNamedTypes (defs : List (LocalId × LlvmType)) : Nat → LlvmType → LlvmType
-  | 0, t => t
-  | fuel + 1, t =>
-    match t with
-    | .named n => match defs.lookup n with
-      | some d => substNamedTypes defs fuel d
-      | none => t
-    | .vector n e => .vector n (substNamedTypes defs fuel e)
-    | .array n e => .array n (substNamedTypes defs fuel e)
-    | .struct p fs => .struct p (fs.map (substNamedTypes defs fuel))
-    | t => t
+/-! ### Instructions -/
 
 /-- Named calling conventions and their `cc <N>` numbers (`llvm::CallingConv`). -/
 private def callingConvNames : List (String × Nat) :=
@@ -1262,160 +1038,97 @@ private def parseTypeScalableAlign (fuel : Nat) (pref : Bool := false) :
   modify fun st => { st with pos := st0.pos, vscale := st0.vscale }
   let ty ← parseType fuel
   let defs := (← get).typeDefs
-  let tyMin := substNamedTypes (defs.map fun (n, _, m) => (n, m)) 8 tyMin
-  let tyFull := substNamedTypes (defs.map fun (n, f, _) => (n, f)) 8 ty
+  let resolve (defs : List (LocalId × LlvmType)) (t : LlvmType) :=
+    (resolveType defs 8 t).toOption.getD t
+  let tyMin := resolve (defs.map fun (n, _, m) => (n, m)) tyMin
+  let tyFull := resolve (defs.map fun (n, f, _) => (n, f)) ty
   if decide (tyMin = tyFull) then return (ty, none)
   else return (ty, some (if pref then DataLayout.default64LE.typePrefAlign tyMin
     else DataLayout.default64LE.typeABIAlign tyMin))
 
-/-- Parse a single non-terminator LLVM instruction. -/
-def parseInstruction (fuel : Nat) : ParseM Instruction := do
-  -- Handle optional `tail` / `musttail` / `notail` prefix on `call`
-  let isTail1 ← tryEatIdent "tail"
-  let isTail2 ← tryEatIdent "musttail"
-  let _ ← tryEatIdent "notail"
-  let isTail := isTail1 || isTail2
-  let opTok ← bump
+/-- `T v1, v2` (with trailing metadata skipped): the operands of a binary operator or compare. -/
+private def parseBinaryOperands (fuel : Nat) : ParseM (LlvmType × Exp × Exp) := do
+  let ty ← parseType fuel
+  let v1 ← parseExp fuel
+  expect .comma "binary operator"
+  let v2 ← parseExp fuel
+  skipTrailingMetadata fuel
+  return (ty, v1, v2)
+
+/-- `T v to T'` (with trailing metadata skipped): the operands of a cast. -/
+private def parseCastOperands (fuel : Nat) : ParseM (LlvmType × Exp × LlvmType) := do
+  let fromTy ← parseType fuel
+  let v ← parseExp fuel
+  expectIdent "to" "cast"
+  let toTy ← parseType fuel
+  skipTrailingMetadata fuel
+  return (fromTy, v, toTy)
+
+/-- For an integer binary opcode, the parser of its flags (`nuw`/`nsw`, `exact`, `disjoint`). -/
+private def intBinaryOpParser? : String → Option (ParseM IntBinaryOp)
+  | "add" => some do let (nuw, nsw) ← parseWrapFlags; return .add nuw nsw
+  | "sub" => some do let (nuw, nsw) ← parseWrapFlags; return .sub nuw nsw
+  | "mul" => some do let (nuw, nsw) ← parseWrapFlags; return .mul nuw nsw
+  | "shl" => some do let (nuw, nsw) ← parseWrapFlags; return .shl nuw nsw
+  | "udiv" => some do return .udiv (← tryEatIdent "exact")
+  | "sdiv" => some do return .sdiv (← tryEatIdent "exact")
+  | "lshr" => some do return .lshr (← tryEatIdent "exact")
+  | "ashr" => some do return .ashr (← tryEatIdent "exact")
+  | "or" => some do return .or (← tryEatIdent "disjoint")
+  | "urem" => some (pure .urem)
+  | "srem" => some (pure .srem)
+  | "and" => some (pure .and)
+  | "xor" => some (pure .xor)
+  | _ => none
+
+/-- For a floating-point binary opcode, the parser of its fast-math flags. -/
+private def floatBinaryOpParser? : String → Option (ParseM FloatBinaryOp)
+  | "fadd" => some do return .fadd (← parseFMF)
+  | "fsub" => some do return .fsub (← parseFMF)
+  | "fmul" => some do return .fmul (← parseFMF)
+  | "fdiv" => some do return .fdiv (← parseFMF)
+  | "frem" => some do return .frem (← parseFMF)
+  | _ => none
+
+/-- For a cast opcode, the parser of its flags. -/
+private def conversionOpParser? : String → Option (ParseM ConversionOp)
+  | "trunc" => some do let (nuw, nsw) ← parseWrapFlags; return .trunc nuw nsw
+  | "zext" => some do return .zext (← tryEatIdent "nneg")
+  | "uitofp" => some do
+    let nneg ← tryEatIdent "nneg"
+    return .uitofp nneg (← parseFMF)
+  | "fptrunc" => some do return .fptrunc (← parseFMF)
+  | "fpext" => some do return .fpext (← parseFMF)
+  | "sitofp" => some do return .sitofp (← parseFMF)
+  | "sext" => some (pure .sext)
+  | "fptoui" => some (pure .fptoui)
+  | "fptosi" => some (pure .fptosi)
+  | "ptrtoint" => some (pure .ptrtoint)
+  | "ptrtoaddr" => some (pure .ptrtoaddr)
+  | "inttoptr" => some (pure .inttoptr)
+  | "bitcast" => some (pure .bitcast)
+  | "addrspacecast" => some (pure .addrspacecast)
+  | _ => none
+
+/-- Parse an instruction other than a binary operator or a cast, after its opcode `opTok`. -/
+private def parseOtherInstruction (fuel : Nat) (isTail : Bool) (opTok : Tok) : ParseM Instruction := do
   match opTok with
-  | .ident "add" | .ident "sub" | .ident "mul" | .ident "shl" =>
-    let (nuw, nsw) ← parseWrapFlags
-    let ty ← parseType fuel
-    let v1 ← parseExp fuel
-    expect .comma "int binop"
-    let v2 ← parseExp fuel
-    skipTrailingMetadata fuel
-    let op : IntBinaryOp := match opTok with
-      | .ident "add" => .add nuw nsw
-      | .ident "sub" => .sub nuw nsw
-      | .ident "mul" => .mul nuw nsw
-      | _ => .shl nuw nsw
-    return .intBinaryOp op ty v1 v2
-  | .ident "udiv" | .ident "sdiv" | .ident "lshr" | .ident "ashr" =>
-    let exact ← tryEatIdent "exact"
-    let ty ← parseType fuel
-    let v1 ← parseExp fuel
-    expect .comma "exact binop"
-    let v2 ← parseExp fuel
-    skipTrailingMetadata fuel
-    let op : IntBinaryOp := match opTok with
-      | .ident "udiv" => .udiv exact
-      | .ident "sdiv" => .sdiv exact
-      | .ident "lshr" => .lshr exact
-      | _ => .ashr exact
-    return .intBinaryOp op ty v1 v2
-  | .ident "urem" | .ident "srem" | .ident "and" | .ident "xor" =>
-    let ty ← parseType fuel
-    let v1 ← parseExp fuel
-    expect .comma "binop"
-    let v2 ← parseExp fuel
-    skipTrailingMetadata fuel
-    let op : IntBinaryOp := match opTok with
-      | .ident "urem" => .urem
-      | .ident "srem" => .srem
-      | .ident "and" => .and
-      | _ => .xor
-    return .intBinaryOp op ty v1 v2
-  | .ident "or" =>
-    let disj ← tryEatIdent "disjoint"
-    let ty ← parseType fuel
-    let v1 ← parseExp fuel
-    expect .comma "or"
-    let v2 ← parseExp fuel
-    skipTrailingMetadata fuel
-    return .intBinaryOp (.or disj) ty v1 v2
   | .ident "fneg" =>
     let fmf ← parseFMF
     let ty ← parseType fuel
     let v ← parseExp fuel
     skipTrailingMetadata fuel
     return .floatUnaryOp (.fneg fmf) ty v
-  | .ident "fadd" | .ident "fsub" | .ident "fmul" | .ident "fdiv" | .ident "frem" =>
-    let fmf ← parseFMF
-    let ty ← parseType fuel
-    let v1 ← parseExp fuel
-    expect .comma "fp binop"
-    let v2 ← parseExp fuel
-    skipTrailingMetadata fuel
-    let op : FloatBinaryOp := match opTok with
-      | .ident "fadd" => .fadd fmf
-      | .ident "fsub" => .fsub fmf
-      | .ident "fmul" => .fmul fmf
-      | .ident "fdiv" => .fdiv fmf
-      | _ => .frem fmf
-    return .floatBinaryOp op ty v1 v2
   | .ident "icmp" =>
     let samesign ← tryEatIdent "samesign"
     let pred ← parseICmpPred "icmp"
-    let ty ← parseType fuel
-    let v1 ← parseExp fuel
-    expect .comma "icmp"
-    let v2 ← parseExp fuel
-    skipTrailingMetadata fuel
+    let (ty, v1, v2) ← parseBinaryOperands fuel
     return .icmp samesign pred ty v1 v2
   | .ident "fcmp" =>
     let fmf ← parseFMF
     let pred ← parseFCmpPred "fcmp"
-    let ty ← parseType fuel
-    let v1 ← parseExp fuel
-    expect .comma "fcmp"
-    let v2 ← parseExp fuel
-    skipTrailingMetadata fuel
+    let (ty, v1, v2) ← parseBinaryOperands fuel
     return .fcmp fmf pred ty v1 v2
-  | .ident "trunc" =>
-    let (nuw, nsw) ← parseWrapFlags
-    let fromTy ← parseType fuel
-    let v ← parseExp fuel
-    expectIdent "to" "trunc"
-    let toTy ← parseType fuel
-    skipTrailingMetadata fuel
-    return .conversionOp (.trunc nuw nsw) fromTy v toTy
-  | .ident "zext" =>
-    let nneg ← tryEatIdent "nneg"
-    let fromTy ← parseType fuel
-    let v ← parseExp fuel
-    expectIdent "to" "zext"
-    let toTy ← parseType fuel
-    skipTrailingMetadata fuel
-    return .conversionOp (.zext nneg) fromTy v toTy
-  | .ident "sext" | .ident "fptoui" | .ident "fptosi"
-  | .ident "ptrtoint" | .ident "ptrtoaddr" | .ident "inttoptr"
-  | .ident "bitcast" | .ident "addrspacecast" =>
-    let fromTy ← parseType fuel
-    let v ← parseExp fuel
-    expectIdent "to" "cast"
-    let toTy ← parseType fuel
-    skipTrailingMetadata fuel
-    let op : ConversionOp := match opTok with
-      | .ident "sext" => .sext
-      | .ident "fptoui" => .fptoui
-      | .ident "fptosi" => .fptosi
-      | .ident "ptrtoint" => .ptrtoint
-      | .ident "ptrtoaddr" => .ptrtoaddr
-      | .ident "inttoptr" => .inttoptr
-      | .ident "bitcast" => .bitcast
-      | _ => .addrspacecast
-    return .conversionOp op fromTy v toTy
-  | .ident "fptrunc" | .ident "fpext" | .ident "sitofp" =>
-    let fmf ← parseFMF
-    let fromTy ← parseType fuel
-    let v ← parseExp fuel
-    expectIdent "to" "fp cast"
-    let toTy ← parseType fuel
-    skipTrailingMetadata fuel
-    let op : ConversionOp := match opTok with
-      | .ident "fptrunc" => .fptrunc fmf
-      | .ident "fpext" => .fpext fmf
-      | _ => .sitofp fmf
-    return .conversionOp op fromTy v toTy
-  | .ident "uitofp" =>
-    let nneg ← tryEatIdent "nneg"
-    let fmf ← parseFMF
-    let fromTy ← parseType fuel
-    let v ← parseExp fuel
-    expectIdent "to" "uitofp"
-    let toTy ← parseType fuel
-    skipTrailingMetadata fuel
-    return .conversionOp (.uitofp nneg fmf) fromTy v toTy
   | .ident "select" =>
     let fmf ← parseFMF
     let cty ← parseType fuel
@@ -1705,6 +1418,33 @@ def parseInstruction (fuel : Nat) : ParseM Instruction := do
       { isTail := isTail, callingConv := cc }
   | tok => throw s!"parse error: unsupported instruction opcode {repr tok}"
 
+/-- Parse a single non-terminator LLVM instruction. -/
+def parseInstruction (fuel : Nat) : ParseM Instruction := do
+  -- Handle optional `tail` / `musttail` / `notail` prefix on `call`
+  let isTail1 ← tryEatIdent "tail"
+  let isTail2 ← tryEatIdent "musttail"
+  let _ ← tryEatIdent "notail"
+  let isTail := isTail1 || isTail2
+  let opTok ← bump
+  match opTok with
+  | .ident op =>
+    if let some parseOp := intBinaryOpParser? op then
+      let op ← parseOp
+      let (ty, v1, v2) ← parseBinaryOperands fuel
+      return .intBinaryOp op ty v1 v2
+    else if let some parseOp := floatBinaryOpParser? op then
+      let op ← parseOp
+      let (ty, v1, v2) ← parseBinaryOperands fuel
+      return .floatBinaryOp op ty v1 v2
+    else if let some parseOp := conversionOpParser? op then
+      let op ← parseOp
+      let (fromTy, v, toTy) ← parseCastOperands fuel
+      return .conversionOp op fromTy v toTy
+    else parseOtherInstruction fuel isTail opTok
+  | _ => parseOtherInstruction fuel isTail opTok
+
+/-! ### Terminators and basic blocks -/
+
 private def isTerminatorStart : Tok → Bool
   | .ident "ret" | .ident "br" | .ident "switch" | .ident "indirectbr"
   | .ident "unreachable" | .ident "resume" => true
@@ -1941,7 +1681,9 @@ def parseBlock (fuel : Nat) (isFirst : Bool) : ParseM Block := do
     | none => pure ()
   match term? with
   | some term => return { id := bid, code := code.reverse, terminator := term }
-  | none => throw s!"parse error: block '{bid.ToString}' missing terminator"
+  | none => throw s!"parse error: block '{bid.toString}' missing terminator"
+
+/-! ### Function headers -/
 
 /-- Skip optional LLVM linkage / visibility / dll / unnamed_addr keywords. -/
 private def skipLinkageAndCC : ParseM Unit := do
@@ -2083,6 +1825,8 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
     callingConv := cc
   }
   return (decl, argNames.reverse)
+
+/-! ### Modules -/
 
 /-- Result of parsing a standalone `.ll` file. -/
 structure ParsedModule where

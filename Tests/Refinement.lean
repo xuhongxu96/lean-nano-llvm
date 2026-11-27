@@ -1192,7 +1192,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
         (StarStep.step (ev := none)
           (Step.instr rfl rfl
             (StepInstr.alloca_ok (count := 1) ⟨rfl, rfl⟩
-              (by simpa [typeAllocSize_i8, AST.RawId.ToString, allocaInitKind, allocaStoreLoadI8Def] using hspec)))
+              (by simpa [typeAllocSize_i8, AST.RawId.toString, allocaInitKind, allocaStoreLoadI8Def] using hspec)))
           (StarStep.step (ev := none)
             (Step.instr rfl rfl
               (StepInstr.store_ok
@@ -1278,7 +1278,7 @@ theorem dead_alloca_store_elim_i8 :
         (StarStep.step (ev := none)
           (Step.instr rfl rfl
             (StepInstr.alloca_ok (count := 1) ⟨rfl, rfl⟩
-              (by simpa [typeAllocSize_i8, AST.RawId.ToString, allocaInitKind, deadAllocaStoreI8Def] using hspec)))
+              (by simpa [typeAllocSize_i8, AST.RawId.toString, allocaInitKind, deadAllocaStoreI8Def] using hspec)))
           (StarStep.step (ev := none)
             (Step.instr rfl rfl
               (StepInstr.store_ok
@@ -1810,7 +1810,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
                (.local_id (.name "v")) (.bv 32 v) }, initMem) := rfl
     -- Source execution: `add` → `call @id32` → callee `ret` → caller `ret`
     have hnoIntr : ∀ cfg mem o b a, evalNonAllocIntrinsicExec? .default64LE cfg mem
-        (AST.RawId.name "id32").ToString (.ret (.int 32)) {} [.bv 32 v] o b a = none :=
+        (AST.RawId.name "id32").toString (.ret (.int 32)) {} [.bv 32 v] o b a = none :=
       fun _ _ _ b _ => by cases b <;> rfl
     have hX_term : Terminates (.running {
         frames := [{ defn := callerWithAdd0Def, curBlock := .name "entry",
@@ -1949,7 +1949,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
             cases hcallee with
             | direct =>
               have hf : strHasPrefix "id32" "llvm.speculative.load" = false := rfl
-              simp [specLoadOracleCall?, AST.RawId.ToString, hf] at hspec
+              simp [specLoadOracleCall?, AST.RawId.toString, hf] at hspec
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
           | call_intrinsic_ok hargsEv hcallee _ hintr _ _ | call_intrinsic_bundle_err hargsEv hcallee _ hintr _
           | call_intrinsic_retattr_err hargsEv hcallee _ hintr _ _ =>
