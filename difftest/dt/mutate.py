@@ -150,7 +150,10 @@ def int_width(ty: str) -> int | None:
 
 def const_choices(c: int, w: int) -> list[int]:
     smin, smax = -(1 << (w - 1)), (1 << (w - 1)) - 1
-    cands = [0, 1, -1, c + 1, c - 1, -c, ~c, smin, smax]
+    cands = [0, 1, -1, c + 1, c - 1, -c, ~c]
+    if w <= 128:
+        # Extremes of very wide types are printed with thousands of digits; omit them there.
+        cands += [smin, smax]
     if w > 1:
         cands.append(w - 1)
     out = []

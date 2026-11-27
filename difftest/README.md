@@ -116,7 +116,7 @@ pair units. Operators are local and type-preserving:
 | `binop-replace` | integer binary opcode to another (`add`…`xor`), dropping flags the new opcode does not allow; same for FP binops |
 | `flag-toggle` | add or drop one poison-generating flag: `nuw`/`nsw` (`add`, `sub`, `mul`, `shl`, `trunc`), `exact` (`udiv`, `sdiv`, `lshr`, `ashr`), `disjoint` (`or`), `nneg` (`zext`, `uitofp`), `samesign` (`icmp`), and the fast-math flags `nnan`/`ninf`/`nsz` |
 | `pred-replace` | `icmp`/`fcmp` predicate to another |
-| `const-replace` | scalar integer constant `c` to one of {0, 1, -1, c+1, c-1, -c, ~c, INT_MIN, INT_MAX, w-1} (wrapped to the width) |
+| `const-replace` | scalar integer constant `c` to one of {0, 1, -1, c+1, c-1, -c, ~c, INT_MIN, INT_MAX, w-1} (wrapped to the width; INT_MIN and INT_MAX only for widths up to 128) |
 | `operand-swap` | swap the two operands of a binop, compare or `select`; swap the successors of a conditional `br` |
 | `operand-replace` | replace an operand by another value of the same type that dominates the use (a parameter, an entry-block value, or an earlier value of the same block) |
 | `poison-inject`, `undef-inject` | replace an operand by `poison` / `undef` |
@@ -129,7 +129,8 @@ shuffled with the unit's derived seed; the first `--per-unit` sites give first-o
 order-*k* mutant (`--max-order k`) applies *k* sites in sequence, re-enumerating after each
 step. Each mutant is re-verified by the pinned LLVM and classified `ok`, `invalid` (verifier
 rejects it, e.g. a dominance violation), `noop` (prints identically to its parent) or
-`duplicate` (same text as an earlier mutant of the same parent). Only `ok` mutants are used.
+`duplicate` (same text as an earlier mutant of the same parent); a unit whose mutation raises an
+exception gets one `error` row. Only `ok` mutants are used.
 Every mutant records its parent, seed, and each applied site with the instruction before and
 after. Table `mutation_operators` gives the validity rate per operator.
 

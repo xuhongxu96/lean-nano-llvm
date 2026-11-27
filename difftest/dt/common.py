@@ -25,6 +25,12 @@ ORACLES = Path(os.environ.get("DT_ORACLES", DIFFTEST / ".oracles"))
 
 SCHEMA_VERSION = 1
 
+# LLVM allows integer types up to i8388608; their constants exceed Python's default limit on
+# int <-> str conversion.
+import sys as _sys
+
+_sys.set_int_max_str_digits(0)
+
 
 def read_pins() -> dict[str, str]:
     pins: dict[str, str] = {}

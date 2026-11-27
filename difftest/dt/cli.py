@@ -83,8 +83,15 @@ def cmd_mutate(args) -> int:
         fn = "tgt" if u["kind"] == "pair" else u["function"]
         rows = []
         for order in range(1, args.max_order + 1):
-            for m in mutate.mutate_unit(u["id"], u["text"], fn, global_seed=args.seed,
-                                        count=args.per_unit, order=order, operators=ops):
+            try:
+                ms = mutate.mutate_unit(u["id"], u["text"], fn, global_seed=args.seed,
+                                        count=args.per_unit, order=order, operators=ops)
+            except Exception as e:  # recorded, never silently dropped
+                rows.append({"id": f"{u['id']}-o{order}-error", "parent": u["id"], "parent_kind": u["kind"],
+                             "function": fn, "order": order, "status": "error", "sites": [],
+                             "detail": f"{type(e).__name__}: {e}"[:500]})
+                continue
+            for m in ms:
                 mid = f"{u['id']}-o{order}-{m.index}"
                 row = {"id": mid, "parent": u["id"], "parent_kind": u["kind"], "function": fn,
                        "order": order, "index": m.index, "seed": m.seed, "global_seed": args.seed,
