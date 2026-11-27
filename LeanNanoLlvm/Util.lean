@@ -5,3 +5,4 @@ import LeanNanoLlvm.Util.IEEEFloat
 import LeanNanoLlvm.Util.AssocMap
 import LeanNanoLlvm.Util.Hex
 import LeanNanoLlvm.Util.CFormat
+import LeanNanoLlvm.Util.Text

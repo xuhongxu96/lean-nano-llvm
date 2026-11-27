@@ -285,6 +285,22 @@ abbrev LlvmType.f128 : LlvmType := .float .fp128
 
 abbrev TypedIdentifier := Identifier × LlvmType
 
+mutual
+/-- Returns `true` if `ty` is or recursively contains a `.function` type (disallowed in `undef`). -/
+@[simp]
+def LlvmType.hasFunction : LlvmType → Bool
+  | .function .. | .named _ => true
+  | .vector _ elem => elem.hasFunction
+  | .array _ elem => elem.hasFunction
+  | .struct _ fields => LlvmType.hasFunctionList fields
+  | _ => false
+
+@[simp]
+def LlvmType.hasFunctionList : List LlvmType → Bool
+  | [] => false
+  | t :: ts => t.hasFunction || LlvmType.hasFunctionList ts
+end
+
 end TypeHelpers
 
 

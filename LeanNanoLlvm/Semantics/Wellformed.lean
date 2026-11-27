@@ -1,5 +1,5 @@
 import LeanNanoLlvm.AST.AST
-import LeanNanoLlvm.Semantics.Value
+import LeanNanoLlvm.Semantics.Operations
 import LeanNanoLlvm.Tactic
 
 namespace LeanNanoLlvm

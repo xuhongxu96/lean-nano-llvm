@@ -1,7 +1,6 @@
 import Std.Data.HashMap
-import LeanNanoLlvm.Semantics.Exec
+import LeanNanoLlvm.Semantics.Module
 import LeanNanoLlvm.Llubi.AsmWriter
-import LeanNanoLlvm.Llubi.ValuePrinter
 
 /-!
 # `llubi`-compatible frontend
@@ -515,7 +514,7 @@ private def printPhis (d : DState) (mem : MemoryState) (fr : CallFrame) (tags : 
       match ins, iid with
       | .phi .., .id rid =>
         match fr.registers.get? (.local_id rid) with
-        | some v => errLine s!"{textOf d fr.defn.prototype.name iid} => {printValue mem d.dl v tags}"
+        | some v => errLine s!"{textOf d fr.defn.prototype.name iid} => {v.llubiString mem d.dl tags}"
         | none => pure ()
       | _, _ => pure ()
   | none => pure ()
@@ -527,7 +526,7 @@ private def printEntry (d : DState) (mem : MemoryState) (fr : CallFrame) (tags :
   let params := d.tables.params.getD fn.toString []
   for (arg, ptxt) in fr.defn.args.zip params do
     match fr.registers.get? (.local_id arg) with
-    | some v => errLine s!"  {ptxt} = {printValue mem d.dl v tags}"
+    | some v => errLine s!"  {ptxt} = {v.llubiString mem d.dl tags}"
     | none => pure ()
 
 /-- Report a failure (`Stacktrace:` + message), returning `Outcome.failed`. -/
@@ -593,7 +592,7 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
                   | some obj => { m with objects := m.objects.insert id { obj with state := .alive } }
                   | none => m) st'.memory
                 match caller.registers.get? (.local_id rid) with
-                | some v => errLine s!"{ctext} => {printValue memShown d.dl v o'.tags}"
+                | some v => errLine s!"{ctext} => {v.llubiString memShown d.dl o'.tags}"
                 | none => errLine ctext
               | .void _ => errLine ctext
             | _, _ => pure ()
@@ -607,7 +606,7 @@ partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
               match iid, st'.frames with
               | .id rid, fr' :: _ =>
                 match fr'.registers.get? (.local_id rid) with
-                | some v => errLine s!"{textOf d fn iid} => {printValue st'.memory d.dl v o'.tags}"
+                | some v => errLine s!"{textOf d fn iid} => {v.llubiString st'.memory d.dl o'.tags}"
                 | none => errLine (textOf d fn iid)
               | _, _ => errLine (textOf d fn iid)
             traceLoop d o' c' (steps + 1) sites byvals

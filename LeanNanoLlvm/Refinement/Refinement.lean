@@ -7,7 +7,7 @@ https://github.com/opencompl/lean-mlir
 
 import LeanNanoLlvm.Tactic
 import LeanNanoLlvm.AST.AST
-import LeanNanoLlvm.Semantics.Step
+import LeanNanoLlvm.Semantics.StepLemmas
 import LeanNanoLlvm.Semantics.Wellformed
 
 class HRefinement (α β : Type) where
