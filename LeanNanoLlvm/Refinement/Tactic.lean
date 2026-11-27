@@ -41,6 +41,16 @@ section Tactics
 
 open Lean Meta Elab Tactic
 
+/-- `llvm_guard tac` runs `tac` and turns a runtime exception (such as `maximum recursion depth`,
+    which `rfl` or `decide` can raise on `BitVec` goals with large literals) into an ordinary
+    failure. `try` and `first` do not catch runtime exceptions, so without this guard one such
+    closer aborts the whole tactic instead of leaving the goal open. -/
+elab "llvm_guard " t:tacticSeq : tactic => do
+  let s ← saveState
+  tryCatchRuntimeEx (evalTactic t) fun e => do
+    restoreState s
+    if e.isRuntime then throwError "llvm_guard: {e.toMessageData}" else throw e
+
 /-- Extract head definition names of `x` and `y` in `Definition.IsRefinedBy*` (when they are
     user-defined constants rather than raw `AST.Definition.mk` constructors). -/
 private def getRefinementDefConsts : TacticM (List Name) := do
@@ -702,8 +712,8 @@ private def closeTrivialVc : TacticM Unit := do
     evalTactic (← `(tactic|
       (try intros);
       first
-      | (rfl; done)
-      | (trivial; done)
+      | (llvm_guard rfl; done)
+      | (llvm_guard trivial; done)
       | (contradiction; done)
       | (exact RegisterValue.IsRefinedBy.refl _; done)
       | (exact RegisterValue.isRefinedBy_bv_poison; done)
@@ -734,7 +744,7 @@ elab "llvm_vc" : tactic => do
           first
           | exact RegisterValue.IsRefinedBy.refl _
           | (llvm_simp; exact RegisterValue.IsRefinedBy.refl _)
-          | (llvm_simp; rfl)))
+          | (llvm_simp; llvm_guard rfl)))
         pure (← getGoals).isEmpty
       catch _ =>
         pure false
@@ -775,12 +785,12 @@ elab "llvm_vc" : tactic => do
 macro "llvm_refine" : tactic =>
   `(tactic| (llvm_intro; llvm_symexec; llvm_vc;
              all_goals (try (first
-               | (rfl; done)
-               | (trivial; done)
+               | (llvm_guard rfl; done)
+               | (llvm_guard trivial; done)
                | (contradiction; done)
-               | (grind; done)
-               | (bv_omega; done)
-               | (ext _ _; simp; (try grind); done)))))
+               | (llvm_guard grind; done)
+               | (llvm_guard bv_omega; done)
+               | (llvm_guard (ext _ _; simp; (try grind)); done)))))
 
 end Tactics
 

@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement.Tactic
+import LeanNanoLlvm.Refinement.PoisonElim
 import LeanNanoLlvm.AST.Syntax
 import Tests.Rewrites.Common
 
@@ -32,46 +32,40 @@ theorem pr_246248 :
         ret i32 %v4_opt
       }
     ] := by
-  llvm_intro; llvm_symexec
-  apply RegisterValue.isRefinedBy_bv_of_poisonOr
-  cases arg0
-  · simp [simp_llvm]
-  · rename_i x; simp [simp_llvm]
-    split
-    · rename_i heq
-      simp only [PoisonOr.IsRefinedBy]
+  -- `llvm_bv` removes the poison and `select` case structure. Two `BitVec` goals remain, one per
+  -- `select` arm; the `nsw` guard of the `add` arm appears as the hypothesis `h_1`.
+  llvm_bv
+  · -- h : arg0 &&& 64#32 = 0#32 ⊢ arg0 ||| 64#32 = arg0 ^^^ 64#32
+    ext i hi
+    have h0 := congrArg (fun v : BitVec 32 => v[i]'hi) h
+    simp at h0 ⊢; grind
+  · -- h : ¬arg0 &&& 64#32 = 0#32, h_1 : arg0.saddOverflow 4294967232#32 = false
+    -- ⊢ arg0 + 4294967232#32 = arg0 ^^^ 64#32
+    have hbit : arg0 &&& 64#32 = 64#32 := by
       ext i hi
-      have h0 := congrArg (fun v : BitVec 32 => v[i]'hi) heq
-      simp at h0 ⊢; grind
-    · rename_i hne
-      split
-      · simp [PoisonOr.IsRefinedBy]
-      · simp only [PoisonOr.IsRefinedBy]
-        have hbit : x &&& 64#32 = 64#32 := by
-          ext i hi
-          by_cases h6 : i = 6
-          · subst h6
-            cases hx6 : x[6]
-            · exfalso; apply hne; ext j hj
-              by_cases hj6 : j = 6
-              · subst hj6; simp [hx6]
-              · simp [show (64#32)[j]'hj = false by revert j hj hj6; decide]
-            · simp [hx6]
-          · simp [show (64#32)[i]'hi = false by revert i hi h6; decide]
-        have hx : (x ^^^ 64#32) &&& 64#32 = 0#32 := by
-          ext i hi
-          have h6 := congrArg (fun v : BitVec 32 => v[i]'hi) hbit
-          simp at h6 ⊢; grind
-        have hadd : (x ^^^ 64#32) + 64#32 = x := by
-          have hor : (x ^^^ 64#32) ||| 64#32 = x := by
-            ext i hi
-            have h6 := congrArg (fun v : BitVec 32 => v[i]'hi) hbit
-            simp at h6 ⊢; grind
-          rw [bv_or_eq_add_sub_and, hx, BitVec.sub_zero] at hor
-          exact hor
-        have hsub : (4294967232#32 : BitVec 32) = -(64#32) := by decide
-        rw [hsub, ← BitVec.sub_eq_add_neg]
-        have hres := congrArg (· - 64#32) hadd.symm
-        simpa [BitVec.add_sub_cancel] using hres
+      by_cases h6 : i = 6
+      · subst h6
+        cases hx6 : arg0[6]
+        · exfalso; apply h; ext j hj
+          by_cases hj6 : j = 6
+          · subst hj6; simp [hx6]
+          · simp [show (64#32)[j]'hj = false by revert j hj hj6; decide]
+        · simp [hx6]
+      · simp [show (64#32)[i]'hi = false by revert i hi h6; decide]
+    have hx : (arg0 ^^^ 64#32) &&& 64#32 = 0#32 := by
+      ext i hi
+      have h6 := congrArg (fun v : BitVec 32 => v[i]'hi) hbit
+      simp at h6 ⊢; grind
+    have hadd : (arg0 ^^^ 64#32) + 64#32 = arg0 := by
+      have hor : (arg0 ^^^ 64#32) ||| 64#32 = arg0 := by
+        ext i hi
+        have h6 := congrArg (fun v : BitVec 32 => v[i]'hi) hbit
+        simp at h6 ⊢; grind
+      rw [bv_or_eq_add_sub_and, hx, BitVec.sub_zero] at hor
+      exact hor
+    have hsub : (4294967232#32 : BitVec 32) = -(64#32) := by decide
+    rw [hsub, ← BitVec.sub_eq_add_neg]
+    have hres := congrArg (· - 64#32) hadd.symm
+    simpa [BitVec.add_sub_cancel] using hres
 
 end LeanNanoLlvm.Tests.Alive2

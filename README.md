@@ -90,6 +90,7 @@ The library `LeanNanoLlvm/` is layered; each layer imports only the ones above i
    The automation on top of it is split so that each piece rebuilds on its own:
    - `Lemmas`: well-formedness destructuring and the `simp_llvm` / `simp_step` lemmas.
    - `Tactic`: `llvm_intro`, `llvm_symexec`, `llvm_vc` and `llvm_refine`.
+   - `PoisonElim`: `llvm_bv`, which removes poison and `select` case structure from the goals `llvm_symexec` leaves and keeps only pure `BitVec` / `Bool` / `IEEEFloat` subgoals, with the poison guards they depend on as named hypotheses. Use it when you want to finish a proof with bit-vector reasoning only.
    - `Disprove`: the `llvm_disprove` front end, over `Disprove/Lemmas` (kernel-pure refutation lemmas), `Disprove/Search` (witness search on the interpreter) and `Disprove/Stepper` (witness certification).
    - The umbrella `LeanNanoLlvm.Refinement` re-exports all of them; proof files should not import it (see *Incremental builds* below).
 5. **`Tactic`**: the layered simp sets (`simp_llvm`, `simp_wellform`, `simp_step`) and tactics (`llvm_simp`, `llvm_wf`, `llvm_step`).
