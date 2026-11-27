@@ -30,6 +30,7 @@ $DT cases  --args-per-function 4                    # execution cases
 $DT run-llubi  --seeds 0,1                          # phase 2: large-scale runs
 $DT run-alive2 --config no-undef-input
 $DT run-alive2 --config default
+$DT run-alive2 --config test-args                   # Alive2 tests with their own TEST-ARGS (sanity check)
 $DT run-lean
 $DT report                                          # tables in difftest/work/report/
 ```
@@ -89,9 +90,16 @@ line (`unsupported-run-line`); it uses a target-specific intrinsic (`llvm.x86.*`
 Features our implementation may not support are *not* filtered out: they surface as
 `ours-unsupported` or `translation-error` verdicts and are reported as coverage.
 
+An optional fifth source is `scripts/collect_alive2_github.py`, which mines Alive2 links and
+proofs from llvm-project issues and pull requests; it is not wired into `collect` because the
+result depends on the date of the search and on alive2.llvm.org being reachable, so it should be
+frozen into files before use.
+
 Deduplication. Units are deduplicated by a structural hash: SHA-256 of the module after `opt
 -passes=metarenamer,instnamer`, which renames every non-intrinsic symbol deterministically, so
-units equal up to alpha-renaming collide. The first unit in source order (table above), then path
+units equal up to alpha-renaming collide. For Alive2 tests the key also includes the expected
+verdict and `TEST-ARGS`, since the same IR can be a different test under different arguments
+(e.g. `aggregate-input-{poison,undef,value}`). The first unit in source order (table above), then path
 order, is kept; the others are listed in `duplicates.jsonl` with the unit they duplicate.
 
 The funnel (candidates, rejections by reason, duplicates, accepted) is table `corpus_funnel`, and
@@ -190,7 +198,8 @@ Agreement is `match / (match + mismatch)`. Outputs are stored for every non-matc
 
 `alive-tv --smt-to=10000` (ms) per pair, 120 s wall-clock limit, in two configurations:
 `no-undef-input` (`--disable-undef-input`, primary: it matches our default semantics, which
-disable `undef`) and `default`. Verdicts:
+disable `undef`) and `default`; Alive2 tests are additionally run with their own `TEST-ARGS`
+(`test-args`) for the sanity check below. Verdicts:
 
 * `correct`: "Transformation seems to be correct!" (`syntactic_eq` if syntactically equal);
 * `incorrect`: "Transformation doesn't verify!", with `error_kind` (`value-mismatch`,
@@ -214,13 +223,17 @@ Python, so the statement is about exactly the IR the oracles saw. Three obligati
 each checked by `lake env lean` (kernel-checked, standard axioms only) in its own process with a
 300 s limit:
 
-* `prove`: `src ⊒ tgt` by `llvm_refine`;
+* `prove`: `src ⊒ tgt` by a fixed script: `llvm_refine`, then on every remaining goal the first
+  of `simp_all; done`, `bv_omega`, `grind` that succeeds (`bv_decide` is excluded because it
+  relies on `Lean.ofReduceBool`);
 * `disprove-witness`: `¬ (src ⊒ tgt)` by `llvm_disprove [w…]` with Alive2's counterexample, when
   all its inputs are integers, floats or `poison`;
 * `disprove-search`: `¬ (src ⊒ tgt)` by `llvm_disprove` (our bounded witness search).
 
 `⊒` is refinement under `SemanticsConfig.modern` with LLVM's default little-endian 64-bit data
-layout. Each obligation is `checked`, `failed`, `timeout`, `translation-error` (our parser
+layout. Every file ends with `#print axioms`, and an obligation counts as `checked` only if it
+depends on nothing beyond `propext`, `Classical.choice` and `Quot.sound` (otherwise
+`nonstandard-axioms`). Each obligation is `checked`, `failed`, `timeout`, `translation-error` (our parser
 rejected one side) or `error`. Pairs that call non-intrinsic functions or reference globals are
 flagged `static_scope`, since the plain `⊒` statement has no module environment.
 
@@ -251,7 +264,7 @@ in configuration (undef inputs, data layout), and each needs a written root caus
 `dt report` (`dt/report.py`) derives every table from these files only, and writes each as CSV,
 a booktabs LaTeX table and Markdown (`report/summary.md`): `corpus_funnel`, `corpus_features`,
 `mutation_operators`, `llubi_verdicts`, `llubi_mismatch_channels`, `alive2_verdicts`,
-`alive2_sanity`, `refinement_confusion`, `refinement_summary` and `cost`. Each record carries its
+`alive2_sanity`, `lean_obligations`, `refinement_confusion`, `refinement_summary` and `cost`. Each record carries its
 unit's feature classes, so any table can be broken down by feature.
 
 ## 7. Threats to validity (to address in the paper)
@@ -268,3 +281,13 @@ unit's feature classes, so any table can be broken down by feature.
   all inputs symbolically, so the two experiments complement each other.
 * **Mutation equivalence.** Some mutants are semantically equivalent to their parent; for
   refinement they are simply `correct` pairs, and for execution they are still valid programs.
+
+## 8. Status
+
+Phase 1 (infrastructure and data collection) is complete; the large-scale runs (phase 2) start
+after the module refactor. A smoke test on 25 files per source (InstCombine and InstSimplify),
+with the oracles built at the pins, gave: 129 units, 354 valid first-order mutants, 436 pairs and
+1,487 execution cases; 300 llubi runs, all `match`; Alive2 verdicts on all 436 pairs, and the
+sanity check agreeing with every decided Alive2 test (4 inconclusive); and 177 Lean obligations
+on a 1/6 shard, with no disagreement with Alive2 (32 agree, 25 proof or disproof gaps, mostly
+intrinsic calls, memory and external calls that the tactics do not yet handle).
