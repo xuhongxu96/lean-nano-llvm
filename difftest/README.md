@@ -157,7 +157,10 @@ uniform bit patterns otherwise; vectors element-wise; `poison` with probability 
 `noundef` parameters. Pointers point to a fresh 64-byte buffer filled with a random byte.
 Functions with aggregate, scalable-vector, `byval`/`sret`/`inalloca`, non-zero address space or
 x86_fp80/fp128/ppc_fp128 parameters, or varargs, are recorded in `not-executable.jsonl`. Driver
-modules are verified by the pinned LLVM before use. Default: 4 argument vectors per function.
+modules are verified by the pinned LLVM before use. Default: 4 argument vectors per corpus
+function and 1 per mutant (`--args-per-function`, `--args-per-mutant`); the argument vector is
+drawn from the seed of the function or mutant itself, so mutants of one parent get different
+inputs.
 
 ### 4.2 Refinement pairs (Alive2)
 
@@ -284,8 +287,8 @@ unit's feature classes, so any table can be broken down by feature.
 
 ## 8. Status
 
-Phase 1 (infrastructure and data collection) is complete; the large-scale runs (phase 2) start
-after the module refactor. A smoke test on 25 files per source (InstCombine and InstSimplify),
+Phase 1 (infrastructure and data collection) is complete; the large-scale runs (phase 2) have
+not started. A smoke test on 25 files per source (InstCombine and InstSimplify),
 with the oracles built at the pins, gave: 129 units, 354 valid first-order mutants, 436 pairs and
 1,487 execution cases; 300 llubi runs, all `match`; Alive2 verdicts on all 436 pairs, and the
 sanity check agreeing with every decided Alive2 test (4 inconclusive); and 177 Lean obligations

@@ -223,7 +223,8 @@ def cmd_cases(args) -> int:
             mods = [(text, fn, None, None)]
         else:
             try:
-                ds = drivers.make_drivers(sid, text, fn, args.args_per_function, args.seed)
+                n = args.args_per_mutant if "mutant" in origin else args.args_per_function
+                ds = drivers.make_drivers(sid, text, fn, n, args.seed)
             except drivers.Unsupported as e:
                 return [], [{"subject": sid, **origin, "reason": str(e)}]
             mods = [(d.module, "__dt_main", d.args, d.seed) for d in ds]
@@ -248,6 +249,7 @@ def cmd_cases(args) -> int:
     write_jsonl(w / "cases" / "not-executable.jsonl", unsupported)
     (w / "cases" / "cases.json").write_text(json.dumps({
         "global_seed": args.seed, "args_per_function": args.args_per_function,
+        "args_per_mutant": args.args_per_mutant,
         "arg_generator": vars(drivers.ArgGen()),
     }, indent=2))
     print(json.dumps({"cases": len(rows), "not_executable": len(unsupported)}))
@@ -398,7 +400,8 @@ def main(argv: list[str]) -> int:
 
     s = sub.add_parser("cases")
     s.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    s.add_argument("--args-per-function", type=int, default=4)
+    s.add_argument("--args-per-function", type=int, default=4, help="argument vectors per corpus function")
+    s.add_argument("--args-per-mutant", type=int, default=1, help="argument vectors per mutant")
     s.set_defaults(fn=cmd_cases)
 
     for name, fn in (("run-llubi", cmd_run_llubi), ("run-alive2", cmd_run_alive2), ("run-lean", cmd_run_lean)):
