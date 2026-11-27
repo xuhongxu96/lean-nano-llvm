@@ -9,12 +9,17 @@ fi
 
 pass=0
 fail=0
+xfail=0
 
 for f in Tests/ll/*.ll; do
   expect_exit=$(grep -m1 '^; EXPECT_EXIT:' "$f" | sed 's/^; EXPECT_EXIT:[[:space:]]*//')
   expect_out=$(grep -m1 '^; EXPECT_OUT:' "$f" | sed 's/^; EXPECT_OUT:[[:space:]]*//' || true)
   expect_err=$(grep -m1 '^; EXPECT_ERR:' "$f" | sed 's/^; EXPECT_ERR:[[:space:]]*//' || true)
   extra_args=$(grep -m1 '^; ARGS:' "$f" | sed 's/^; ARGS:[[:space:]]*//' || true)
+  # `; XFAIL: <reason>`: a known bug. The EXPECT lines state the correct behaviour (llubi's);
+  # the test counts as passing while it fails, and fails (XPASS) once the bug is fixed, so
+  # that the marker is removed together with the fix.
+  xfail_reason=$(grep -m1 '^; XFAIL:' "$f" | sed 's/^; XFAIL:[[:space:]]*//' || true)
 
   out_file=$(mktemp)
   err_file=$(mktemp)
@@ -41,7 +46,15 @@ for f in Tests/ll/*.ll; do
     ok=0
   fi
 
-  if [[ "$ok" -eq 1 ]]; then
+  if [[ -n "$xfail_reason" ]]; then
+    if [[ "$ok" -eq 1 ]]; then
+      echo "XPASS $f: passes but is marked XFAIL ($xfail_reason); remove the marker"
+      fail=$((fail + 1))
+    else
+      echo "XFAIL $f ($xfail_reason)"
+      xfail=$((xfail + 1))
+    fi
+  elif [[ "$ok" -eq 1 ]]; then
     echo "PASS $f (exit=$actual_exit)"
     pass=$((pass + 1))
   else
@@ -50,7 +63,7 @@ for f in Tests/ll/*.ll; do
 done
 
 echo ""
-echo "LL regression suite: $pass passed, $fail failed."
+echo "LL regression suite: $pass passed, $xfail expected failures, $fail failed."
 if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi

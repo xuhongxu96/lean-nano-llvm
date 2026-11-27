@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from . import corpus as corpus_mod
-from . import drivers, ir, lean_emit, mutate, oracle_alive2, oracle_llubi, pairs, report
+from . import drivers, ir, lean_emit, mutate, oracle_alive2, oracle_llubi, pairs, report, triage
 from .common import WORK, provenance, read_jsonl, read_results, sha256, shard_path, write_jsonl
 
 DEFAULT_SEED = 20261127
@@ -412,6 +412,61 @@ def cmd_run_lean(args) -> int:
     return 0
 
 
+def cmd_triage(args) -> int:
+    """Classify every non-matching llubi run and every refinement disagreement
+    (`dt/triage.py`), writing report/llubi-triage.jsonl and report/refinement-triage.jsonl."""
+    import collections
+
+    w = _work(args)
+    rep = w / "report"
+    rep.mkdir(parents=True, exist_ok=True)
+    cases = {c["id"]: c for c in read_jsonl(w / "cases" / "cases.jsonl")} if not args.skip_llubi else {}
+    counts: collections.Counter = collections.Counter()
+    if not args.skip_llubi:
+        out = rep / "llubi-triage.jsonl"
+        write_jsonl(out, [])
+
+        def one(r):
+            if r["verdict"] == "match":
+                return None
+            mod = None
+            if r["verdict"] == "mismatch":
+                mod = (w / "cases" / cases[r["case"]]["path"]).read_text()
+            return triage.triage_llubi(r, mod)
+
+        buf = []
+        for t in map(one, read_results(w / "results" / "llubi.jsonl", "run_id")):
+            if t is None:
+                counts["llubi", "match"] += 1
+                continue
+            counts["llubi", t["class"]] += 1
+            buf.append(t)
+            if len(buf) >= 10000:
+                write_jsonl(out, buf, append=True)
+                buf = []
+        write_jsonl(out, buf, append=True)
+    # Refinement: our pair verdict from the obligations, against Alive2's.
+    al = {r["pair"]: r for r in read_results(w / "results" / f"alive2-{args.config}.jsonl", "pair")}
+    obs: dict[str, dict[str, str]] = collections.defaultdict(dict)
+    for r in read_results(w / "results" / "lean.jsonl", "run_id"):
+        obs[r["pair"]][r["obligation"]] = r["status"]
+    rows = []
+    for p in read_jsonl(w / "pairs" / "pairs.jsonl"):
+        if p["id"] not in obs or p["id"] not in al:
+            continue
+        o = obs[p["id"]]
+        proved = o.get("prove") == "checked"
+        disp = "checked" in (o.get("disprove-search"), o.get("disprove-witness"))
+        ours = "inconsistent" if proved and disp else "proved" if proved else "disproved" if disp else "unknown"
+        t = triage.triage_refinement(p, al[p["id"]]["verdict"], ours)
+        if t:
+            rows.append(t)
+            counts["refinement", t["class"]] += 1
+    write_jsonl(rep / "refinement-triage.jsonl", rows)
+    print(json.dumps({f"{a}/{b}": n for (a, b), n in sorted(counts.items())}, indent=1))
+    return 0
+
+
 def cmd_report(args) -> int:
     w = _work(args)
     paths = report.build(w, w / "report", alive_config=args.config)
@@ -481,6 +536,11 @@ def main(argv: list[str]) -> int:
                            help="obligations per Lean process (1: one process per obligation)")
             s.add_argument("--batch-timeout", type=float, default=900,
                            help="s, per batch; on timeout the batch is re-checked one obligation per process")
+
+    s = sub.add_parser("triage")
+    s.add_argument("--config", choices=list(oracle_alive2.CONFIGS), default="no-undef-input")
+    s.add_argument("--skip-llubi", action="store_true")
+    s.set_defaults(fn=cmd_triage)
 
     s = sub.add_parser("report")
     s.add_argument("--config", choices=list(oracle_alive2.CONFIGS), default="no-undef-input")
