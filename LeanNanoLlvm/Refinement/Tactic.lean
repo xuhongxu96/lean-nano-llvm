@@ -27,6 +27,10 @@ counterexample and is independent of this pipeline.
   `llvm_refine` again: it accepts `Config.IsRefinedBy` and `RegisterValue.IsRefinedBy` goals too.
 * Use `llvm_bv` directly when you do not want the closers to run (for instance, to inspect the
   goals or to keep a proof fast).
+* Use `llvm_refine?` to see the proof `llvm_refine` found. Like `simp?` and `llvm_disprove?`, it
+  emits a `Try this:` suggestion: `llvm_bv` followed by one bullet per leaf, in the order
+  `llvm_bv` produces them, with the closer that proved the leaf, or `sorry` for a leaf left open.
+  The suggested script skips the closer search, so it is also faster to re-check.
 
 ## Closers
 
@@ -112,32 +116,57 @@ private def closeViaAuxLemma (g : MVarId) (pf : Expr) : TacticM Unit := g.withCo
     throwError "closeViaAuxLemma: the kernel rejected the proof"
   g.assign e
 
-/-- Try the standard closers on the main goal; keep the goal unchanged if none proves it. -/
-private def tryClosers : TacticM Unit := do
-  let s ← saveState
+/-- The closers `llvm_refine` tries on each leaf, in order (see the module documentation). They
+    are kept as source text so that `llvm_refine?` can print them exactly as written. -/
+private def closers : Array String := #[
+  "grind",
+  "bv_omega",
+  "(ext _ _; simp; (try grind))",
+  "((repeat' split) <;> first | (grind; done) | (bv_omega; done) | (simp_all; done))",
+  "set_option linter.unusedSimpArgs false in (simp [BitVec.slt, BitVec.sle, BitVec.lt_def, \
+    BitVec.le_def, BitVec.toInt_eq_toNat_cond] at *; bv_omega)",
+  "llvm_bool_cases"]
+
+/-- Try the closers on the main goal. Return the first one that proves it, or `none` (with the
+    goal left unchanged) if none does. -/
+private def tryClosers : TacticM (Option String) := do
   let g ← getMainGoal
-  let nMsgs := (← errorCount)
-  try
-    let g2 ← g.withContext (mkFreshExprSyntheticOpaqueMVar (← g.getType))
-    setGoals [g2.mvarId!]
-    -- Run the closers with synchronous kernel checking, so that a kernel failure inside one
-    -- (e.g. `deep recursion` in an `omega` auxiliary lemma) is reported here, not later.
-    withOptions (fun o => o.setBool `Elab.async false) <| evalTactic (← `(tactic|
-      first
-      | (llvm_guard grind; done)
-      | (llvm_guard bv_omega; done)
-      | (llvm_guard (ext _ _; simp; (try grind)); done)
-      | (llvm_guard ((repeat' split) <;>
-          first | (grind; done) | (bv_omega; done) | (simp_all; done)); done)
-      | (llvm_guard (simp [BitVec.slt, BitVec.sle, BitVec.lt_def, BitVec.le_def,
-          BitVec.toInt_eq_toNat_cond] at *; bv_omega); done)
-      | (llvm_bool_cases; done)))
-    if (← errorCount) != nMsgs then
-      throwError "tryClosers: a closer logged an error (e.g. from the kernel)"
-    closeViaAuxLemma g g2
-    setGoals []
-  catch _ =>
-    restoreState s
+  for src in closers do
+    -- Positions in the parsed text are relative to `src`; replace them with synthetic positions
+    -- at the current tactic, so that messages (e.g. linter warnings) are not misplaced.
+    let info := SourceInfo.fromRef (← getRef)
+    let parsed ← ofExcept (Parser.runParserCategory (← getEnv) `tactic src)
+    let c : TSyntax `tactic := ⟨parsed.rewriteBottomUp (·.setInfo info)⟩
+    let s ← saveState
+    let nMsgs := (← errorCount)
+    try
+      let g2 ← g.withContext (mkFreshExprSyntheticOpaqueMVar (← g.getType))
+      setGoals [g2.mvarId!]
+      -- Run the closer with synchronous kernel checking, so that a kernel failure inside it
+      -- (e.g. `deep recursion` in an `omega` auxiliary lemma) is reported here, not later.
+      withOptions (fun o => o.setBool `Elab.async false) <|
+        evalTactic (← `(tactic| llvm_guard ($c:tactic; done)))
+      if (← errorCount) != nMsgs then
+        throwError "tryClosers: a closer logged an error (e.g. from the kernel)"
+      closeViaAuxLemma g g2
+      setGoals []
+      return some src
+    catch _ =>
+      restoreState s
+  return none
+
+/-- Run `llvm_bv`, then the closers on every leaf. Return, for each leaf `llvm_bv` produced (in
+    order), the closer that proved it, or `none` if the leaf is left open. -/
+private def runRefine : TacticM (Array (Option String)) := do
+  evalTactic (← `(tactic| llvm_bv))
+  let mut out := #[]
+  let mut used := #[]
+  for g in ← getGoals do
+    setGoals [g]
+    used := used.push (← tryClosers)
+    out := out ++ (← getGoals)
+  setGoals out.toList
+  return used
 
 /-- `llvm_refine` proves a refinement goal (`x ⊒ y`, `x ⊒[cfg] y`, `x ⊒⟨env⟩ y`) or a
     `Config.IsRefinedBy` / `RegisterValue.IsRefinedBy` goal left by `llvm_symexec`. It runs
@@ -145,13 +174,25 @@ private def tryClosers : TacticM Unit := do
     the module documentation on every remaining leaf. Leaves it cannot prove are exactly the
     pure `BitVec` goals `llvm_bv` produces, with named poison guards. -/
 elab "llvm_refine" : tactic => do
-  evalTactic (← `(tactic| llvm_bv))
-  let mut out := #[]
-  for g in ← getGoals do
-    setGoals [g]
-    tryClosers
-    out := out ++ (← getGoals)
-  setGoals out.toList
+  discard runRefine
+
+/-- `llvm_refine?` behaves like `llvm_refine` and also emits a `Try this:` suggestion (like
+    `simp?`) with the proof it found: `llvm_bv` followed by one bullet per leaf, naming the
+    closer that proved it. A leaf no closer proves gets `· sorry`, to be replaced by a manual
+    proof. The suggested script skips the closer search, so it elaborates faster. -/
+elab tk:"llvm_refine?" : tactic => do
+  let used ← runRefine
+  let mut lines := #["llvm_bv"]
+  for c? in used do
+    match c? with
+    | some c => lines := lines.push s!"· {c}"
+    | none => lines := lines.push "· sorry"
+  let nOpen := (used.filter Option.isNone).size
+  let header := if nOpen == 0 then "Try this:" else
+    s!"{nOpen} leaf goal(s) left open, marked `sorry`.\nTry this:"
+  let sugg := if used.isEmpty then "llvm_bv" else "\n".intercalate lines.toList
+  Lean.Meta.Tactic.TryThis.addSuggestion tk { suggestion := .string sugg }
+    (origSpan? := some (← getRef)) (header := header)
 
 end Tactic
 
