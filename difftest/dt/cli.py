@@ -401,7 +401,7 @@ def main(argv: list[str]) -> int:
     s = sub.add_parser("cases")
     s.add_argument("--seed", type=int, default=DEFAULT_SEED)
     s.add_argument("--args-per-function", type=int, default=4, help="argument vectors per corpus function")
-    s.add_argument("--args-per-mutant", type=int, default=1, help="argument vectors per mutant")
+    s.add_argument("--args-per-mutant", type=int, default=4, help="argument vectors per mutant")
     s.set_defaults(fn=cmd_cases)
 
     for name, fn in (("run-llubi", cmd_run_llubi), ("run-alive2", cmd_run_alive2), ("run-lean", cmd_run_lean)):

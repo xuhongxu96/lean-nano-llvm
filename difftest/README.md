@@ -158,7 +158,7 @@ uniform bit patterns otherwise; vectors element-wise; `poison` with probability 
 Functions with aggregate, scalable-vector, `byval`/`sret`/`inalloca`, non-zero address space or
 x86_fp80/fp128/ppc_fp128 parameters, or varargs, are recorded in `not-executable.jsonl`. Driver
 modules are verified by the pinned LLVM before use. Default: 4 argument vectors per corpus
-function and 1 per mutant (`--args-per-function`, `--args-per-mutant`); the argument vector is
+function and 4 per mutant (`--args-per-function`, `--args-per-mutant`); the argument vector is
 drawn from the seed of the function or mutant itself, so mutants of one parent get different
 inputs.
 
