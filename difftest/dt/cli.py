@@ -332,7 +332,7 @@ def cmd_run_alive2(args) -> int:
                 return None
             extra = p.get("alive2_test_args", "").split()
         r = oracle_alive2.check(src, tgt, config=args.config, smt_timeout_ms=args.smt_timeout,
-                                wall_timeout=args.timeout, extra=extra)
+                                wall_timeout=args.timeout, extra=extra, src_fn=p["src_fn"])
         return {"pair": p["id"], "origin": p["origin"], **r}
 
     n = 0
@@ -414,7 +414,7 @@ def cmd_run_lean(args) -> int:
 
 def cmd_triage(args) -> int:
     """Classify every non-matching llubi run and every refinement disagreement
-    (`dt/triage.py`), writing report/llubi-triage.jsonl and report/refinement-triage.jsonl."""
+    (`dt/triage.py`), writing report/triage-llubi.jsonl and report/triage-refinement.jsonl."""
     import collections
 
     w = _work(args)
@@ -423,7 +423,7 @@ def cmd_triage(args) -> int:
     cases = {c["id"]: c for c in read_jsonl(w / "cases" / "cases.jsonl")} if not args.skip_llubi else {}
     counts: collections.Counter = collections.Counter()
     if not args.skip_llubi:
-        out = rep / "llubi-triage.jsonl"
+        out = rep / "triage-llubi.jsonl"
         write_jsonl(out, [])
 
         def one(r):
@@ -462,7 +462,7 @@ def cmd_triage(args) -> int:
         if t:
             rows.append(t)
             counts["refinement", t["class"]] += 1
-    write_jsonl(rep / "refinement-triage.jsonl", rows)
+    write_jsonl(rep / "triage-refinement.jsonl", rows)
     print(json.dumps({f"{a}/{b}": n for (a, b), n in sorted(counts.items())}, indent=1))
     return 0
 

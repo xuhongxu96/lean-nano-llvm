@@ -131,9 +131,26 @@ def parse_output(out: str) -> dict[str, Any]:
     return rec
 
 
+SECTION_SEP = "\n----------------------------------------\n"
+
+
+def select_section(out: str, fn: str) -> str | None:
+    """alive-tv checks every function pair it finds (a test file may define `@src`, `@src3`,
+    ...), printing one section per pair. Return the section of the pair whose source function is
+    `@fn`, followed by the summary, or ``None`` if there is no such section."""
+    parts = out.split(SECTION_SEP)
+    head = re.compile(r"^define [^@]*@" + re.escape(fn) + r"\(", re.M)
+    for part in parts[1:]:
+        first = next((l for l in part.splitlines() if l.startswith("define ")), "")
+        if head.match(first):
+            body = part.split("\nSummary:", 1)[0]
+            return SECTION_SEP + body
+    return None
+
+
 def check(src_module: str, tgt_module: str | None = None, config: str = "no-undef-input",
           smt_timeout_ms: int = 10000, wall_timeout: float = 120.0, extra: list[str] | None = None,
-          keep_output: bool = True) -> dict[str, Any]:
+          keep_output: bool = True, src_fn: str | None = None) -> dict[str, Any]:
     """Check one pair. With ``tgt_module=None``, ``src_module`` defines ``@src`` and ``@tgt``
     (single-file mode); otherwise the two modules are compared function by function, by name
     (two-file mode, used for opt-derived and mutation-derived pairs)."""
@@ -157,7 +174,17 @@ def check(src_module: str, tgt_module: str | None = None, config: str = "no-unde
     else:
         rec = parse_output(out)
         if rec.get("summary") and sum(rec["summary"]) > 1:
-            rec["note"] = "more than one function pair compared"
+            # Several function pairs were compared: the verdict is that of the pair under test
+            # only (``src_fn``, ``src`` in single-file mode), not of the whole file.
+            fn = src_fn or ("src" if tgt_module is None else None)
+            sec = select_section(out, fn) if fn else None
+            summary = rec["summary"]
+            if sec is None:
+                rec = {"verdict": "error", "reason": "pair-not-found-in-multi-pair-output"}
+            else:
+                rec = parse_output(sec)
+            rec["summary"] = summary
+            rec["note"] = "more than one function pair compared; verdict of the section for @" + str(fn)
     rec.update({
         "config": config,
         "args": args,

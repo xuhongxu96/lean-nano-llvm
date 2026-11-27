@@ -283,6 +283,28 @@ def match_rule(rules: list[Rule], *, module: str | None = None, **kw) -> Rule | 
     return None
 
 
+UNSUPPORTED_FAMILIES: list[tuple[str, str]] = [
+    # (family, regex on the parser message); first match wins
+    ("constrained FP intrinsics (metadata arguments)", r'strLit "(round\.\w+|fpexcept\.\w+|[ou](eq|ne|gt|ge|lt|le)|ord|uno|true|false)"'),
+    ("atomics (orderings, atomicrmw, cmpxchg, fence)", r'"(unordered|monotonic|acquire|release|acq_rel|seq_cst|atomicrmw|cmpxchg|fence|syncscope)"'),
+    ("exception handling (EH pads, invoke, landingpad)", r'"(cleanuppad|catchswitch|catchpad|catchret|cleanupret|landingpad|invoke|resume)"'),
+    ("function-level metadata attachments (!prof, !dbg, ...)", r"define body\): expected \S+ got \S+metaId"),
+    ("block comments /* ... */", r"Tok\.star in type"),
+    ("hex float literal f0x... in constant expressions", r'ident "f0x[0-9A-Fa-f]+" in expression'),
+    ("garbage collection (gc \"...\")", r'define body\): expected \S+, got \S+ident "gc"'),
+    ("allocator parameter attributes (allocptr, allocalign)", r'ident "(allocptr|allocalign)"'),
+    ("attribute groups on instructions", r"opcode \S+attrGrp"),
+    ("target extension types", r"unknown type 'target'"),
+]
+
+
+def unsupported_family(msg: str) -> str:
+    for fam, pat in UNSUPPORTED_FAMILIES:
+        if re.search(pat, msg):
+            return fam
+    return "other: " + unsupported_key(msg)
+
+
 def unsupported_key(msg: str) -> str:
     """A stable key for a parser rejection message, for grouping `ours-unsupported` runs."""
     m = re.search(r'unsupported instruction opcode \S+ "([^"]+)"', msg)
