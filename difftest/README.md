@@ -291,9 +291,16 @@ unit's feature classes, so any table can be broken down by feature.
 ## 8. Status
 
 Phase 1 (infrastructure and data collection) is complete; the large-scale runs (phase 2) have
-not started. A smoke test on 25 files per source (InstCombine and InstSimplify),
-with the oracles built at the pins, gave: 129 units, 354 valid first-order mutants, 436 pairs and
-1,487 execution cases; 300 llubi runs, all `match`; Alive2 verdicts on all 436 pairs, and the
-sanity check agreeing with every decided Alive2 test (4 inconclusive); and 177 Lean obligations
-on a 1/6 shard, with no disagreement with Alive2 (32 agree, 25 proof or disproof gaps, mostly
-intrinsic calls, memory and external calls that the tactics do not yet handle).
+not started. The full collection at the pins (global seed 20261127, 10 first-order mutants per
+unit, 4 argument vectors per function and per mutant) gave:
+
+| Stage | Count |
+|---|---|
+| Corpus candidates / accepted units | 58,604 / 49,054 (48,093 functions, 717 Alive2 tests, 244 programs) |
+| Rejected / duplicates | 7,544 (7,441 target-specific) / 2,006 |
+| Mutants drawn / valid | 344,924 / 340,570 |
+| Refinement pairs | 378,039 (714 Alive2 tests, 37,300 `opt`, 340,025 mutation) |
+| Execution cases | 1,524,148 (5,843 subjects without a driver) |
+
+Generating everything takes about 3 hours on 4 cores. A smoke test of all run stages on a
+25-files-per-source sample found every llubi run matching and no disagreement with Alive2.
