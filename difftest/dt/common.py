@@ -88,20 +88,22 @@ def run(
     (as U+FFFD) instead of aborting the harness.
     """
 
-    def limits() -> None:
-        if mem_mb:
-            lim = mem_mb * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
+    # The address-space limit is applied with `prlimit` rather than a `preexec_fn`: a
+    # `preexec_fn` forces fork+exec of the (large) harness process, which is ~20x slower than
+    # the posix_spawn path subprocess uses otherwise.
+    if mem_mb and shutil.which("prlimit"):
+        argv_exec = ["prlimit", f"--as={mem_mb * 1024 * 1024}", "--", *argv]
+    else:
+        argv_exec = argv
 
     t0 = time.monotonic()
     before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
     try:
         p = subprocess.run(
-            argv,
+            argv_exec,
             input=stdin.encode() if stdin is not None else None,
             capture_output=True,
             timeout=timeout,
-            preexec_fn=limits,
             cwd=cwd,
         )
         out, err, code, to = p.stdout, p.stderr, p.returncode, False
