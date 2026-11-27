@@ -1,0 +1,9 @@
+exit: 0
+--- stdout
+--- stderr
+Entering function: main
+  switch i32 1, label %d [
+    i32 1, label %a
+  ], !prof !1 jump to %a
+  ret i32 0
+Exiting function: main

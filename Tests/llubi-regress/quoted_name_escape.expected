@@ -1,0 +1,7 @@
+exit: 3
+--- stdout
+--- stderr
+Entering function: main
+  %v = load i32, ptr @"\01x", align 4 => i32 3
+  ret i32 %v
+Exiting function: main

@@ -1,0 +1,7 @@
+exit: 1
+--- stdout
+--- stderr
+Entering function: main
+Entering function: f
+Unrecognized instruction:   %s = call double @sin(double 1.000000e+00) #0
+error: Execution of function 'main' failed.

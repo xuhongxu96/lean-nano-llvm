@@ -54,6 +54,12 @@ NORMALIZERS: list[Normalizer] = [
     Normalizer("object-base-case", "P9", "llubi prints `Object base:` of memory-intrinsic "
                "out-of-bounds reports in lowercase hex (`0xb0`); we print uppercase",
                llubi=((r"(Object base: 0x)([0-9a-f]+)", lambda m: m.group(1) + m.group(2).upper()),)),
+    Normalizer("assumption-size-signed", "P11", "llubi prints the size of a `dereferenceable` "
+               "assume bundle as a signed integer (`dereferenceable(-1)`); we print it unsigned",
+               ours=((r"dereferenceable\((18446744073709551615)\) assumption", "dereferenceable(-1) assumption"),)),
+    Normalizer("alloca-size-dot", "P12", "the alloca-size UB messages end with an extra `.`",
+               ours=((r"^(Immediate UB detected: Alloca with allocation size that (?:exceeds the maximum "
+                      r"object size|overflows uint64_t)\. Size: \d+)\.$", r"\1"),)),
     Normalizer("signature-mismatch-dot", "P8", "the mismatched-signature UB message ends with an extra `.`",
                ours=((r"(mismatched signature\. Expected: .*)\.$", r"\1"),)),
 ]
@@ -171,6 +177,18 @@ def float_values_differ_in_quiet_bit(*, ldiff: str, odiff: str, **_) -> bool:
         all(int(x, 16) ^ int(y, 16) in (0, 0x00400000) for x, y in zip(a, b))
 
 
+def same_ub_point(*, llubi: str, ours: str, ldiff: str, odiff: str, **_) -> bool:
+    """Both sides report immediate UB at the same point (identical traces up to the UB line) and
+    nothing differs after it: the outcome (UB) agrees and only the stated reason differs."""
+    if not (ldiff.startswith("Immediate UB detected:") and odiff.startswith("Immediate UB detected:")):
+        return False
+    la, lo = llubi.splitlines(), ours.splitlines()
+    try:
+        i, j = la.index(ldiff), lo.index(odiff)
+    except ValueError:
+        return False
+    return i == j and la[:i] == lo[:j] and la[i + 1:] == lo[j + 1:]
+
 DENORMAL_GROUP = r"^attributes #\d+ = \{[^}]*denormal_fpenv"
 FP_RESULT = r"=> (?:half|bfloat|float|double|<\d+ x (?:half|bfloat|float|double)>|\{)|=> poison"
 
@@ -217,6 +235,29 @@ LLUBI_RULES: list[Rule] = [
          "!range metadata with several ranges is ignored",
          module_re=r"^!\d+ = !\{i\d+ -?\d+, i\d+ -?\d+, i\d+", ldiff_re=r"!range !\w+ => poison",
          odiff_re=r"!range !\w+ => (?!poison)"),
+    Rule("B8-ppc_fp128-conversion", "ours-semantic-bug", "B8",
+         "conversions into ppc_fp128 (fpext, sitofp, uitofp) produce an encoding other than LLVM's "
+         "double-double layout (high double in the low 64 bits)",
+         odiff_re=r"= (fpext|sitofp|uitofp) [^=]* to ppc_fp128 =>", ldiff_re=r"=> ppc_fp128 "),
+    Rule("B9-defined-allocator", "ours-semantic-bug", "B9",
+         "a call to a module-defined @malloc/@calloc/operator new is replaced by the builtin allocator instead "
+         "of executing the definition",
+         ldiff_re=r"^Entering function: (malloc|calloc|_Zn[wa][jm])$",
+         module_re=r"^define [^@]*@(malloc|calloc|_Zn[wa][jm])\("),
+    # --- same outcome (immediate UB at the same instruction), different stated reason ---------
+    Rule("B1-metadata-order-diagnostic", "ours-trace-format", "B1",
+         "load metadata: llubi applies poison-generating !align/!nonnull/!range before the UB checks "
+         "!dereferenceable(_or_null)/!noundef and reports the poison; we check in attachment order "
+         "and report the original value. Both are UB at the same load (the B1 ordering bug, with "
+         "no observable consequence here)",
+         ldiff_re=r"Immediate UB detected: The value poison violates !(noundef|dereferenceable)",
+         odiff_re=r"Immediate UB detected: The value (?!poison).* violates !(dereferenceable|dereferenceable_or_null)",
+         pred=same_ub_point),
+    Rule("ub-reason-differs", "ours-trace-format", "P10",
+         "both sides report immediate UB at the same instruction with a different reason (e.g. "
+         "llubi checks a library call's arguments for poison before reading its C-string "
+         "arguments; we read the string first); the outcome agrees",
+         pred=same_ub_point),
     # --- we do not implement a feature the oracle executes ---------------------------------------
     Rule("libcall-not-modelled", "ours-unsupported", None,
          "llubi models this external (C library) function and continues or reports UB in it; we "

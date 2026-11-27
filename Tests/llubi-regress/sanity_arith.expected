@@ -1,0 +1,9 @@
+exit: 63
+--- stdout
+--- stderr
+Entering function: main
+  %a = add nsw i32 40, 2 => i32 42
+  %b = mul i32 %a, 3 => i32 126
+  %c = udiv i32 %b, 2 => i32 63
+  ret i32 %c
+Exiting function: main
