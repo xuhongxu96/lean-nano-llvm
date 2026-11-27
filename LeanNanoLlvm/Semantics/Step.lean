@@ -1,5 +1,5 @@
 import LeanNanoLlvm.Util.Config
-import LeanNanoLlvm.Util.Undef
+import LeanNanoLlvm.Util.Oracle
 import LeanNanoLlvm.Util.AssocMap
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.AST.DataLayout

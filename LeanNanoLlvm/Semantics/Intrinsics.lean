@@ -1504,11 +1504,11 @@ def evalNonAllocLibcall? (dl : DataLayout) (mem : MemoryState)
           | none => .error (.immediateUB "freeing a pointer with nullary provenance.")
           | some mo =>
             if p.addr.toNat != mo.baseAddr then
-              .error (.immediateUB s!"freeing a pointer that does not point to the start of an allocation. Pointer address: 0x{MemoryState.hexStr p.addr.toNat}, allocation base: 0x{MemoryState.hexStr mo.baseAddr}.")
+              .error (.immediateUB s!"freeing a pointer that does not point to the start of an allocation. Pointer address: 0x{Hex.upper p.addr.toNat}, allocation base: 0x{Hex.upper mo.baseAddr}.")
             else if mo.state == .freed then
-              .error (.immediateUB s!"double-freeing a memory object allocated at 0x{MemoryState.hexStr mo.baseAddr}.")
+              .error (.immediateUB s!"double-freeing a memory object allocated at 0x{Hex.upper mo.baseAddr}.")
             else if !mo.isHeap then
-              .error (.immediateUB s!"freeing a non-heap allocation at 0x{MemoryState.hexStr mo.baseAddr}.")
+              .error (.immediateUB s!"freeing a non-heap allocation at 0x{Hex.upper mo.baseAddr}.")
             else
               .ok (.void, mem.freeObject mo.allocId)
       | _ => .error (.staticError "free/delete expects pointer argument")

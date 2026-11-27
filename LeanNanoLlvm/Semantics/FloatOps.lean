@@ -1,7 +1,7 @@
 import LeanNanoLlvm.Util.Poison
 import LeanNanoLlvm.Util.Config
 import LeanNanoLlvm.Util.IEEEFloat
-import LeanNanoLlvm.Util.Undef
+import LeanNanoLlvm.Util.Oracle
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.Tactic
 

@@ -59,7 +59,7 @@ theorem ret_add_x_0_is_refined_by_ret_x_generic (w : Nat) :
 
 The project is organized into a layered acyclic architecture under `LeanNanoLlvm/`:
 
-1. `LeanNanoLlvm/Util`: `AssocMap.lean` (kernel-reducible association map), `Config.lean` (`SemanticsConfig`, `UndefMode`, `ExecError`), `IEEEFloat.lean`, `Poison.lean`, `Undef.lean` (`NondetOracle`, `OracleState`).
+1. `LeanNanoLlvm/Util`: `AssocMap.lean` (kernel-reducible association map), `Config.lean` (`SemanticsConfig`, `UndefMode`, `ExecError`), `IEEEFloat.lean`, `Poison.lean`, `Oracle.lean` (`NondetOracle`, `OracleState`).
 2. `LeanNanoLlvm/AST`: `AST.lean` (plain `Nat` widths, named types, `TopLevel.resolveTypes`), `DataLayout.lean`, `Print.lean`, `Syntax.lean` (`[llvm-*| ...]` quasiquoters with `i$(w)` antiquotation), `Unexpander.lean`, `Parser.lean` (standalone `.ll` text parser).
 3. `LeanNanoLlvm/Semantics`:
    - `IntOps.lean` (bitvector ops & `icmp`) → `FloatOps.lean` → `Memory.lean` (`MemoryState`, `AllocSpec`, `MemoryInjection`, `MemoryState.IsRefinedBy`) → `Value.lean` (`RegisterValue`, serialization, `FreezeRel`, `UndefValRel`, pure/oracle evaluators)

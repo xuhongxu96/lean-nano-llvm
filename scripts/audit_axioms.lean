@@ -1,14 +1,12 @@
 import Lean
 import LeanNanoLlvm
-import LeanNanoLlvm.AST.Test
-import LeanNanoLlvm.Semantics.Test
-import LeanNanoLlvm.Refinement.Test
+import Tests
 import Main
 
 /-!
 # Transitive Axiom Audit
 
-Verifies that every constant across every project module (`LeanNanoLlvm.*` and `Main`)
+Verifies that every constant across every project module (`LeanNanoLlvm.*`, `Tests.*` and `Main`)
 depends ONLY on the three standard Lean 4 axioms:
   `{propext, Classical.choice, Quot.sound}`
 (no `sorryAx`, no `Lean.ofReduceBool` / `native_decide`, no custom axioms).
@@ -26,7 +24,7 @@ def allowedAxioms : Array Name :=
   let mut state : CollectAxioms.State := {}
   for modIdx in [:env.header.moduleNames.size] do
     let modName := env.header.moduleNames[modIdx]!
-    if modName == `Main || modName.getRoot == `LeanNanoLlvm then
+    if modName == `Main || modName.getRoot == `LeanNanoLlvm || modName.getRoot == `Tests then
       modCount := modCount + 1
       let modData := env.header.moduleData[modIdx]!
       for cName in modData.constNames do
@@ -43,7 +41,7 @@ def allowedAxioms : Array Name :=
     let mut shown := 0
     for modIdx in [:env.header.moduleNames.size] do
       let modName := env.header.moduleNames[modIdx]!
-      if modName == `Main || modName.getRoot == `LeanNanoLlvm then
+      if modName == `Main || modName.getRoot == `LeanNanoLlvm || modName.getRoot == `Tests then
         let modData := env.header.moduleData[modIdx]!
         for cName in modData.constNames do
           if shown < 20 then

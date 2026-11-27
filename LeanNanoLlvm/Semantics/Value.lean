@@ -1,5 +1,5 @@
 import LeanNanoLlvm.Util.Config
-import LeanNanoLlvm.Util.Undef
+import LeanNanoLlvm.Util.Oracle
 import LeanNanoLlvm.Util.AssocMap
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.AST.DataLayout
@@ -7,7 +7,7 @@ import LeanNanoLlvm.AST.Print
 import LeanNanoLlvm.Semantics.IntOps
 import LeanNanoLlvm.Semantics.FloatOps
 import LeanNanoLlvm.Semantics.Memory
-import LeanNanoLlvm.Llubi.FloatFormat
+import LeanNanoLlvm.AST.FloatLiteral
 
 namespace LeanNanoLlvm.Semantics
 
@@ -106,7 +106,7 @@ def bitsValue (bits : List MemBit) : Nat :=
 def llubiByteChunk (bits : List MemBit) (full : Bool) (tags : List (Nat × Nat) := []) : String :=
   let allConcreteNoTag := bits.all fun | .concrete _ none => true | _ => false
   let allPoison := bits.all fun | .concrete .. => false | _ => true
-  if full && allConcreteNoTag then "0x" ++ Llubi.hexPadded 2 (bitsValue bits)
+  if full && allConcreteNoTag then "0x" ++ Hex.upperPadded 2 (bitsValue bits)
   else if full && allPoison then "0x!!"
   else
     let msbFirst := bits.reverse
@@ -165,7 +165,7 @@ def llubiStringAux (mem : MemoryState) (dl : DataLayout) (tags : List (Nat × Na
   | .bv w (.value b) => if w == 1 then (if b.toNat == 1 then "T" else "F") else s!"i{w} {b.toInt}"
   | .byte w bits => llubiByteString mem dl w bits tags
   | .float _ .poison => "poison"
-  | .float ft (.value f) => s!"{ft.print} {Llubi.llubiFloatString ft f}"
+  | .float ft (.value f) => s!"{ft.print} {FloatLiteral.llubiString ft f}"
   | .ptr _ .poison => "poison"
   | .ptr _ (.value p) => mem.ptrString p
   | .vector _ es => "{ " ++ ", ".intercalate (llubiStringList mem dl tags es) ++ " }"

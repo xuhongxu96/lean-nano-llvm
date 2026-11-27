@@ -1,9 +1,12 @@
 name = "lean-nano-llvm"
 version = "0.1.0"
-defaultTargets = ["lean-nano-llvm"]
+defaultTargets = ["lean-nano-llvm", "Tests"]
 
 [[lean_lib]]
 name = "LeanNanoLlvm"
+
+[[lean_lib]]
+name = "Tests"
 
 [[lean_exe]]
 name = "lean-nano-llvm"

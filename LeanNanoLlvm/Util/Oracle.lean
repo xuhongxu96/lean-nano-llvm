@@ -1,6 +1,12 @@
-/-
-Total nondeterminism oracle for executable LLVM IR interpretation (`undef`, `freeze`, FP nondeterminism).
+/-!
+# Nondeterminism oracle
+
+The executable interpreter resolves every nondeterministic choice (`undef` bits, `freeze`, NaN
+payloads, provenance tags, ...) by drawing from an `OracleState`. The relational semantics
+quantifies over all oracles; the `llubi` frontend feeds `std::mt19937_64` output.
 -/
+
+namespace LeanNanoLlvm
 
 /--
 A total nondeterminism oracle mapping draw indices to natural numbers.
@@ -92,3 +98,5 @@ def boolIf (cond : Bool) (o : OracleState) : Bool × OracleState :=
   if cond then o.nextBool else (false, o)
 
 end OracleState
+
+end LeanNanoLlvm

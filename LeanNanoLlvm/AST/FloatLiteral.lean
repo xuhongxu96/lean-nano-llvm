@@ -1,7 +1,8 @@
 import LeanNanoLlvm.AST.AST
+import LeanNanoLlvm.Util.Hex
 
 /-!
-# APFloat-compatible floating-point formatting
+# Floating-point literals in LLVM's textual formats
 
 Bit-exact re-implementations of the two LLVM routines that `llubi --verbose` relies on when
 printing floating-point numbers:
@@ -16,18 +17,8 @@ printing floating-point numbers:
 explicit-integer-bit 80-bit encoding that LLVM's `bitcastToAPInt` produces.
 -/
 
-namespace LeanNanoLlvm.Llubi
+namespace LeanNanoLlvm.AST.FloatLiteral
 
-open LeanNanoLlvm.AST
-
-/-- Upper-case hexadecimal digits of `n` (no prefix). -/
-def hexUpper (n : Nat) : String :=
-  String.ofList ((Nat.toDigits 16 n).map Char.toUpper)
-
-/-- `n` in upper-case hex, left-padded with zeros to `width` digits. -/
-def hexPadded (width n : Nat) : String :=
-  let s := hexUpper n
-  String.ofList (List.replicate (width - s.length) '0') ++ s
 
 /-- Number of significant bits of `n` (`APInt::getActiveBits`). -/
 def activeBits (n : Nat) : Nat := if n == 0 then 0 else Nat.log2 n + 1
@@ -116,7 +107,7 @@ def toStringFinite (neg : Bool) (mant : Nat) (exp2 : Int) (prec : Nat := 6) : St
   return out
 
 /-- `APFloat::toString(Str, 6, 0, false)` of an `IEEEFloat`. -/
-def toStringAP {fmt : FloatFormat} (x : IEEEFloat fmt) (prec : Nat := 6) : String :=
+def apToString {fmt : FloatFormat} (x : IEEEFloat fmt) (prec : Nat := 6) : String :=
   if x.isInf then if x.sign then "-Inf" else "+Inf"
   else if x.isNaN then "NaN"
   else if x.isZero then
@@ -125,8 +116,8 @@ def toStringAP {fmt : FloatFormat} (x : IEEEFloat fmt) (prec : Nat := 6) : Strin
     let (s, m, e) := x.toDyadic
     toStringFinite s m e prec
 
-/-- Parse back a string produced by `toStringAP` (mirrors `APFloat::convertFromString` with
-round-to-nearest-even for the strings `toStringAP` can produce). -/
+/-- Parse back a string produced by `apToString` (mirrors `APFloat::convertFromString` with
+round-to-nearest-even for the strings `apToString` can produce). -/
 def parseBack (fmt : FloatFormat) (str : String) : Option (IEEEFloat fmt) :=
   if str == "NaN" then some (IEEEFloat.qNaN fmt)
   else if str == "+Inf" then some (IEEEFloat.inf fmt false)
@@ -152,8 +143,8 @@ def parseBack (fmt : FloatFormat) (str : String) : Option (IEEEFloat fmt) :=
     | _ => none
 
 /-- `APFloat::toStringRoundTrip(Str, 6, 0, false)`: the decimal string if it round-trips. -/
-def toStringRoundTrip? {fmt : FloatFormat} (x : IEEEFloat fmt) : Option String :=
-  let s := toStringAP x
+def apToStringRoundTrip? {fmt : FloatFormat} (x : IEEEFloat fmt) : Option String :=
+  let s := apToString x
   match parseBack fmt s with
   | some y => if y.bits.toNat == x.bits.toNat then some s else none
   | none => none
@@ -175,7 +166,7 @@ def ppcDecimal? (bits : Nat) : Option String :=
   let loD := bits >>> 64
   if loD != 0 then none
   else
-    let str := toStringAP hiD
+    let str := apToString hiD
     if hiD.isNaN || hiD.isInf then some str
     else
       match parseBack .fp128 str with
@@ -184,28 +175,20 @@ def ppcDecimal? (bits : Nat) : Option String :=
       | none => none
 
 /-- `llubi` (`AnyValue::print`) rendering of a non-poison float payload (without the type). -/
-def llubiFloatString (ft : FloatType) (x : IEEEFloat ft.format) : String :=
+def llubiString (ft : FloatType) (x : IEEEFloat ft.format) : String :=
   if ft == .ppc_fp128 then
     match ppcDecimal? x.bits.toNat with
     | some s => s
-    | none => "0x" ++ hexPadded 32 x.bits.toNat
+    | none => "0x" ++ Hex.upperPadded 32 x.bits.toNat
   else
-  match toStringRoundTrip? x with
+  match apToStringRoundTrip? x with
   | some s => s
   | none =>
     let (bits, w) := bitcastBits ft x
-    "0x" ++ hexPadded ((w + 3) / 4) bits
+    "0x" ++ Hex.upperPadded ((w + 3) / 4) bits
 
-/-- LLVM `AsmWriter` rendering of a floating-point constant (`writeAPFloatInternal`). -/
-partial def asmFloatString (ft : FloatType) (x : IEEEFloat ft.format) : String :=
-  if ft == .ppc_fp128 then
-    let bits := x.bits.toNat
-    let hiD : IEEEFloat .double := IEEEFloat.ofNatBits (bits &&& ((1 <<< 64) - 1))
-    if (bits >>> 64) == 0 && (hiD.isInf || hiD.isNaN) then asmFloatString .double hiD
-    else match ppcDecimal? bits with
-      | some s => s
-      | none => "f0x" ++ hexPadded 32 bits
-  else
+/-- `writeAPFloatInternal` for a float of a non-`ppc_fp128` type. -/
+private def asmStringIEEE (ft : FloatType) (x : IEEEFloat ft.format) : String :=
   if x.isInf then (if x.sign then "-" else "+") ++ "inf"
   else if x.isNaN then
     let sgn := if x.sign then "-" else "+"
@@ -216,17 +199,29 @@ partial def asmFloatString (ft : FloatType) (x : IEEEFloat ft.format) : String :
       let s := if x.isSNaN then "s" else ""
       let p := payload &&& (fmt.quietBit - 1)
       let digits := max ((activeBits p + 3) / 4) 1
-      sgn ++ s ++ "nan(0x" ++ hexPadded digits p ++ ")"
+      sgn ++ s ++ "nan(0x" ++ Hex.upperPadded digits p ++ ")"
   else
-    let str := toStringAP x
+    let str := apToString x
     match parseBack ft.format str with
     | some y =>
       if y.bits.toNat == x.bits.toNat then str
       else
         let (bits, w) := bitcastBits ft x
-        "f0x" ++ hexPadded ((w + 3) / 4) bits
+        "f0x" ++ Hex.upperPadded ((w + 3) / 4) bits
     | none =>
       let (bits, w) := bitcastBits ft x
-      "f0x" ++ hexPadded ((w + 3) / 4) bits
+      "f0x" ++ Hex.upperPadded ((w + 3) / 4) bits
 
-end LeanNanoLlvm.Llubi
+/-- LLVM `AsmWriter` rendering of a floating-point constant (`writeAPFloatInternal`). A
+`ppc_fp128` whose low double is zero prints as its high double when that is infinite or NaN. -/
+def asmString (ft : FloatType) (x : IEEEFloat ft.format) : String :=
+  if ft == .ppc_fp128 then
+    let bits := x.bits.toNat
+    let hiD : IEEEFloat .double := IEEEFloat.ofNatBits (bits &&& ((1 <<< 64) - 1))
+    if (bits >>> 64) == 0 && (hiD.isInf || hiD.isNaN) then asmStringIEEE .double hiD
+    else match ppcDecimal? bits with
+      | some s => s
+      | none => "f0x" ++ Hex.upperPadded 32 bits
+  else asmStringIEEE ft x
+
+end LeanNanoLlvm.AST.FloatLiteral

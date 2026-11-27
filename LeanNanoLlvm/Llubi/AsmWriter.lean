@@ -1,5 +1,5 @@
 import LeanNanoLlvm.AST.Parser
-import LeanNanoLlvm.Llubi.FloatFormat
+import LeanNanoLlvm.AST.FloatLiteral
 
 /-!
 # Source-faithful LLVM `AsmWriter` emulation
@@ -39,7 +39,7 @@ def printLLVMName (sigil : String) (name : String) : String :=
   if needsQuote then
     let esc := name.foldl (fun acc c =>
       if c == '"' || c == '\\' || c.toNat < 32 || c.toNat > 126 then
-        acc ++ "\\" ++ hexPadded 2 (c.toNat % 256)
+        acc ++ "\\" ++ Hex.upperPadded 2 (c.toNat % 256)
       else acc.push c) ""
     sigil ++ "\"" ++ esc ++ "\""
   else sigil ++ name
@@ -289,7 +289,7 @@ def escapeCString (bytes : List Nat) : String :=
   bytes.foldl (fun acc b =>
     let ch := Char.ofNat b
     if b ≥ 32 && b < 127 && b != 92 && b != 34 then acc.push ch
-    else acc ++ "\\" ++ hexPadded 2 b) ""
+    else acc ++ "\\" ++ Hex.upperPadded 2 b) ""
 
 /-- Print an integer `v` as a signed value of width `w` (`APInt` printing). -/
 def signedOfWidth (w : Nat) (v : Int) : Int :=
@@ -321,14 +321,14 @@ partial def printConst (c : WCtx) (t : PTy) (v : CVal) : String :=
     | .int w | .byte w => toString (signedOfWidth w i)
     | .float ft =>
       match fpOf ft (.int i) with
-      | some f => asmFloatString ft f
+      | some f => FloatLiteral.asmString ft f
       | none => toString i
     | _ => toString i
   | .fpBits _ | .fpDec .. | .fpSpec .. =>
     match c.resolve t with
     | .float ft =>
       match fpOf ft v with
-      | some f => asmFloatString ft f
+      | some f => FloatLiteral.asmString ft f
       | none => "<float>"
     | _ => "<float>"
   | .str bs => "c\"" ++ escapeCString bs ++ "\""

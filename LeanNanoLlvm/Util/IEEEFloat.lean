@@ -1,4 +1,5 @@
 import LeanNanoLlvm.Util.Config
+import LeanNanoLlvm.Util.Hex
 
 namespace LeanNanoLlvm
 
@@ -618,10 +619,7 @@ def toStringHex (x : IEEEFloat fmt) : String :=
     let sgn := if x.sign then "-" else "+"
     s!"{sgn}{kind}"
   else
-    let hexDigits := (fmt.totalBits + 3) / 4
-    let raw := String.ofList (Nat.toDigits 16 x.bits.toNat)
-    let pad := String.ofList (List.replicate (hexDigits - raw.length) '0')
-    s!"0x{pad}{raw}"
+    "0x" ++ Hex.lowerPadded ((fmt.totalBits + 3) / 4) x.bits.toNat
 
 instance : ToString (IEEEFloat fmt) where
   toString := toStringHex

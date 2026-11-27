@@ -1,6 +1,7 @@
 import LeanNanoLlvm.Util.Config
-import LeanNanoLlvm.Util.Undef
+import LeanNanoLlvm.Util.Oracle
 import LeanNanoLlvm.Util.AssocMap
+import LeanNanoLlvm.Util.Hex
 import LeanNanoLlvm.AST.AST
 import LeanNanoLlvm.AST.DataLayout
 
@@ -727,10 +728,6 @@ def resolveObject? (mem : MemoryState) (ptr : Pointer) : Option MemoryObject :=
           else findExposed rest
       findExposed mem.exposedProvenances
 
-/-- Upper-case hexadecimal rendering (as `APInt::toStringUnsigned(.., 16)`). -/
-def hexStr (n : Nat) : String :=
-  String.ofList ((Nat.toDigits 16 n).map Char.toUpper)
-
 /-- Is `allocId` the memory object of an IR global value (global variable or function)? -/
 def isIRGlobalObject (mem : MemoryState) (allocId : AllocId) : Bool :=
   mem.globalAddrs.toList.any (fun (_, p) => p.prov == .concrete allocId) ||
@@ -771,7 +768,7 @@ def ptrString (mem : MemoryState) (p : Pointer) : String :=
       match p.prov with
       | .wildcard .. => "wildcard"
       | _ => "nullary"
-  s!"ptr 0x{hexStr addr} [{tag}]"
+  s!"ptr 0x{Hex.upper addr} [{tag}]"
 
 /--
 Verify whether a memory access of `accessSize` bytes with required `alignment` via `ptr` is valid.
@@ -789,15 +786,15 @@ def verifyMemAccess (mem : MemoryState) (ptr : Pointer) (accessSize alignment : 
     if mem.isInaccessible mo.allocId then
       .error (.immediateUB s!"Try to access an inaccessible memory object: {mem.ptrString ptr}.")
     else if badState then
-      .error (.immediateUB s!"Try to access a dead memory object at address 0x{hexStr ptr.addr.toNat}.")
+      .error (.immediateUB s!"Try to access a dead memory object at address 0x{Hex.upper ptr.addr.toNat}.")
     else if isStore && mo.isConstant then
       .error (.immediateUB s!"Try to write to a constant memory object: {mem.ptrString ptr}.")
     else
       let effAlign := max 1 alignment
       let addr := ptr.addr.toNat
-      let oob := s!"Memory access is out of bounds. Accessed size: {accessSize}, Address: 0x{hexStr addr}, Object base: 0x{hexStr mo.baseAddr}, Object size: {mo.size}."
+      let oob := s!"Memory access is out of bounds. Accessed size: {accessSize}, Address: 0x{Hex.upper addr}, Object base: 0x{Hex.upper mo.baseAddr}, Object size: {mo.size}."
       if addr % effAlign != 0 then
-        .error (.immediateUB s!"Misaligned memory access. Address: 0x{hexStr addr}, Required alignment: {effAlign}.")
+        .error (.immediateUB s!"Misaligned memory access. Address: 0x{Hex.upper addr}, Required alignment: {effAlign}.")
       else if accessSize > mo.size || addr < mo.baseAddr then
         .error (.immediateUB oob)
       else
