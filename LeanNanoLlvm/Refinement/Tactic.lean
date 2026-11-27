@@ -31,6 +31,13 @@ counterexample and is independent of this pipeline.
   emits a `Try this:` suggestion: `llvm_bv` followed by one bullet per leaf, in the order
   `llvm_bv` produces them, with the closer that proved the leaf, or `sorry` for a leaf left open.
   The suggested script skips the closer search, so it is also faster to re-check.
+* Use `llvm_refine??` to see the complete proof: the suggestion expands `llvm_intro`,
+  `llvm_symexec`, `llvm_bv` and `llvm_bool_cases` into the individual steps they took (each
+  symbolic step, every `PoisonOr`, branch, guard and Bool case split as a group of bullets, the
+  `simp` calls, and the closer of every leaf). The script replays on its own. It is long (tens to
+  hundreds of lines), so it is meant for reading and debugging rather than for committing.
+  Two helper tactics appear in it: `llvm_simp_after_step` (the simplification after each
+  symbolic step) and `llvm_poison_simp` (the poison-elimination `simp` pass).
 
 ## Closers
 
@@ -75,6 +82,22 @@ private def boolAtoms (max : Nat) : TacticM (Array Expr) := withMainContext do
       if cur.size < max && !cur.contains t && (← isBoolAtom t) then atoms.set (cur.push t)
   atoms.get
 
+/-- Parse tactic source text. Positions in the parsed text are relative to `src`; they are
+    replaced with synthetic positions at the current tactic, so that messages (e.g. linter
+    warnings) are not misplaced. -/
+private def parseTactic (src : String) : TacticM (TSyntax `tactic) := do
+  let info := SourceInfo.fromRef (← getRef)
+  let parsed ← ofExcept (Parser.runParserCategory (← getEnv) `tactic src)
+  return ⟨parsed.rewriteBottomUp (·.setInfo info)⟩
+
+/-- The closers `llvm_bool_cases` tries on each case, in order. -/
+private def boolCaseClosers : Array String := #[
+  "(simp_all; done)",
+  "(simp_all <;> grind; done)",
+  "(simp_all <;> bv_omega; done)",
+  "set_option linter.unusedSimpArgs false in (simp_all [BitVec.slt, BitVec.sle, BitVec.lt_def, \
+    BitVec.le_def, BitVec.toInt_eq_toNat_cond] <;> bv_omega; done)"]
+
 /-- `llvm_bool_cases` case-splits the main goal on up to three Bool atoms (see `isBoolAtom`),
     with the case as a hypothesis `hb : atom = true/false`, and tries to close every case with
     `simp_all`, `grind`, `bv_omega`, or `toInt` arithmetic. It fails unless all cases close. -/
@@ -87,15 +110,21 @@ elab "llvm_bool_cases" : tactic => do
       let nm := (← g.getDecl).lctx.getUnusedName `hb
       let (fvs, g') ← g.generalize #[{ expr := a, xName? := `b, hName? := nm }]
       let subs ← g'.cases fvs[0]!
+      recordStep g (subs.toList.map (·.mvarId)) s!"cases {nm} : {← g.withContext (ppExpr a)}"
       for sg in subs do next := next.push sg.mvarId
     setGoals next.toList
-  evalTactic (← `(tactic| all_goals (llvm_guard
-    first
-    | (simp_all; done)
-    | (simp_all <;> grind; done)
-    | (simp_all <;> bv_omega; done)
-    | (simp_all [BitVec.slt, BitVec.sle, BitVec.lt_def, BitVec.le_def,
-        BitVec.toInt_eq_toNat_cond] <;> bv_omega; done))))
+  for g in ← getGoals do
+    setGoals [g]
+    let mut closed := false
+    for src in boolCaseClosers do
+      let c ← parseTactic src
+      try
+        evalStep (← `(tactic| llvm_guard $c:tactic)) (display? := some src)
+        closed := true
+        break
+      catch _ => pure ()
+    if !closed then throwError "llvm_bool_cases: a case is left open"
+  setGoals []
 
 /-- The number of errors in the message log. -/
 private def errorCount : CoreM Nat :=
@@ -132,11 +161,7 @@ private def closers : Array String := #[
 private def tryClosers : TacticM (Option String) := do
   let g ← getMainGoal
   for src in closers do
-    -- Positions in the parsed text are relative to `src`; replace them with synthetic positions
-    -- at the current tactic, so that messages (e.g. linter warnings) are not misplaced.
-    let info := SourceInfo.fromRef (← getRef)
-    let parsed ← ofExcept (Parser.runParserCategory (← getEnv) `tactic src)
-    let c : TSyntax `tactic := ⟨parsed.rewriteBottomUp (·.setInfo info)⟩
+    let c ← parseTactic src
     let s ← saveState
     let nMsgs := (← errorCount)
     try
@@ -148,6 +173,10 @@ private def tryClosers : TacticM (Option String) := do
         evalTactic (← `(tactic| llvm_guard ($c:tactic; done)))
       if (← errorCount) != nMsgs then
         throwError "tryClosers: a closer logged an error (e.g. from the kernel)"
+      -- For `llvm_refine??`: `llvm_bool_cases` records its own steps on `g2`; record any other
+      -- closer as one step. `g` itself is replaced by `g2` without a visible step.
+      if src != "llvm_bool_cases" then recordStep g2.mvarId! [] src
+      recordStep g [g2.mvarId!] ""
       closeViaAuxLemma g g2
       setGoals []
       return some src
@@ -193,6 +222,96 @@ elab tk:"llvm_refine?" : tactic => do
   let sugg := if used.isEmpty then "llvm_bv" else "\n".intercalate lines.toList
   Lean.Meta.Tactic.TryThis.addSuggestion tk { suggestion := .string sugg }
     (origSpan? := some (← getRef)) (header := header)
+
+/-- One recorded step (see `recordStep`): `text` turned goal `goal` into the goals `outs`. -/
+private structure StepRecord where
+  goal : Name
+  outs : List Name
+  text : String
+
+/-- Remove the step records from the message log and return them, in order. -/
+private def takeStepRecords : CoreM (Array StepRecord) := do
+  let log ← Core.getMessageLog
+  let isRec (m : Message) := m.data.hasTag (· == scriptTag)
+  let mut recs := #[]
+  for m in log.unreported.toArray do
+    if isRec m then
+      match (← m.data.toString).splitOn "\x1f" with
+      | [g, outs, text] =>
+        let outs := if outs.isEmpty then [] else (outs.splitOn ",").map String.toName
+        recs := recs.push { goal := g.toName, outs, text }
+      | _ => pure ()
+  Core.setMessageLog
+    { log with unreported := (log.unreported.toArray.filter (!isRec ·)).toPArray' }
+  return recs
+
+/-- Indent the continuation lines of a (possibly multi-line) tactic. -/
+private def indentText (text ind : String) : String :=
+  ("\n" ++ ind ++ "    ").intercalate (text.splitOn "\n")
+
+/-- Render the script for goal `g`, starting at its `i`-th record, at indentation `ind`.
+    A goal with no further records is a leaf left open, rendered as `sorry`. `seen` collects the
+    goals rendered, so that unreachable records can be reported. -/
+private def renderGoal (m : Std.HashMap Name (Array StepRecord)) (skip : NameSet) :
+    Nat → Name → Nat → String → StateM (Array Name) (Array String)
+  | 0, _, _, ind => return #[ind ++ "sorry"]
+  | fuel + 1, g, i, ind => do
+    if i == 0 then modify (·.push g)
+    let rs := m.getD g #[]
+    let some r := rs[i]? | return #[ind ++ "sorry"]
+    let pre := if r.text.isEmpty then #[] else #[ind ++ indentText r.text ind]
+    -- Goals solved by unification while proving another goal get no case of their own.
+    match r.outs.filter (!skip.contains ·) with
+    | [] => return pre
+    | [o] =>
+      if o == g then return pre ++ (← renderGoal m skip fuel g (i + 1) ind)
+      else return pre ++ (← renderGoal m skip fuel o 0 ind)
+    | os => do
+      let mut acc := pre
+      for o in os do
+        let sub ← renderGoal m skip fuel o 0 (ind ++ "  ")
+        -- Turn the first line of the case into a bullet.
+        match sub.toList with
+        | [] => acc := acc.push (ind ++ "· skip")
+        | l :: ls => acc := acc.push (ind ++ "· " ++ l.drop (ind.length + 2)) ++ ls.toArray
+      return acc
+
+/-- `llvm_refine??` behaves like `llvm_refine` and emits a `Try this:` suggestion with the
+    complete proof it found, with `llvm_intro`, `llvm_symexec`, `llvm_bv` and `llvm_bool_cases`
+    expanded into the individual steps they took: the symbolic-execution steps, the
+    `PoisonOr` and branch case splits, the guard splits, the `simp` calls, and the closer of
+    every leaf. Every case split becomes a group of bullets. A leaf left open is `sorry`. -/
+elab tk:"llvm_refine??" : tactic => do
+  let root ← getMainGoal
+  let s ← saveState
+  try
+    withOptions (fun o => o.setBool `llvm.recordScript true) (discard runRefine)
+  catch e =>
+    restoreState s
+    throw e
+  let recs ← takeStepRecords
+  let mut m : Std.HashMap Name (Array StepRecord) := {}
+  for r in recs do
+    m := m.insert r.goal ((m.getD r.goal #[]).push r)
+  -- A produced goal that has no step of its own but is assigned was solved by unification.
+  let mut skip : NameSet := {}
+  for r in recs do
+    for o in r.outs do
+      if !m.contains o && (← MVarId.isAssigned ⟨o⟩) then skip := skip.insert o
+  let (lines, seen) := (renderGoal m skip (recs.size + 1) root.name 0 "").run #[]
+  let unreached := (recs.filter (!seen.contains ·.goal)).size
+  let nOpen := (lines.filter (·.trimLeft.endsWith "sorry")).size
+  let mut header := ""
+  if nOpen > 0 then header := header ++ s!"{nOpen} leaf goal(s) left open, marked `sorry`.\n"
+  if unreached > 0 then
+    header := header ++ s!"Warning: {unreached} recorded step(s) could not be placed in the \
+      script; it may not replay.\n"
+  -- The recorded `simp` calls use fixed lemma lists, so the unused-argument linter would flag
+  -- many of them in the pasted script.
+  let script := "set_option linter.unusedSimpArgs false in\n" ++
+    "\n".intercalate (lines.toList.map ("  " ++ ·))
+  Lean.Meta.Tactic.TryThis.addSuggestion tk { suggestion := .string script }
+    (origSpan? := some (← getRef)) (header := header ++ "Try this:")
 
 end Tactic
 

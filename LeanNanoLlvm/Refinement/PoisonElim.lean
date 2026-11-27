@@ -116,7 +116,7 @@ private def tryRt (x : TacticM Unit) : TacticM Bool := do
 /-- Run a tactic on the main goal; report whether it closed it. -/
 private def closesWith (stx : TacticM Syntax) : TacticM Bool := do
   let s ← saveState
-  let ok ← tryRt (do evalTactic (← stx); if !(← getGoals).isEmpty then throwError "open")
+  let ok ← tryRt (do evalStep (← stx); if !(← getGoals).isEmpty then throwError "open")
   if !ok then restoreState s
   return ok
 
@@ -141,12 +141,12 @@ private def splitPoisonLocals : Nat → TacticM Unit
   | fuel + 1 => do
   let some nm ← findPoisonOrLocal | return
   let id := mkIdent nm
-  evalTactic (← `(tactic| cases $id:ident using PoisonOr.casesOn'))
+  evalStep (← `(tactic| cases $id:ident using PoisonOr.casesOn'))
   let mut gs ← getGoals
   -- `casesOn'` yields `[poison, value]`; give the value the argument's name.
   if let [gp, gv] := gs then
     setGoals [gv]
-    discard <| tryRt (evalTactic (← `(tactic| rename_i $id:ident)))
+    discard <| tryRt (evalStep (← `(tactic| rename_i $id:ident)))
     gs := gp :: (← getGoals)
   let mut out := #[]
   for g in gs do
@@ -155,12 +155,15 @@ private def splitPoisonLocals : Nat → TacticM Unit
     out := out ++ (← getGoals)
   setGoals out.toList
 
-/-- One `simp` pass with `simp_llvm` and the poison-elimination rules. -/
-private def poisonSimp : TacticM Unit := do
-  discard <| tryRt (evalTactic (← `(tactic|
+/-- `llvm_poison_simp` is one `simp` pass with `simp_llvm` and the poison-elimination rules. -/
+macro "llvm_poison_simp" : tactic => `(tactic|
     simp (config := { contextual := true })
       [simp_llvm, PoisonOr.isRefinedBy_ite_left, PoisonOr.isRefinedBy_ite_left_intW,
-       PoisonOr.isRefinedBy_ite_right_intW, PoisonOr.isRefinedBy_value_poison, handleFMF])))
+       PoisonOr.isRefinedBy_ite_right_intW, PoisonOr.isRefinedBy_value_poison, handleFMF])
+
+/-- One `simp` pass with `simp_llvm` and the poison-elimination rules. -/
+private def poisonSimp : TacticM Unit := do
+  discard <| tryRt (evalStep (← `(tactic| llvm_poison_simp)))
 
 /-- Close the main goal if it is immediate, using only cheap, reducible-transparency closers. -/
 private def closeImmediate : TacticM Bool := do
@@ -187,12 +190,12 @@ private def findClosedIteCond (e : Expr) : Option Expr :=
 private def decomposeStep : TacticM Bool := withMainContext do
   let tgt ← whnfR (← instantiateMVars (← getMainTarget))
   if tgt.isAppOf ``And then
-    evalTactic (← `(tactic| apply And.intro))
+    evalStep (← `(tactic| apply And.intro))
     return true
   if tgt.isArrow && !tgt.isAppOf ``Not then
     let nm := (← getLCtx).getUnusedName `h
     let id := mkIdent nm
-    evalTactic (← `(tactic| intro $id:ident))
+    evalStep (← `(tactic| intro $id:ident))
     return true
   return false
 
@@ -219,13 +222,14 @@ private def reduceGoal : Nat → TacticM (List MVarId)
     let hId := mkIdent nm
     let ok ← tryRt do
       let (gt, gf) ← g.byCases c nm
+      recordStep g [gt.mvarId, gf.mvarId] s!"by_cases {nm} : {← g.withContext (ppExpr c)}"
       setGoals [gt.mvarId, gf.mvarId]
     if ok then
       let gs ← getGoals
       let mut out := #[]
       for g in gs do
         setGoals [g]
-        discard <| tryRt (evalTactic (← `(tactic| simp only [$hId:ident, ↓reduceIte, ↓reduceDIte])))
+        discard <| tryRt (evalStep (← `(tactic| simp only [$hId:ident, ↓reduceIte, ↓reduceDIte])))
         if (← getGoals).isEmpty then continue
         poisonSimp
         if (← getGoals).isEmpty then continue
@@ -234,7 +238,7 @@ private def reduceGoal : Nat → TacticM (List MVarId)
     restoreState s
   -- Otherwise split a remaining `match`.
   let s ← saveState
-  if ← tryRt (evalTactic (← `(tactic| split))) then
+  if ← tryRt (evalStep (← `(tactic| split))) then
     let gs ← getGoals
     let mut out := #[]
     for g in gs do
@@ -254,7 +258,7 @@ private def reduceValueGoal : TacticM (List MVarId) := do
       | exact RegisterValue.IsRefinedBy.refl _
       | (llvm_simp; exact RegisterValue.IsRefinedBy.refl _)) then
     return []
-  discard <| tryRt (evalTactic (← `(tactic|
+  discard <| tryRt (evalStep (← `(tactic|
     first
     | rw [RegisterValue.isRefinedBy_bv_iff_poisonOr]
     | rw [RegisterValue.isRefinedBy_float_iff_poisonOr])))

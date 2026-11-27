@@ -49,6 +49,49 @@ elab "llvm_guard " t:tacticSeq : tactic => do
     restoreState s
     if e.isRuntime then throwError "llvm_guard: {e.toMessageData}" else throw e
 
+/-! ### Script recording (for `llvm_refine??`)
+
+When the option `llvm.recordScript` is set, every step the pipeline takes is recorded as a
+surface tactic together with the goal it ran on and the goals it produced. `llvm_refine??`
+turns these records into a nested proof script. A record is an info message tagged
+`scriptTag`, so that backtracking (`restoreState`) discards the records of abandoned attempts
+together with the attempt itself; `llvm_refine??` removes the records from the message log
+before it finishes. Inside a recorded step, nested steps are not recorded. -/
+
+/-- The tag of a step record in the message log. -/
+def scriptTag : Name := `LeanNanoLlvm.Refinement.scriptStep
+
+/-- Are steps being recorded at this point (recording on, and not inside a recorded step)? -/
+def recordingScript : CoreM Bool := do
+  let o ← getOptions
+  return o.getBool `llvm.recordScript && !o.getBool `llvm.inStep
+
+/-- Record that `text` turned goal `g` into the goals `outs`. An empty `text` records that `g`
+    was replaced by `outs` without a visible step. -/
+def recordStep (g : MVarId) (outs : List MVarId) (text : String) : CoreM Unit := do
+  if !(← recordingScript) then return
+  let sep := "\x1f"
+  let enc := s!"{g.name}{sep}{",".intercalate (outs.map (toString ·.name))}{sep}{text}"
+  logInfo (.tagged scriptTag (MessageData.ofFormat (format enc)))
+
+/-- Source text of a tactic, with hygienic suffixes removed so that it can be pasted. -/
+def showTactic (stx : Syntax) : CoreM String := do
+  let stx := stx.rewriteBottomUp fun
+    | .ident info raw n pre => .ident info raw n.eraseMacroScopes pre
+    | s => s
+  return toString (← PrettyPrinter.ppTactic ⟨stx⟩)
+
+/-- `evalTactic`, recording the step (see above) when recording is on. `display?` overrides
+    the recorded text. -/
+def evalStep (stx : Syntax) (display? : Option String := none) : TacticM Unit := do
+  if !(← recordingScript) then return ← evalTactic stx
+  match ← getGoals with
+  | [] => evalTactic stx
+  | g :: rest =>
+    withOptions (fun o => o.setBool `llvm.inStep true) (evalTactic stx)
+    let outs := (← getGoals).filter (!rest.contains ·)
+    recordStep g outs (← match display? with | some d => pure d | none => showTactic stx)
+
 /-- Extract head definition names of `x` and `y` in `Definition.IsRefinedBy*` (when they are
     user-defined constants rather than raw `AST.Definition.mk` constructors). -/
 private def getRefinementDefConsts : TacticM (List Name) := do
@@ -82,13 +125,13 @@ private def destructArgHyps (fuel idx : Nat) (hargsId : Ident) : TacticM Unit :=
     let argId := mkIdent (Name.mkSimple s!"arg{idx}")
     let progressed ←
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           rcases $hargsId:ident with ⟨_, _, h_eq_args, ⟨$argId:ident, h_eq_val⟩, $hargsId:ident⟩;
           subst h_eq_val; subst h_eq_args))
         pure true
       catch _ =>
         try
-          evalTactic (← `(tactic| subst $hargsId:ident))
+          evalStep (← `(tactic| subst $hargsId:ident))
           pure false
         catch _ =>
           pure false
@@ -100,25 +143,25 @@ private def destructArgHyps (fuel idx : Nat) (hargsId : Ident) : TacticM Unit :=
     `initCallConfig` on both source and target to `.running` configurations. -/
 elab "llvm_intro" : tactic => do
   let defNames ← getRefinementDefConsts
-  evalTactic (← `(tactic|
+  evalStep (← `(tactic|
     dsimp only [HRefinement.IsRefinedBy, Refinement.IsRefinedBy, instHRefinementOfRefinement,
       Definition.IsRefinedBy, Definition.IsRefinedByWith, Definition.IsRefinedByIn]))
-  evalTactic (← `(tactic| refine ⟨rfl, ?_⟩))
+  evalStep (← `(tactic| refine ⟨rfl, ?_⟩))
   let initMemId := mkIdent `initMem
   let argsId := mkIdent `args
   let hwfMemId := mkIdent `hwfMem
   let hargsId := mkIdent `hargs
-  evalTactic (← `(tactic| intro $initMemId:ident $argsId:ident $hwfMemId:ident $hargsId:ident))
+  evalStep (← `(tactic| intro $initMemId:ident $argsId:ident $hwfMemId:ident $hargsId:ident))
   for nm in defNames do
     let id := mkIdent nm
-    try evalTactic (← `(tactic| dsimp only [$id:ident] at $hargsId:ident ⊢)) catch _ => pure ()
-  evalTactic (← `(tactic|
+    try evalStep (← `(tactic| dsimp only [$id:ident] at $hargsId:ident ⊢)) catch _ => pure ()
+  evalStep (← `(tactic|
     simp only [Semantics.Definition.ArgValuesWellFormed,
       RegisterValue.wellFormedForList_cons_iff, RegisterValue.wellFormedForList_nil_iff,
       RegisterValue.wellFormedFor_int_iff, RegisterValue.wellFormedFor_float_iff,
       RegisterValue.wellFormedFor_ptr_iff] at $hargsId:ident))
   destructArgHyps 32 0 hargsId
-  evalTactic (← `(tactic|
+  evalStep (← `(tactic|
     simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
       applyByValCopies, applyByValCopies.go, splitPhis,
       RegisterValue.matchesType, byvalDeferredAttrs, applyValueAttrsPure,
@@ -179,18 +222,17 @@ private def solveEvalPhis (fuel : Nat) : TacticM Unit := do
   | fuel + 1 =>
     let s ← saveState
     try
-      evalTactic (← `(tactic| exact fun _ => EvalPhis.nil_iff))
+      evalStep (← `(tactic| exact fun _ => EvalPhis.nil_iff))
     catch _ =>
       restoreState s
-      evalTactic (← `(tactic| intro res_phi; apply EvalPhis.cons_leaf_iff))
-      evalTactic (← `(tactic| (simp [List.find?, -Prod.mk.injEq, -Option.some.injEq]; rfl)))
-      evalTactic (← `(tactic| ((try llvm_step); rfl)))
+      evalStep (← `(tactic| intro res_phi; apply EvalPhis.cons_leaf_iff))
+      evalStep (← `(tactic| (simp [List.find?, -Prod.mk.injEq, -Option.some.injEq]; rfl)))
+      evalStep (← `(tactic| ((try llvm_step); rfl)))
       solveEvalPhis fuel
 
-/-- Simplify a `Config.IsRefinedBy` goal immediately after taking a symbolic step. -/
-private def simpAfterStep : TacticM Unit := do
-  try
-    evalTactic (← `(tactic|
+/-- `llvm_simp_after_step` simplifies a `Config.IsRefinedBy` goal right after a symbolic step:
+    it commits the step's frame and register updates and evaluates pure operations. -/
+macro "llvm_simp_after_step" : tactic => `(tactic| (
       (try simp only [liftBinaryPure_bv, evalIntBinaryScalarPure, evalDivRemUB_ite_poison]);
       simp only [finishRegInstr, finishVoidInstr, CallFrame.advance, CallFrame.jumpTo,
         MachineState.withFrames, MachineState.withFramesAndMemory,
@@ -205,19 +247,23 @@ private def simpAfterStep : TacticM Unit := do
         AST.LlvmType.scalarType, AST.FastMathFlags.any,
         Bool.or_self, Bool.false_eq_true, ↓reduceIte, ↓reduceDIte,
         beq_self_eq_true, Config.ofError]))
+
+/-- Simplify a `Config.IsRefinedBy` goal immediately after taking a symbolic step. -/
+private def simpAfterStep : TacticM Unit := do
+  try evalStep (← `(tactic| llvm_simp_after_step))
   catch _ => pure ()
 
 /-- Step the source (`cX`) side based on its O(1)-inspected `NextAction`. -/
 private def stepSourceAction (act : NextAction) : TacticM Bool := do
   match act with
   | .ub =>
-    try evalTactic (← `(tactic| exact Config.IsRefinedBy.of_ub_left)); return true
+    try evalStep (← `(tactic| exact Config.IsRefinedBy.of_ub_left)); return true
     catch _ => return false
   | .instr nm =>
     if nm == ``AST.Instruction.intBinaryOp then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_step_left
             ((Step.intBinaryOp_leaf_iff rfl rfl (by llvm_step; rfl) (by llvm_step; rfl) none _).mpr ⟨rfl, rfl⟩) ?_))
         simpAfterStep; return true
@@ -225,7 +271,7 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.icmp then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_step_left
             ((Step.icmp_leaf_iff rfl rfl (by llvm_step; rfl) (by llvm_step; rfl) none _).mpr ⟨rfl, rfl⟩) ?_))
         simpAfterStep; return true
@@ -233,7 +279,7 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.select then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_step_left
             ((Step.select_leaf_iff rfl rfl (by llvm_step; rfl) (by llvm_step; rfl) (by llvm_step; rfl) none _).mpr ⟨rfl, rfl⟩) ?_))
         simpAfterStep; return true
@@ -241,7 +287,7 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.conversionOp then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_step_left
             ((Step.conversionOp_leaf_iff rfl rfl (by llvm_step; rfl) (fun _ => rfl) none _).mpr ⟨rfl, rfl⟩) ?_))
         simpAfterStep; return true
@@ -249,7 +295,7 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.floatUnaryOp then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_step_left
             ((Step.floatUnaryOp_leaf_iff rfl rfl (by llvm_step; rfl)
               (fun o => evalFloatUnaryExec_fneg_no_nsz _ rfl _ (by decide) _ o) none _).mpr ⟨rfl, rfl⟩) ?_))
@@ -258,21 +304,21 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.freeze then
       let s ← saveState
       try
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_step_left))
-        evalTactic (← `(tactic| apply Step.freeze_bv_val rfl rfl))
-        focus (evalTactic (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_step_left))
+        evalStep (← `(tactic| apply Step.freeze_bv_val rfl rfl))
+        focus (evalStep (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
         simpAfterStep; return true
       catch _ => restoreState s; return false
     else return false
   | .term nm =>
     if nm == ``AST.Terminator.unreachable then
       let s ← saveState
-      try evalTactic (← `(tactic| exact Config.IsRefinedBy.of_unreachable_left rfl rfl rfl)); return true
+      try evalStep (← `(tactic| exact Config.IsRefinedBy.of_unreachable_left rfl rfl rfl)); return true
       catch _ => restoreState s; return false
     else if nm == ``AST.Terminator.ret then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_step_left
             ((Step.ret_top_leaf_iff rfl rfl rfl rfl (by llvm_step; rfl) none _).mpr ⟨rfl, rfl⟩) ?_))
         simpAfterStep; return true
@@ -280,7 +326,7 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Terminator.retVoid then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_step_left
             ((Step.retVoid_top_iff rfl rfl rfl rfl none _).mpr ⟨rfl, rfl⟩) ?_))
         simpAfterStep; return true
@@ -288,17 +334,17 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Terminator.br then
       let s ← saveState
       try
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_step_left))
-        evalTactic (← `(tactic| apply Step.br_det rfl rfl rfl))
-        evalTactic (← `(tactic| (simp [AST.Definition.findBlock?]; rfl)))
-        evalTactic (← `(tactic| (simp only [splitPhis]; rfl)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_step_left))
+        evalStep (← `(tactic| apply Step.br_det rfl rfl rfl))
+        evalStep (← `(tactic| (simp [AST.Definition.findBlock?]; rfl)))
+        evalStep (← `(tactic| (simp only [splitPhis]; rfl)))
         solveEvalPhis 16; simpAfterStep; return true
       catch _ => restoreState s; return false
     else if nm == ``AST.Terminator.condBr then
       let s ← saveState
       let isPoison ←
         try
-          evalTactic (← `(tactic|
+          evalStep (← `(tactic|
             apply Config.IsRefinedBy.of_canAbort;
             apply Step.condBr_poison_canAbort rfl rfl rfl;
             (try llvm_step); (try rfl); done))
@@ -309,11 +355,11 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
       if isPoison then return true
       let s2 ← saveState
       try
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_step_left))
-        evalTactic (← `(tactic| apply Step.condBr_val_det rfl rfl rfl))
-        evalTactic (← `(tactic| (llvm_step; rfl)))
-        evalTactic (← `(tactic| (simp [AST.Definition.findBlock?]; rfl)))
-        evalTactic (← `(tactic| (simp only [splitPhis]; rfl)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_step_left))
+        evalStep (← `(tactic| apply Step.condBr_val_det rfl rfl rfl))
+        evalStep (← `(tactic| (llvm_step; rfl)))
+        evalStep (← `(tactic| (simp [AST.Definition.findBlock?]; rfl)))
+        evalStep (← `(tactic| (simp only [splitPhis]; rfl)))
         solveEvalPhis 16; simpAfterStep; return true
       catch _ =>
         restoreState s2
@@ -322,7 +368,7 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
       let s ← saveState
       let isPoison ←
         try
-          evalTactic (← `(tactic|
+          evalStep (← `(tactic|
             apply Config.IsRefinedBy.of_canAbort;
             apply Step.switch_poison_canAbort rfl rfl rfl;
             (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done))
@@ -333,11 +379,11 @@ private def stepSourceAction (act : NextAction) : TacticM Bool := do
       if isPoison then return true
       let s2 ← saveState
       try
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_step_left))
-        evalTactic (← `(tactic| apply Step.switch_val_det rfl rfl rfl))
-        focus (evalTactic (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
-        evalTactic (← `(tactic| (simp [AST.Definition.findBlock?, List.find?, bitvec_ofInt_ofNat, bitvec_ofInt_negSucc]; rfl)))
-        evalTactic (← `(tactic| (simp only [splitPhis]; rfl)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_step_left))
+        evalStep (← `(tactic| apply Step.switch_val_det rfl rfl rfl))
+        focus (evalStep (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
+        evalStep (← `(tactic| (simp [AST.Definition.findBlock?, List.find?, bitvec_ofInt_ofNat, bitvec_ofInt_negSucc]; rfl)))
+        evalStep (← `(tactic| (simp only [splitPhis]; rfl)))
         solveEvalPhis 16; simpAfterStep; return true
       catch _ =>
         restoreState s2
@@ -352,7 +398,7 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     if nm == ``AST.Instruction.intBinaryOp then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_det_step_right
             (Step.intBinaryOp_leaf_iff rfl rfl (by llvm_step; rfl) (by llvm_step; rfl)) ?_))
         simpAfterStep; return true
@@ -360,7 +406,7 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.icmp then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_det_step_right
             (Step.icmp_leaf_iff rfl rfl (by llvm_step; rfl) (by llvm_step; rfl)) ?_))
         simpAfterStep; return true
@@ -368,7 +414,7 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.select then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_det_step_right
             (Step.select_leaf_iff rfl rfl (by llvm_step; rfl) (by llvm_step; rfl) (by llvm_step; rfl)) ?_))
         simpAfterStep; return true
@@ -376,7 +422,7 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.conversionOp then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_det_step_right
             (Step.conversionOp_leaf_iff rfl rfl (by llvm_step; rfl) (fun _ => rfl)) ?_))
         simpAfterStep; return true
@@ -384,7 +430,7 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.floatUnaryOp then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_det_step_right
             (Step.floatUnaryOp_leaf_iff rfl rfl (by llvm_step; rfl)
               (fun o => evalFloatUnaryExec_fneg_no_nsz _ rfl _ (by decide) _ o)) ?_))
@@ -393,9 +439,9 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Instruction.freeze then
       let s ← saveState
       try
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
-        evalTactic (← `(tactic| apply Step.freeze_bv_val_iff rfl rfl))
-        focus (evalTactic (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
+        evalStep (← `(tactic| apply Step.freeze_bv_val_iff rfl rfl))
+        focus (evalStep (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
         simpAfterStep; return true
       catch _ => restoreState s; return false
     else return false
@@ -403,7 +449,7 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     if nm == ``AST.Terminator.ret then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_det_step_right
             (Step.ret_top_leaf_iff rfl rfl rfl rfl (by llvm_step; rfl)) ?_))
         simpAfterStep; return true
@@ -411,7 +457,7 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Terminator.retVoid then
       let s ← saveState
       try
-        evalTactic (← `(tactic|
+        evalStep (← `(tactic|
           refine Config.IsRefinedBy.of_det_step_right
             (Step.retVoid_top_iff rfl rfl rfl rfl) ?_))
         simpAfterStep; return true
@@ -419,30 +465,30 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
     else if nm == ``AST.Terminator.br then
       let s ← saveState
       try
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
-        evalTactic (← `(tactic| apply Step.br_det_iff rfl rfl rfl))
-        evalTactic (← `(tactic| (simp [AST.Definition.findBlock?]; rfl)))
-        evalTactic (← `(tactic| (simp only [splitPhis]; rfl)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
+        evalStep (← `(tactic| apply Step.br_det_iff rfl rfl rfl))
+        evalStep (← `(tactic| (simp [AST.Definition.findBlock?]; rfl)))
+        evalStep (← `(tactic| (simp only [splitPhis]; rfl)))
         solveEvalPhis 16; simpAfterStep; return true
       catch _ => restoreState s; return false
     else if nm == ``AST.Terminator.condBr then
       let s ← saveState
       try
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
-        evalTactic (← `(tactic| apply Step.condBr_val_det_iff rfl rfl rfl))
-        evalTactic (← `(tactic| ((try llvm_step); rfl)))
-        evalTactic (← `(tactic| (simp [AST.Definition.findBlock?]; rfl)))
-        evalTactic (← `(tactic| (simp only [splitPhis]; rfl)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
+        evalStep (← `(tactic| apply Step.condBr_val_det_iff rfl rfl rfl))
+        evalStep (← `(tactic| ((try llvm_step); rfl)))
+        evalStep (← `(tactic| (simp [AST.Definition.findBlock?]; rfl)))
+        evalStep (← `(tactic| (simp only [splitPhis]; rfl)))
         solveEvalPhis 16; simpAfterStep; return true
       catch _ => restoreState s; return false
     else if nm == ``AST.Terminator.switch then
       let s ← saveState
       try
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
-        evalTactic (← `(tactic| apply Step.switch_val_det_iff rfl rfl rfl))
-        focus (evalTactic (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
-        evalTactic (← `(tactic| (simp [AST.Definition.findBlock?, List.find?, bitvec_ofInt_ofNat, bitvec_ofInt_negSucc]; rfl)))
-        evalTactic (← `(tactic| (simp only [splitPhis]; rfl)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
+        evalStep (← `(tactic| apply Step.switch_val_det_iff rfl rfl rfl))
+        focus (evalStep (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
+        evalStep (← `(tactic| (simp [AST.Definition.findBlock?, List.find?, bitvec_ofInt_ofNat, bitvec_ofInt_negSucc]; rfl)))
+        evalStep (← `(tactic| (simp only [splitPhis]; rfl)))
         solveEvalPhis 16; simpAfterStep; return true
       catch _ => restoreState s; return false
     else return false
@@ -452,13 +498,13 @@ private def stepTargetAction (act : NextAction) : TacticM Bool := do
 private def tryFinishHalted : TacticM Bool := do
   let s ← saveState
   try
-    evalTactic (← `(tactic| apply Config.IsRefinedBy.of_halted_same_mem))
+    evalStep (← `(tactic| apply Config.IsRefinedBy.of_halted_same_mem))
     return true
   catch _ =>
     restoreState s
     let s2 ← saveState
     try
-      evalTactic (← `(tactic| apply Config.IsRefinedBy.of_halted))
+      evalStep (← `(tactic| apply Config.IsRefinedBy.of_halted))
       return true
     catch _ =>
       restoreState s2
@@ -477,26 +523,26 @@ private def trySplitOnePoisonOr : TacticM Bool := do
     return none
   if let some nm := target? then
     let id := mkIdent nm
-    evalTactic (← `(tactic| cases $id:ident using PoisonOr.casesOn'))
+    evalStep (← `(tactic| cases $id:ident using PoisonOr.casesOn'))
     let mut gs ← getGoals
     -- `casesOn'` yields `[poison, value]`; the value keeps the argument's name.
     if let [gp, gv] := gs then
       setGoals [gv]
       try
-        evalTactic (← `(tactic| rename_i $id:ident))
+        evalStep (← `(tactic| rename_i $id:ident))
         gs := [gp] ++ (← getGoals)
       catch _ => pure ()
     let mut out : List MVarId := []
     for g in gs do
       setGoals [g]
-      try evalTactic (← `(tactic| llvm_simp)) catch _ => pure ()
+      try evalStep (← `(tactic| llvm_simp)) catch _ => pure ()
       simpAfterStep
       out := out ++ (← getGoals)
     setGoals out
     return true
   return false
 
-private theorem bitvec1_eq_zero_or_one (b : BitVec 1) : b = 0#1 ∨ b = 1#1 := by
+theorem bitvec1_eq_zero_or_one (b : BitVec 1) : b = 0#1 ∨ b = 1#1 := by
   rcases b with ⟨⟨v, hv⟩⟩
   match v, hv with
   | 0, _ => exact Or.inl rfl
@@ -517,13 +563,13 @@ private def trySplitOneBoolBv : TacticM Bool := do
     let id := mkIdent nm
     let s ← saveState
     try
-      evalTactic (← `(tactic|
+      evalStep (← `(tactic|
         rcases bitvec1_eq_zero_or_one $id:ident with h_bv1_eq | h_bv1_eq <;> subst h_bv1_eq))
       let gs ← getGoals
       let mut out : List MVarId := []
       for g in gs do
         setGoals [g]
-        try evalTactic (← `(tactic| llvm_simp)) catch _ => pure ()
+        try evalStep (← `(tactic| llvm_simp)) catch _ => pure ()
         simpAfterStep
         out := out ++ (← getGoals)
       setGoals out
@@ -540,13 +586,13 @@ private def condBrValue? (source : Bool) : TacticM (Option Expr) := do
   let s ← saveState
   let r ← try
       if source then
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_step_left))
-        evalTactic (← `(tactic| apply Step.condBr_val_det rfl rfl rfl))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_step_left))
+        evalStep (← `(tactic| apply Step.condBr_val_det rfl rfl rfl))
       else
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
-        evalTactic (← `(tactic| apply Step.condBr_val_det_iff rfl rfl rfl))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_det_step_right))
+        evalStep (← `(tactic| apply Step.condBr_val_det_iff rfl rfl rfl))
       let hcondTy ← (← getMainGoal).getType
-      evalTactic (← `(tactic| ((try llvm_step); rfl)))
+      evalStep (← `(tactic| ((try llvm_step); rfl)))
       -- `hcond : evalPureLeafExp? ... = some (.ok (.bv 1 (.value b)))`: read `b` from the rhs.
       let rhs := (← instantiateMVars hcondTy).appArg!
       let some b := (rhs.find? (·.isAppOfArity ``PoisonOr.value 2)).map (·.appArg!)
@@ -572,20 +618,21 @@ private def trySplitBranchValue (actX actY : NextAction) : TacticM Bool := do
   let some e := e? | return false
   let s ← saveState
   try
-    let g ← getMainGoal
-    let nm := (← g.getDecl).lctx.getUnusedName `h_br
+    let g0 ← getMainGoal
+    let nm := (← g0.getDecl).lctx.getUnusedName `h_br
     let hId := mkIdent nm
-    let g ← g.assert nm (← inferType (mkApp (mkConst ``bitvec1_eq_zero_or_one) e))
+    let g ← g0.assert nm (← inferType (mkApp (mkConst ``bitvec1_eq_zero_or_one) e))
       (mkApp (mkConst ``bitvec1_eq_zero_or_one) e)
     let (_, g) ← g.intro1P
+    recordStep g0 [g] s!"have {nm} := bitvec1_eq_zero_or_one ({← g0.withContext (ppExpr e)})"
     setGoals [g]
-    evalTactic (← `(tactic| rcases $hId:ident with $hId:ident | $hId:ident))
+    evalStep (← `(tactic| rcases $hId:ident with $hId:ident | $hId:ident))
     let gs ← getGoals
     let mut out : List MVarId := []
     for sg in gs do
       setGoals [sg]
-      evalTactic (← `(tactic| simp only [$hId:ident]))
-      try evalTactic (← `(tactic|
+      evalStep (← `(tactic| simp only [$hId:ident]))
+      try evalStep (← `(tactic|
         simp only [bitvec_ofBool_eq_zero, bitvec_ofBool_eq_one, bne_eq_false_iff_eq, bne_iff_ne,
           beq_eq_false_iff_ne, beq_iff_eq, Bool.and_eq_true, Bool.or_eq_true, Bool.and_eq_false_iff,
           Bool.or_eq_false_iff, Bool.not_eq_true', Bool.not_eq_false', decide_eq_true_eq,
@@ -599,7 +646,7 @@ private def trySplitBranchValue (actX actY : NextAction) : TacticM Bool := do
           lctx.anyM fun d' => do
             if d'.fvarId == d.fvarId || d'.isImplementationDetail then return false
             withReducible (isDefEq d'.type d.type)
-        if dup then evalTactic (← `(tactic| clear $hId:ident))
+        if dup then evalStep (← `(tactic| clear $hId:ident))
       catch _ => pure ()
       simpAfterStep
       out := out ++ (← getGoals)
@@ -619,9 +666,9 @@ private def tryStepFreezePoison (actX actY : NextAction) : TacticM Bool := do
       try
         let bId := mkIdent `b_frz
         let hmId := mkIdent `hmode_frz
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_freeze_poison_right rfl rfl))
-        focus (evalTactic (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
-        evalTactic (← `(tactic| intro $bId:ident $hmId:ident))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_freeze_poison_right rfl rfl))
+        focus (evalStep (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
+        evalStep (← `(tactic| intro $bId:ident $hmId:ident))
         simpAfterStep
         return true
       catch _ =>
@@ -633,18 +680,18 @@ private def tryStepFreezePoison (actX actY : NextAction) : TacticM Bool := do
       try
         let bId := mkIdent `b_frz
         let hmId := mkIdent `hmode_frz
-        evalTactic (← `(tactic| apply Config.IsRefinedBy.of_step_left))
-        evalTactic (← `(tactic| refine Step.freeze_bv_poison_step rfl rfl ?_ $bId:ident $hmId:ident))
-        focus (evalTactic (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
+        evalStep (← `(tactic| apply Config.IsRefinedBy.of_step_left))
+        evalStep (← `(tactic| refine Step.freeze_bv_poison_step rfl rfl ?_ $bId:ident $hmId:ident))
+        focus (evalStep (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
         simpAfterStep
         return true
       catch _ =>
         restoreState s1
         let s2 ← saveState
         try
-          evalTactic (← `(tactic| apply Config.IsRefinedBy.of_step_left))
-          evalTactic (← `(tactic| apply Step.freeze_bv_poison_zero rfl rfl))
-          focus (evalTactic (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
+          evalStep (← `(tactic| apply Config.IsRefinedBy.of_step_left))
+          evalStep (← `(tactic| apply Step.freeze_bv_poison_zero rfl rfl))
+          focus (evalStep (← `(tactic| (try simp [simp_step, -RegisterValue.bv.injEq]); (try rfl); done)))
           simpAfterStep
           return true
         catch _ =>
@@ -730,12 +777,12 @@ private def symexecLoop (fuel : Nat) : TacticM Unit := do
                           if let some condExpr := cond? then
                             let hName := mkIdent ((← getMainDecl).lctx.getUnusedName `h_ite_sym)
                             let condStx ← withMainContext (Lean.PrettyPrinter.delab condExpr)
-                            evalTactic (← `(tactic| by_cases $hName:ident : $condStx))
+                            evalStep (← `(tactic| by_cases $hName:ident : $condStx))
                             let gs ← getGoals
                             let mut out : List MVarId := []
                             for sg in gs do
                               setGoals [sg]
-                              try evalTactic (← `(tactic| simp only [$hName:ident, ↓reduceIte, not_false_eq_true])) catch _ => pure ()
+                              try evalStep (← `(tactic| simp only [$hName:ident, ↓reduceIte, not_false_eq_true])) catch _ => pure ()
                               simpAfterStep
                               out := out ++ (← getGoals)
                             setGoals out
