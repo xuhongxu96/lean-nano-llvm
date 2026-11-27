@@ -22,9 +22,8 @@ theorem not_icmp_slt_to_sge (w : Nat) :
       }
     ] := by
   llvm_refine
-  rename_i a b
-  by_cases h : a.toInt < b.toInt
-  · simp [BitVec.slt, BitVec.sle, h, show ¬(b.toInt ≤ a.toInt) by omega]
-  · simp [BitVec.slt, BitVec.sle, h, show b.toInt ≤ a.toInt by omega]
+  by_cases h : arg0.toInt < arg1.toInt
+  · simp [BitVec.slt, BitVec.sle, h, show ¬(arg1.toInt ≤ arg0.toInt) by omega]
+  · simp [BitVec.slt, BitVec.sle, h, show arg1.toInt ≤ arg0.toInt by omega]
 
 end LeanNanoLlvm.Tests.Rewrites

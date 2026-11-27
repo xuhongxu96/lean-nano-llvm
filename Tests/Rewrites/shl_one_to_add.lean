@@ -21,7 +21,7 @@ theorem shl_one_to_add (w : Nat) :
       }
     ] := by
   llvm_refine
-  intro h; cases w with
+  cases w with
   | zero => omega
   | succ n =>
     have h1 : 1 < 2 ^ (n + 1) := Nat.one_lt_two_pow (by omega)

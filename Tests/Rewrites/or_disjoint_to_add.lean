@@ -21,6 +21,6 @@ theorem or_disjoint_to_add (w : Nat) :
       }
     ] := by
   llvm_refine
-  intro h; exact (BitVec.add_eq_or_of_and_eq_zero _ _ h).symm
+  exact (BitVec.add_eq_or_of_and_eq_zero _ _ h).symm
 
 end LeanNanoLlvm.Tests.Rewrites

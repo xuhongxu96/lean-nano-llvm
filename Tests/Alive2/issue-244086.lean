@@ -33,12 +33,11 @@ theorem issue_244086 :
       }
     ] := by
   llvm_refine
-  rename_i x
-  have heven : ((x + 1#32) * x).toNat % 2 = 0 := by
+  have heven : ((arg0 + 1#32) * arg0).toNat % 2 = 0 := by
     simp only [BitVec.toNat_mul, BitVec.toNat_add, BitVec.toNat_ofNat]
-    have : x.toNat % 2 = 0 ∨ x.toNat % 2 = 1 := by omega
+    have : arg0.toNat % 2 = 0 ∨ arg0.toNat % 2 = 1 := by omega
     rcases this with h | h <;> simp [Nat.mul_mod, Nat.add_mod, h]
-  generalize hm : (x + 1#32) * x = m at heven ⊢
+  generalize hm : (arg0 + 1#32) * arg0 = m at heven ⊢
   apply BitVec.eq_of_toInt_eq
   rw [BitVec.toInt_sdiv_of_ne_or_ne m 2#32 (Or.inr (by decide)), BitVec.toInt_sshiftRight]
   have h2 : (2 : Int) ∣ m.toInt := by

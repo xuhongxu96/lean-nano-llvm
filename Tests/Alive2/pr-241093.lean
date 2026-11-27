@@ -51,8 +51,7 @@ theorem pr_241093_and (w : Nat) :
       }
     ] := by
   llvm_refine
-  rename_i x c1 c2
   rw [neg_one_eq_allOnes]; ext i hi; simp
-  cases x[i] <;> cases c1[i] <;> cases c2[i] <;> rfl
+  cases arg0[i] <;> cases arg1[i] <;> cases arg2[i] <;> rfl
 
 end LeanNanoLlvm.Tests.Alive2

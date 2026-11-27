@@ -33,8 +33,7 @@ theorem pr_230791 :
       }
     ] := by
   llvm_refine
-  rename_i a
-  have h1 : a ||| 4294967294#32 = if a.toNat % 2 = 0 then 4294967294#32 else 4294967295#32 := by
+  have h1 : arg0 ||| 4294967294#32 = if arg0.toNat % 2 = 0 then 4294967294#32 else 4294967295#32 := by
     ext i hi
     cases i with
     | zero =>
@@ -44,7 +43,7 @@ theorem pr_230791 :
       have hk1 := pr_230791_hi1 ⟨k, by omega⟩
       have hk2 := pr_230791_hi2 ⟨k, by omega⟩
       split <;> simp [hk1, hk2]
-  have h2 : (a - 1#32) &&& 4294967294#32 = if a.toNat % 2 = 0 then a - 2#32 else a - 1#32 := by
+  have h2 : (arg0 - 1#32) &&& 4294967294#32 = if arg0.toNat % 2 = 0 then arg0 - 2#32 else arg0 - 1#32 := by
     have hand : ∀ x : BitVec 32, (x &&& 4294967294#32) + (x &&& 1#32) = x := by
       intro x
       have hdisj : (x &&& 4294967294#32) &&& (x &&& 1#32) = 0#32 := by
@@ -55,13 +54,13 @@ theorem pr_230791 :
       ext i hi
       have ho := pr_230791_cov ⟨i, hi⟩
       simp only [BitVec.getElem_or, BitVec.getElem_and]; grind
-    have hbit : ((a - 1#32) &&& 1#32) = if a.toNat % 2 = 0 then 1#32 else 0#32 := by
+    have hbit : ((arg0 - 1#32) &&& 1#32) = if arg0.toNat % 2 = 0 then 1#32 else 0#32 := by
       apply BitVec.eq_of_toNat_eq
       rw [BitVec.toNat_and, show (1#32).toNat = 2 ^ 1 - 1 by rfl, Nat.and_two_pow_sub_one_eq_mod]
       split <;> bv_omega
-    have hs := hand (a - 1#32)
+    have hs := hand (arg0 - 1#32)
     rw [hbit] at hs
-    by_cases hp : a.toNat % 2 = 0 <;> simp only [hp, ↓reduceIte] at hs ⊢ <;> grind
+    by_cases hp : arg0.toNat % 2 = 0 <;> simp only [hp, ↓reduceIte] at hs ⊢ <;> grind
   rw [h1, h2]
   split <;> (apply BitVec.eq_of_toNat_eq; bv_omega)
 

@@ -33,9 +33,7 @@ theorem issue_42398 :
       }
     ] := by
   llvm_refine
-  all_goals
-    by_cases h9 : 9 < ‹BitVec 32›.toInt <;>
-      ((try simp [BitVec.slt] at *); (try simp [h9]);
-       (try (first | omega | (apply BitVec.eq_of_toInt_eq; simp; omega))))
+  by_cases h9 : 9 < arg0.toInt <;> (repeat' split) <;> simp_all [BitVec.slt] <;>
+    (apply BitVec.eq_of_toInt_eq; by_cases h9' : 9 < arg0.toInt <;> simp [h9'] <;> omega)
 
 end LeanNanoLlvm.Tests.Alive2

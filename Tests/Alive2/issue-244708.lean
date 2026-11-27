@@ -31,7 +31,7 @@ theorem issue_244708 :
       }
     ] := by
   llvm_refine <;> (
-    intro _; ext i hi
+    ext i hi
     have hcomp : (112#8)[i]'hi = !((143#8)[i]'hi) := by revert i hi; decide
     simp [hcomp]; grind)
 

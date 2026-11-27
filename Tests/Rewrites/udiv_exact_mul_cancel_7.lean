@@ -21,6 +21,6 @@ theorem udiv_exact_mul_cancel_7 :
       }
     ] := by
   llvm_refine
-  intro h; apply BitVec.eq_of_toNat_eq; simp [BitVec.toNat_eq] at h; simp; omega
+  apply BitVec.eq_of_toNat_eq; simp [BitVec.toNat_eq] at h; simp; omega
 
 end LeanNanoLlvm.Tests.Rewrites

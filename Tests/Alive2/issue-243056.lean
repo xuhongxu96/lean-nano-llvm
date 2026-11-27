@@ -42,30 +42,12 @@ theorem issue_243056 :
       }
     ] := by
   llvm_refine
-  rename_i x0 x1 y0 y1
-  have hsh : ∀ a : BitVec 8, BitVec.setWidth 16 a <<< 8 >>> 8 = BitVec.setWidth 16 a := by
-    intro a; apply BitVec.eq_of_toNat_eq
-    simp only [BitVec.toNat_ushiftRight, BitVec.toNat_shiftLeft, BitVec.toNat_setWidth,
-      Nat.shiftLeft_eq, Nat.shiftRight_eq_div_pow]
-    have := a.isLt; omega
-  have hdisj : ∀ a b : BitVec 8, BitVec.setWidth 16 a <<< 8 &&& BitVec.setWidth 16 b = 0#16 := by
-    intro a b; ext i hi
-    by_cases h8 : i < 8
-    · simp [h8]
-    · simp [h8]; intro _; exact BitVec.getLsbD_of_ge b i (by omega)
-  have hdisj1 : ∀ (a : BitVec 8) (b : BitVec 1),
-      BitVec.setWidth 16 a <<< 8 &&& BitVec.setWidth 16 b = 0#16 := by
-    intro a b; ext i hi
-    by_cases h8 : i < 8
-    · simp [h8]
-    · simp [h8]; intro _; exact BitVec.getLsbD_of_ge b i (by omega)
-  simp only [hsh, hdisj, hdisj1, not_true_eq_false, false_implies, true_implies, and_true]
-  rw [bv_or_eq_add_sub_and, hdisj1 y1 _, BitVec.sub_zero,
-      bv_or_eq_add_sub_and, hdisj x1 x0, BitVec.sub_zero,
-      bv_or_eq_add_sub_and, hdisj y1 y0, BitVec.sub_zero]
+  -- `h_2`, `h_3`, `h_4` say the `or disjoint` operands are disjoint, so each `or` is an `add`.
+  rw [bv_or_eq_add_sub_and, h_2, BitVec.sub_zero, bv_or_eq_add_sub_and, h_3, BitVec.sub_zero,
+    bv_or_eq_add_sub_and, h_4, BitVec.sub_zero]
   rw [Bool.eq_iff_iff]
   simp [BitVec.slt, BitVec.lt_def, BitVec.toInt_eq_toNat_cond, BitVec.toNat_add,
     BitVec.toNat_shiftLeft, BitVec.toNat_setWidth, Nat.shiftLeft_eq]
-  by_cases hcmp : x0.toNat < y0.toNat <;> simp [hcmp] <;> bv_omega
+  by_cases hcmp : arg0.toNat < arg2.toNat <;> simp [hcmp] <;> bv_omega
 
 end LeanNanoLlvm.Tests.Alive2

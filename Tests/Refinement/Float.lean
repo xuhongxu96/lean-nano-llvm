@@ -32,8 +32,6 @@ def fnegFnegDef : AST.Definition := [llvm-definition|
 
 theorem fneg_fneg_is_refined_by_id : fnegFnegDef ⊒ idFloatDef := by
   llvm_refine
-  simp [handleFMF, PoisonOr.IsRefinedBy] at *
-  subst_vars; exact ieeeFloat_neg_neg _
 
 private theorem handleDenormal_ieee (x : IEEEFloat FloatFormat.single) (b1 b2 : Bool) :
     handleDenormal .ieee b1 b2 x = x := by

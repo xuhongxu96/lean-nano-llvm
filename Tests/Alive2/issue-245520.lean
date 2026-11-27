@@ -29,9 +29,7 @@ theorem issue_245520 :
       }
     ] := by
   llvm_refine
-  rename_i x
-  refine ⟨fun h1 h2 _ _ _ => by bv_omega, fun hlt _ _ _ => ?_⟩
-  have hneg : -(1#64 <<< x.toNat) = (-1#64) <<< x.toNat := by
+  have hneg : -(1#64 <<< arg0.toNat) = (-1#64) <<< arg0.toNat := by
     rw [BitVec.shiftLeft_eq_mul_twoPow, BitVec.shiftLeft_eq_mul_twoPow, BitVec.one_mul,
       BitVec.neg_mul, BitVec.one_mul]
   rw [hneg, ← BitVec.shiftLeft_xor_distrib]; rfl

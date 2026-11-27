@@ -23,6 +23,6 @@ theorem icmp_ult_sub_nuw_cancel (w : Nat) :
       }
     ] := by
   llvm_refine
-  intro h1 h2; simp_all [BitVec.lt_def, BitVec.usubOverflow, BitVec.toNat_sub_of_not_usubOverflow, -BitVec.toNat_sub]; omega
+  simp_all [BitVec.lt_def, BitVec.usubOverflow, BitVec.toNat_sub_of_not_usubOverflow, -BitVec.toNat_sub]; omega
 
 end LeanNanoLlvm.Tests.Rewrites

@@ -30,9 +30,8 @@ theorem pr_221189 :
       }
     ] := by
   llvm_refine
-  rename_i x y
   simp only [BitVec.lt_def, BitVec.toNat_setWidth, BitVec.toNat_and]
-  have h1 : (y.toNat % 2 ^ 32) &&& (255#32).toNat = (y.toNat % 2 ^ 32) % 2 ^ 8 :=
+  have h1 : (arg1.toNat % 2 ^ 32) &&& (255#32).toNat = (arg1.toNat % 2 ^ 32) % 2 ^ 8 :=
     Nat.and_two_pow_sub_one_eq_mod _ 8
   rw [h1]; bv_omega
 

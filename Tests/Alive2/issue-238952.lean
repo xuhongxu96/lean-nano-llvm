@@ -31,17 +31,16 @@ theorem issue_238952 :
       }
     ] := by
   llvm_refine
-  rename_i a y
-  have hy0 : 0 < y.toNat := by
-    have : y.toNat ≠ 0 := by
+  have hy0 : 0 < arg1.toNat := by
+    have : arg1.toNat ≠ 0 := by
       intro h0; apply h_ite_sym; apply BitVec.eq_of_toNat_eq; simp [h0]
     omega
-  have hylt := y.isLt
+  have hylt := arg1.isLt
   simp only [BitVec.lt_def, BitVec.le_def, BitVec.toNat_udiv, BitVec.toNat_shiftLeft,
     BitVec.toNat_setWidth, BitVec.toNat_ofNat]
-  rw [Nat.mod_eq_of_lt (by omega : y.toNat < 2 ^ 32),
+  rw [Nat.mod_eq_of_lt (by omega : arg1.toNat < 2 ^ 32),
       Nat.shiftLeft_eq,
-      Nat.mod_eq_of_lt (by omega : y.toNat * 2 ^ 1 < 2 ^ 32)]
+      Nat.mod_eq_of_lt (by omega : arg1.toNat * 2 ^ 1 < 2 ^ 32)]
   rw [Nat.lt_div_iff_mul_lt hy0]; omega
 
 end LeanNanoLlvm.Tests.Alive2

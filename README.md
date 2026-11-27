@@ -89,10 +89,13 @@ The library `LeanNanoLlvm/` is layered; each layer imports only the ones above i
 
    The automation on top of it is split so that each piece rebuilds on its own:
    - `Lemmas`: well-formedness destructuring and the `simp_llvm` / `simp_step` lemmas.
-   - `Tactic`: `llvm_intro`, `llvm_symexec`, `llvm_vc` and `llvm_refine`.
-   - `PoisonElim`: `llvm_bv`, which removes poison and `select` case structure from the goals `llvm_symexec` leaves and keeps only pure `BitVec` / `Bool` / `IEEEFloat` subgoals, with the poison guards they depend on as named hypotheses. Use it when you want to finish a proof with bit-vector reasoning only.
+   - `Symexec`: `llvm_intro` (unpack the refinement goal, name the arguments `arg0`, `arg1`, ...) and `llvm_symexec` (symbolically execute both sides to the returned values).
+   - `PoisonElim`: `llvm_bv`, which removes poison and `select` case structure and leaves only pure `BitVec` / `Bool` / `IEEEFloat` goals, with the poison guards as hypotheses `h`, `h_1`, ....
+   - `Tactic`: `llvm_refine` = `llvm_bv` followed by automatic closers (`grind`, `bv_omega`, ...). Proof files import this module; it re-exports the layers above.
    - `Disprove`: the `llvm_disprove` front end, over `Disprove/Lemmas` (kernel-pure refutation lemmas), `Disprove/Search` (witness search on the interpreter) and `Disprove/Stepper` (witness certification).
    - The umbrella `LeanNanoLlvm.Refinement` re-exports all of them; proof files should not import it (see *Incremental builds* below).
+   **Which tactic to use.** Start every refinement proof with `llvm_refine`. Whatever it cannot close is exactly what `llvm_bv` leaves: plain `BitVec` goals over `arg0`, `arg1`, ... with named guards, to be finished with ordinary `BitVec` reasoning (tests do not use `bv_decide`). Call `llvm_intro; llvm_symexec` by hand only when symbolic execution needs a case split it cannot find itself, and finish each case with `llvm_refine`. Use `llvm_bv` directly to see the goals without running the closers. `llvm_disprove` is separate and refutes a refinement with a concrete counterexample.
+
 5. **`Tactic`**: the layered simp sets (`simp_llvm`, `simp_wellform`, `simp_step`) and tactics (`llvm_simp`, `llvm_wf`, `llvm_step`).
 6. **Frontends**: these are executable code outside the verified core.
    - `Run` implements `lean-nano-llvm run`.

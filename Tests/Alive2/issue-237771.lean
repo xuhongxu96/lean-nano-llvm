@@ -44,19 +44,18 @@ theorem issue_237771 :
     ] := by
   llvm_intro; llvm_symexec
   all_goals
-    rename_i c
-    cases hc1 : decide (c + 159#8 < 6#8)
+    cases hc1 : decide (arg0 + 159#8 < 6#8)
     · simp only [BitVec.ofBool, cond_false]; llvm_symexec
       apply RegisterValue.isRefinedBy_bv_of_poisonOr
-      have hnsw : (BitVec.setWidth 32 c).saddOverflow 4294967241#32 = false := by
-        have := c.isLt; simp [BitVec.saddOverflow, BitVec.toInt_eq_toNat_cond, BitVec.toNat_setWidth]; omega
+      have hnsw : (BitVec.setWidth 32 arg0).saddOverflow 4294967241#32 = false := by
+        have := arg0.isLt; simp [BitVec.saddOverflow, BitVec.toInt_eq_toNat_cond, BitVec.toNat_setWidth]; omega
       simp [simp_llvm, hnsw]
-      clear hnsw; revert c hc1 h_ite_sym; decide
+      clear hnsw; revert arg0 hc1 h_ite_sym; decide
     · simp only [BitVec.ofBool, cond_true]; llvm_symexec
       apply RegisterValue.isRefinedBy_bv_of_poisonOr
-      have hnsw : (BitVec.setWidth 32 c).saddOverflow 4294967209#32 = false := by
-        have := c.isLt; simp [BitVec.saddOverflow, BitVec.toInt_eq_toNat_cond, BitVec.toNat_setWidth]; omega
+      have hnsw : (BitVec.setWidth 32 arg0).saddOverflow 4294967209#32 = false := by
+        have := arg0.isLt; simp [BitVec.saddOverflow, BitVec.toInt_eq_toNat_cond, BitVec.toNat_setWidth]; omega
       simp [simp_llvm, hnsw]
-      clear hnsw; revert c hc1 h_ite_sym; decide
+      clear hnsw; revert arg0 hc1 h_ite_sym; decide
 
 end LeanNanoLlvm.Tests.Alive2

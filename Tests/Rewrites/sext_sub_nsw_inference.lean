@@ -25,7 +25,7 @@ theorem sext_sub_nsw_inference :
       }
     ] := by
   llvm_refine
-  intro h; simp [BitVec.ssubOverflow, BitVec.toInt_signExtend_of_le] at h
-  simp [BitVec.toInt_eq_toNat_cond] at h; bv_omega
+  simp [BitVec.ssubOverflow, BitVec.toInt_signExtend_of_le]
+  simp [BitVec.toInt_eq_toNat_cond]; bv_omega
 
 end LeanNanoLlvm.Tests.Rewrites

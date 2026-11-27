@@ -23,6 +23,7 @@ theorem smax_comm (w : Nat) :
       }
     ] := by
   llvm_refine
-  all_goals (apply BitVec.eq_of_toInt_eq; simp [BitVec.slt] at *; omega)
+  all_goals (repeat' split) <;> (try rfl) <;>
+    (apply BitVec.eq_of_toInt_eq; simp [BitVec.slt] at *; omega)
 
 end LeanNanoLlvm.Tests.Rewrites

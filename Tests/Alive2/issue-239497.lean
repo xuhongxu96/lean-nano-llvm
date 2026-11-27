@@ -32,10 +32,9 @@ theorem issue_239497 :
       }
     ] := by
   llvm_intro; llvm_symexec
-  rename_i x y
-  cases hg : (decide (x < y) && (0#32).slt x && (0#32).slt y)
-  · llvm_symexec; llvm_vc
-  · llvm_symexec; llvm_vc
+  cases hg : (decide (arg0 < arg1) && (0#32).slt arg0 && (0#32).slt arg1)
+  · llvm_refine
+  · llvm_refine
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hg
     have ⟨⟨hult, hx⟩, hy⟩ := hg
     simp [BitVec.slt, BitVec.lt_def, BitVec.toInt_eq_toNat_cond] at hult hx hy ⊢

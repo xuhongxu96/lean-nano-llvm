@@ -33,15 +33,14 @@ theorem pr_230796 :
       }
     ] := by
   llvm_refine
-  rename_i x
-  have h1 : (x &&& 8#32) = if x[3] = true then 8#32 else 0#32 := by
+  have h1 : (arg0 &&& 8#32) = if arg0[3] = true then 8#32 else 0#32 := by
     ext i hi
     simp only [BitVec.getElem_and]
     by_cases h3 : i = 3
     · subst h3; split <;> simp_all
     · have : (8#32)[i] = false := by revert i hi h3; decide
       split <;> simp [this]
-  have h2 : ((x + 8#32) &&& 4294967287#32) = if x[3] = true then x + 8#32 else x := by
+  have h2 : ((arg0 + 8#32) &&& 4294967287#32) = if arg0[3] = true then arg0 + 8#32 else arg0 := by
     have hsplit : ∀ y : BitVec 32, (y &&& 4294967287#32) + (y &&& 8#32) = y := by
       intro y
       have hdisj : (y &&& 4294967287#32) &&& (y &&& 8#32) = 0#32 := by
@@ -52,24 +51,24 @@ theorem pr_230796 :
       ext i hi
       have ho := pr_230796_cov ⟨i, hi⟩
       simp only [BitVec.getElem_or, BitVec.getElem_and]; grind
-    have hbit : (x + 8#32)[3] = !x[3] := by
+    have hbit : (arg0 + 8#32)[3] = !arg0[3] := by
       simp only [BitVec.getElem_eq_testBit_toNat, BitVec.toNat_add, BitVec.toNat_ofNat,
         Nat.testBit, Nat.shiftRight_eq_div_pow, Nat.one_and_eq_mod_two]
-      have hx := x.isLt
+      have hx := arg0.isLt
       have h8 : (8 % 2 ^ 32 : Nat) = 8 := by omega
-      have hdiv : ((x.toNat + 8) % 2 ^ 32) / 2 ^ 3 % 2 = (x.toNat / 2 ^ 3 + 1) % 2 := by omega
+      have hdiv : ((arg0.toNat + 8) % 2 ^ 32) / 2 ^ 3 % 2 = (arg0.toNat / 2 ^ 3 + 1) % 2 := by omega
       rw [h8, hdiv]
-      cases h : ((x.toNat / 2 ^ 3) % 2 == 0) <;> simp_all <;> omega
-    have hadd8 : ((x + 8#32) &&& 8#32) = if x[3] = true then 0#32 else 8#32 := by
+      cases h : ((arg0.toNat / 2 ^ 3) % 2 == 0) <;> simp_all <;> omega
+    have hadd8 : ((arg0 + 8#32) &&& 8#32) = if arg0[3] = true then 0#32 else 8#32 := by
       ext i hi
       simp only [BitVec.getElem_and]
       by_cases h3 : i = 3
       · subst h3; rw [hbit]; split <;> simp_all
       · have : (8#32)[i] = false := by revert i hi h3; decide
         split <;> simp [this]
-    have hs := hsplit (x + 8#32)
+    have hs := hsplit (arg0 + 8#32)
     rw [hadd8] at hs
-    by_cases h3 : x[3] = true <;> simp only [h3, ↓reduceIte] at hs ⊢ <;> grind
-  rw [h1, h2]; by_cases h3 : x[3] = true <;> simp only [h3, ↓reduceIte] <;> grind
+    by_cases h3 : arg0[3] = true <;> simp only [h3, ↓reduceIte] at hs ⊢ <;> grind
+  rw [h1, h2]; by_cases h3 : arg0[3] = true <;> simp only [h3, ↓reduceIte] <;> grind
 
 end LeanNanoLlvm.Tests.Alive2

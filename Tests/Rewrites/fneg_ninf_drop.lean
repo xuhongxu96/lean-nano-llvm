@@ -19,8 +19,6 @@ theorem fneg_ninf_drop :
         %r = fneg double %x
         ret double %r
       }
-    ] := by
-  llvm_refine
-  intro _; simp [handleFMF, PoisonOr.isRefinedBy_ite_poison]; intro _; rfl
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Rewrites

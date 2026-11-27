@@ -31,7 +31,6 @@ theorem issue_51744 :
       }
     ] := by
   llvm_refine
-  rename_i x
   rw [Bool.eq_iff_iff]; simp only [beq_iff_eq]
   have hsh : ∀ a : BitVec 32, a * 65536#32 = a <<< 16 := by
     intro a; rw [BitVec.shiftLeft_eq_mul_twoPow, show BitVec.twoPow 32 16 = 65536#32 by decide]
@@ -54,11 +53,11 @@ theorem issue_51744 :
         simpa [h16, hi16] using hget
   constructor
   · intro h
-    have hmul : (x * 1355350016#32) * 51577#32 = 65536#32 * 51577#32 := congrArg (· * 51577#32) h
+    have hmul : (arg0 * 1355350016#32) * 51577#32 = 65536#32 * 51577#32 := congrArg (· * 51577#32) h
     rw [BitVec.mul_assoc, hc1, BitVec.mul_comm 65536#32 51577#32, hsh, hsh] at hmul
-    rw [← hbits]; exact (hiff x 51577#32).mp hmul
+    rw [← hbits]; exact (hiff arg0 51577#32).mp hmul
   · intro h
     rw [← hbits] at h
-    rw [hc2, ← BitVec.mul_assoc, hsh, (hiff x 51577#32).mpr h, hc3]
+    rw [hc2, ← BitVec.mul_assoc, hsh, (hiff arg0 51577#32).mpr h, hc3]
 
 end LeanNanoLlvm.Tests.Alive2

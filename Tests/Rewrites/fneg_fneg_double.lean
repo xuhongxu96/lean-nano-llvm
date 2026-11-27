@@ -19,8 +19,6 @@ theorem fneg_fneg_double :
       entry:
         ret double %x
       }
-    ] := by
-  llvm_refine
-  simp [handleFMF, PoisonOr.IsRefinedBy] at *; subst_vars; exact ieeeFloat_neg_neg _
+    ] := by llvm_refine
 
 end LeanNanoLlvm.Tests.Rewrites

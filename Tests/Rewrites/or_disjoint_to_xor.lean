@@ -22,6 +22,6 @@ theorem or_disjoint_to_xor (w : Nat) :
       }
     ] := by
   llvm_refine
-  intro h; simp only [bv_or_eq_add_sub_and, bv_xor_eq_add_sub_two_and, h, ← BitVec.ofNat_eq_ofNat]; grind
+  simp only [bv_or_eq_add_sub_and, bv_xor_eq_add_sub_two_and, h, ← BitVec.ofNat_eq_ofNat]; grind
 
 end LeanNanoLlvm.Tests.Rewrites

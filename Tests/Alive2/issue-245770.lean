@@ -39,14 +39,8 @@ theorem issue_245770 (w : Nat) (c1 c2 : Int) :
       }
     ] := by
   llvm_refine
-  rename_i x y
-  cases h1 : (x == BitVec.ofInt w c1 && y == BitVec.ofInt w c1)
-  · simp only [BitVec.ofBool, cond_false]; llvm_symexec; llvm_vc
-    simp only [Bool.and_eq_false_iff, beq_eq_false_iff_ne] at h1
-    cases hx1 : (x == BitVec.ofInt w c1) <;> cases hx2 : (x == BitVec.ofInt w c2) <;>
-      cases hy2 : (y == BitVec.ofInt w c2) <;> simp_all [beq_iff_eq] <;> grind
-  · simp only [BitVec.ofBool, cond_true]; llvm_symexec; llvm_vc
-    simp only [Bool.and_eq_true, beq_iff_eq] at h1
-    simp [h1.1, h1.2]
+  cases h1 : (arg0 == BitVec.ofInt w c1 && arg1 == BitVec.ofInt w c1)
+  · simp only [BitVec.ofBool, cond_false]; llvm_refine
+  · simp only [BitVec.ofBool, cond_true]; llvm_refine
 
 end LeanNanoLlvm.Tests.Alive2

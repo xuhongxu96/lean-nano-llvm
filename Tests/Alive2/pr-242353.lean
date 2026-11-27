@@ -27,30 +27,25 @@ theorem pr_242353_i32 :
         ret i1 false
       }
     ] := by
-  llvm_intro; llvm_symexec
-  apply RegisterValue.isRefinedBy_bv_of_poisonOr
-  cases arg0
-  · simp [simp_llvm]
-  · rename_i x; simp [simp_llvm]
-    intro hnuw
-    have hmul : x.toNat * 13 < 2 ^ 32 := by
-      simpa [BitVec.umulOverflow] using hnuw
-    rw [show (4294967295#32 : BitVec 32) = -(1#32) by decide, ← BitVec.sub_eq_add_neg]
-    by_cases h0 : x = 0#32
-    · rw [h0]; decide
-    · have hx0 : 0 < x.toNat := by
-        have : x.toNat ≠ 0 := fun h => h0 (BitVec.eq_of_toNat_eq h)
-        omega
-      have hge : 1#32 ≤ x * 13#32 := by
-        simp only [BitVec.le_def, BitVec.toNat_mul, BitVec.toNat_ofNat]
-        rw [Nat.mod_eq_of_lt (by omega : 13 < 2 ^ 32), Nat.mod_eq_of_lt hmul,
-            Nat.mod_eq_of_lt (by omega : 1 < 2 ^ 32)]
-        omega
-      rw [BitVec.le_def, BitVec.toNat_sub_of_le hge, BitVec.toNat_mul]
-      simp only [BitVec.toNat_ofNat]
-      rw [Nat.mod_eq_of_lt (by omega : 13 < 2 ^ 32), Nat.mod_eq_of_lt hmul,
-          Nat.mod_eq_of_lt (by omega : 1 < 2 ^ 32), Nat.mod_eq_of_lt (by omega : 7 < 2 ^ 32)]
+  llvm_refine
+  have hmul : arg0.toNat * 13 < 2 ^ 32 := by
+    simpa [BitVec.umulOverflow] using h
+  rw [show (4294967295#32 : BitVec 32) = -(1#32) by decide, ← BitVec.sub_eq_add_neg]
+  by_cases h0 : arg0 = 0#32
+  · rw [h0]; decide
+  · have hx0 : 0 < arg0.toNat := by
+      have : arg0.toNat ≠ 0 := fun h => h0 (BitVec.eq_of_toNat_eq h)
       omega
+    have hge : 1#32 ≤ arg0 * 13#32 := by
+      simp only [BitVec.le_def, BitVec.toNat_mul, BitVec.toNat_ofNat]
+      rw [Nat.mod_eq_of_lt (by omega : 13 < 2 ^ 32), Nat.mod_eq_of_lt hmul,
+          Nat.mod_eq_of_lt (by omega : 1 < 2 ^ 32)]
+      omega
+    rw [BitVec.le_def, BitVec.toNat_sub_of_le hge, BitVec.toNat_mul]
+    simp only [BitVec.toNat_ofNat]
+    rw [Nat.mod_eq_of_lt (by omega : 13 < 2 ^ 32), Nat.mod_eq_of_lt hmul,
+        Nat.mod_eq_of_lt (by omega : 1 < 2 ^ 32), Nat.mod_eq_of_lt (by omega : 7 < 2 ^ 32)]
+    omega
 
 theorem pr_242353_inverse :
     [llvm-definition|
@@ -67,11 +62,7 @@ theorem pr_242353_inverse :
         ret i1 true
       }
     ] := by
-  llvm_intro; llvm_symexec
-  apply RegisterValue.isRefinedBy_bv_of_poisonOr
-  cases arg0
-  · simp [simp_llvm]
-  · rename_i x; simp [simp_llvm]
-    revert x; decide
+  llvm_refine
+  revert arg0; decide
 
 end LeanNanoLlvm.Tests.Alive2

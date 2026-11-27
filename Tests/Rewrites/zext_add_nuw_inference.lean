@@ -25,6 +25,6 @@ theorem zext_add_nuw_inference :
       }
     ] := by
   llvm_refine
-  intro h; simp [BitVec.uaddOverflow] at h; bv_omega
+  simp [BitVec.uaddOverflow]; bv_omega
 
 end LeanNanoLlvm.Tests.Rewrites

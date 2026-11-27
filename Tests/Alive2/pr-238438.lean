@@ -28,26 +28,25 @@ theorem pr_238438_mixed_sign_mul_i8 :
       }
     ] := by
   llvm_refine
-  rename_i a b
-  have hx : 240 ≤ (a ||| 240#8).toNat := by
+  have hx : 240 ≤ (arg0 ||| 240#8).toNat := by
     rw [BitVec.toNat_or]; exact Nat.right_le_or
-  have hy_lo : 1 ≤ (b &&& 7#8 ||| 1#8).toNat := by
+  have hy_lo : 1 ≤ (arg1 &&& 7#8 ||| 1#8).toNat := by
     rw [BitVec.toNat_or]; exact Nat.right_le_or
-  have hy_hi : (b &&& 7#8 ||| 1#8).toNat ≤ 7 := by
-    have h1 : (b &&& 7#8).toNat ≤ 7 := by rw [BitVec.toNat_and]; exact Nat.and_le_right
-    have h2 : (b &&& 7#8 ||| 1#8).toNat < 8 := by
+  have hy_hi : (arg1 &&& 7#8 ||| 1#8).toNat ≤ 7 := by
+    have h1 : (arg1 &&& 7#8).toNat ≤ 7 := by rw [BitVec.toNat_and]; exact Nat.and_le_right
+    have h2 : (arg1 &&& 7#8 ||| 1#8).toNat < 8 := by
       rw [BitVec.toNat_or]
       exact Nat.or_lt_two_pow (n := 3) (by omega) (by decide)
     omega
-  have hx_lt := (a ||| 240#8).isLt
-  have hprod : 128 ≤ ((a ||| 240#8) * (b &&& 7#8 ||| 1#8)).toNat := by
+  have hx_lt := (arg0 ||| 240#8).isLt
+  have hprod : 128 ≤ ((arg0 ||| 240#8) * (arg1 &&& 7#8 ||| 1#8)).toNat := by
     rw [BitVec.toNat_mul]
-    let u := 256 - (a ||| 240#8).toNat
-    let v := (b &&& 7#8 ||| 1#8).toNat
+    let u := 256 - (arg0 ||| 240#8).toNat
+    let v := (arg1 &&& 7#8 ||| 1#8).toNat
     have huv : 1 ≤ u * v ∧ u * v ≤ 112 :=
       ⟨Nat.mul_pos (by omega) (by omega), Nat.mul_le_mul (show u ≤ 16 by omega) hy_hi⟩
-    have heq : (a ||| 240#8).toNat * v = (v - 1) * 256 + (256 - u * v) := by
-      have h1 : (a ||| 240#8).toNat = 256 - u := by omega
+    have heq : (arg0 ||| 240#8).toNat * v = (v - 1) * 256 + (256 - u * v) := by
+      have h1 : (arg0 ||| 240#8).toNat = 256 - u := by omega
       rw [h1, Nat.sub_mul]
       have h2 : 256 * v = (v - 1) * 256 + 256 := by
         cases hv : v with
@@ -56,7 +55,7 @@ theorem pr_238438_mixed_sign_mul_i8 :
       omega
     rw [heq, Nat.mul_add_mod_self_right, Nat.mod_eq_of_lt (by omega)]
     omega
-  generalize (a ||| 240#8) * (b &&& 7#8 ||| 1#8) = p at hprod ⊢
+  generalize (arg0 ||| 240#8) * (arg1 &&& 7#8 ||| 1#8) = p at hprod ⊢
   have hmsb : p[7] = true := by
     rw [BitVec.getElem_eq_testBit_toNat, Nat.testBit_eq_decide_div_mod_eq]
     have hlt := p.isLt

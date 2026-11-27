@@ -30,13 +30,13 @@ theorem issue_243259 :
       }
     ] := by
   llvm_refine
-  rename_i x
-  have hlt : (x &&& 1#32).toNat < 2 := by
-    rw [BitVec.toNat_and]; exact Nat.lt_of_le_of_lt (Nat.and_le_right) (by decide)
-  have h01 : x &&& 1#32 = 0#32 ∨ x &&& 1#32 = 1#32 := by
-    rcases (show (x &&& 1#32).toNat = 0 ∨ (x &&& 1#32).toNat = 1 by omega) with h | h
-    · left; exact BitVec.eq_of_toNat_eq h
-    · right; exact BitVec.eq_of_toNat_eq h
-  rcases h01 with h | h <;> rw [h] <;> simp [BitVec.saddOverflow, BitVec.uaddOverflow]
+  all_goals
+    have hlt : (arg0 &&& 1#32).toNat < 2 := by
+      rw [BitVec.toNat_and]; exact Nat.lt_of_le_of_lt (Nat.and_le_right) (by decide)
+    have h01 : arg0 &&& 1#32 = 0#32 ∨ arg0 &&& 1#32 = 1#32 := by
+      rcases (show (arg0 &&& 1#32).toNat = 0 ∨ (arg0 &&& 1#32).toNat = 1 by omega) with h | h
+      · left; exact BitVec.eq_of_toNat_eq h
+      · right; exact BitVec.eq_of_toNat_eq h
+    rcases h01 with h01 | h01 <;> rw [h01] <;> simp [BitVec.saddOverflow, BitVec.uaddOverflow]
 
 end LeanNanoLlvm.Tests.Alive2

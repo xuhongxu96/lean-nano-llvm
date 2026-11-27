@@ -1,4 +1,4 @@
-import LeanNanoLlvm.Refinement.PoisonElim
+import LeanNanoLlvm.Refinement.Tactic
 import LeanNanoLlvm.AST.Syntax
 import Tests.Rewrites.Common
 
@@ -32,9 +32,9 @@ theorem pr_246248 :
         ret i32 %v4_opt
       }
     ] := by
-  -- `llvm_bv` removes the poison and `select` case structure. Two `BitVec` goals remain, one per
-  -- `select` arm; the `nsw` guard of the `add` arm appears as the hypothesis `h_1`.
-  llvm_bv
+  -- Two `BitVec` goals remain, one per `select` arm; the `nsw` guard of the `add` arm appears as
+  -- the hypothesis `h_1`.
+  llvm_refine
   · -- h : arg0 &&& 64#32 = 0#32 ⊢ arg0 ||| 64#32 = arg0 ^^^ 64#32
     ext i hi
     have h0 := congrArg (fun v : BitVec 32 => v[i]'hi) h

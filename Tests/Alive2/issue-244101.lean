@@ -28,12 +28,8 @@ theorem issue_244101 :
       }
     ] := by
   llvm_refine
-  rename_i x
-  constructor
-  · intro h1 h2; bv_omega
-  · intro hlt
-    have h32 : x.toNat < 32 := by simp [BitVec.lt_def] at hlt; exact hlt
-    have : ∀ k : Fin 32, (2#32 <<< k.val) ||| -(2#32 <<< k.val) = 4294967294#32 <<< k.val := by decide
-    exact this ⟨x.toNat, h32⟩
+  have h32 : arg0.toNat < 32 := by simp [BitVec.lt_def] at h; exact h
+  have : ∀ k : Fin 32, (2#32 <<< k.val) ||| -(2#32 <<< k.val) = 4294967294#32 <<< k.val := by decide
+  exact this ⟨arg0.toNat, h32⟩
 
 end LeanNanoLlvm.Tests.Alive2

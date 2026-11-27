@@ -31,10 +31,8 @@ theorem pr_240721 :
       }
     ] := by
   llvm_refine
-  rename_i x c
-  intro h _
-  have hx := x.le_toInt; have hx2 := x.toInt_lt
-  have hc := c.le_toInt; have hc2 := c.toInt_lt
+  have hx := arg0.le_toInt; have hx2 := arg0.toInt_lt
+  have hc := arg1.le_toInt; have hc2 := arg1.toInt_lt
   apply BitVec.eq_of_toInt_eq
   simp [BitVec.saddOverflow] at h
   simp [BitVec.toInt_sub, BitVec.toInt_signExtend, BitVec.toInt_add, BitVec.toInt_neg, Int.bmod_def]

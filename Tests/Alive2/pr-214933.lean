@@ -31,14 +31,13 @@ theorem pr_214933_eq (w : Nat) :
       }
     ] := by
   llvm_refine
-  rename_i x y
   rw [Bool.eq_iff_iff]
   simp only [beq_iff_eq, decide_eq_true_eq, BitVec.toNat_eq, BitVec.toNat_umod, BitVec.lt_def]
   constructor
   · intro h
-    have hy0 : y.toNat ≠ 0 := by
-      intro hz; apply ‹¬ y = 0#w›; apply BitVec.eq_of_toNat_eq; simpa using hz
-    have hlt := Nat.mod_lt x.toNat (Nat.pos_of_ne_zero hy0)
+    have hy0 : arg1.toNat ≠ 0 := by
+      intro hz; apply ‹¬ arg1 = 0#w›; apply BitVec.eq_of_toNat_eq; simpa using hz
+    have hlt := Nat.mod_lt arg0.toNat (Nat.pos_of_ne_zero hy0)
     omega
   · intro h; exact Nat.mod_eq_of_lt h
 
@@ -58,16 +57,15 @@ theorem pr_214933_ne (w : Nat) :
       }
     ] := by
   llvm_refine
-  rename_i x y
   rw [Bool.eq_iff_iff]
   simp only [bne_iff_ne, ne_eq, decide_eq_true_eq, BitVec.toNat_eq, BitVec.toNat_umod, BitVec.le_def]
   constructor
   · intro h
     exact Classical.byContradiction fun hge => h (Nat.mod_eq_of_lt (by omega))
   · intro h heq
-    have hy0 : y.toNat ≠ 0 := by
-      intro hz; apply ‹¬ y = 0#w›; apply BitVec.eq_of_toNat_eq; simpa using hz
-    have hlt := Nat.mod_lt x.toNat (Nat.pos_of_ne_zero hy0)
+    have hy0 : arg1.toNat ≠ 0 := by
+      intro hz; apply ‹¬ arg1 = 0#w›; apply BitVec.eq_of_toNat_eq; simpa using hz
+    have hlt := Nat.mod_lt arg0.toNat (Nat.pos_of_ne_zero hy0)
     omega
 
 end LeanNanoLlvm.Tests.Alive2

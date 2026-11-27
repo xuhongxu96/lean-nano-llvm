@@ -29,12 +29,11 @@ theorem pr_224025 :
       }
     ] := by
   llvm_refine
-  rename_i x
-  have hx := BitVec.toInt_sub_of_not_ssubOverflow (x := 0#32) (y := x) ‹_›
+  have hx := BitVec.toInt_sub_of_not_ssubOverflow (x := 0#32) (y := arg0) ‹_›
   simp only [BitVec.zero_sub, BitVec.toInt_zero, Int.zero_sub] at hx
   apply BitVec.eq_of_toInt_eq
-  rw [BitVec.toInt_sdiv_of_ne_or_ne (-x) 4294967293#32 (Or.inr (by decide)),
-      BitVec.toInt_sdiv_of_ne_or_ne x 3#32 (Or.inr (by decide)), hx,
+  rw [BitVec.toInt_sdiv_of_ne_or_ne (-arg0) 4294967293#32 (Or.inr (by decide)),
+      BitVec.toInt_sdiv_of_ne_or_ne arg0 3#32 (Or.inr (by decide)), hx,
       show (4294967293#32).toInt = -3 by rfl, show (3#32).toInt = 3 by rfl,
       Int.neg_tdiv, Int.tdiv_neg, Int.neg_neg]
 

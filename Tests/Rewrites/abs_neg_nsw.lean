@@ -26,13 +26,10 @@ theorem abs_neg_nsw (w : Nat) :
       }
     ] := by
   llvm_refine
-  · have hsub := BitVec.toInt_sub_of_not_ssubOverflow ‹_›
+  all_goals
+    have hsub := BitVec.toInt_sub_of_not_ssubOverflow (x := 0#w) (y := arg0) (by simp_all)
     simp only [BitVec.zero_sub, BitVec.toInt_zero, Int.zero_sub] at hsub
     apply BitVec.eq_of_toInt_eq
-    simp [BitVec.slt, hsub] at *; subst_vars; simp [bitvec_ofBool_eq_zero] at *; omega
-  · intro _ _; have hsub := BitVec.toInt_sub_of_not_ssubOverflow ‹_›
-    simp only [BitVec.zero_sub, BitVec.toInt_zero, Int.zero_sub] at hsub
-    apply BitVec.eq_of_toInt_eq
-    simp [BitVec.slt, hsub] at *; subst_vars; simp [bitvec_ofBool_eq_zero] at *; omega
+    simp [BitVec.slt, hsub] at *; omega
 
 end LeanNanoLlvm.Tests.Rewrites

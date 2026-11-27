@@ -30,15 +30,12 @@ theorem pr_231358 :
       }
     ] := by
   llvm_refine
-  rename_i x y
-  have hm : (x &&& 65535#32).toNat = x.toNat % 2 ^ 16 := by
-    rw [BitVec.toNat_and]; exact Nat.and_two_pow_sub_one_eq_mod _ 16
-  constructor
-  · intro h1 h2
-    simp [BitVec.usubOverflow, hm] at h1 h2; bv_omega
-  · intro h1 h2
-    apply BitVec.eq_of_toNat_eq
-    simp [BitVec.usubOverflow, hm] at h1 h2
+  all_goals
+    have hm : (arg0 &&& 65535#32).toNat = arg0.toNat % 2 ^ 16 := by
+      rw [BitVec.toNat_and]; exact Nat.and_two_pow_sub_one_eq_mod _ 16
+  · simp [BitVec.usubOverflow, hm] at h ⊢; bv_omega
+  · apply BitVec.eq_of_toNat_eq
+    simp [BitVec.usubOverflow, hm] at h h_1
     simp [-BitVec.toNat_sub]
     bv_omega
 

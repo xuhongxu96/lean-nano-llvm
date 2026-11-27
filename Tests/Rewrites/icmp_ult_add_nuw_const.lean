@@ -21,6 +21,6 @@ theorem icmp_ult_add_nuw_const :
       }
     ] := by
   llvm_refine
-  intro h; simp_all [BitVec.le_def, BitVec.toNat_add_of_not_uaddOverflow, -BitVec.toNat_add]
+  simp_all [BitVec.le_def, BitVec.toNat_add_of_not_uaddOverflow, -BitVec.toNat_add]
 
 end LeanNanoLlvm.Tests.Rewrites

@@ -23,6 +23,6 @@ theorem icmp_ule_add_nuw_cancel (w : Nat) :
       }
     ] := by
   llvm_refine
-  intro h1 h2; simp_all [BitVec.le_def, BitVec.toNat_add_of_not_uaddOverflow, -BitVec.toNat_add]
+  simp_all [BitVec.le_def, BitVec.toNat_add_of_not_uaddOverflow, -BitVec.toNat_add]
 
 end LeanNanoLlvm.Tests.Rewrites

@@ -4,7 +4,7 @@ import LeanNanoLlvm.Refinement.Refinement
 /-! # Refinement Simp Lemmas (`simp_llvm` / `simp_step`)
 
 Well-formedness destructuring lemmas, semantic bridges and `simp_llvm` / `simp_step`
-normalization lemmas used by the refinement tactics in `LeanNanoLlvm.Refinement.Tactic`
+normalization lemmas used by the refinement tactics (`Symexec`, `PoisonElim`, `Tactic`)
 and by `llvm_disprove`. Kept separate from the tactic implementation so tactic edits
 do not recompile these lemmas, and so `llvm_disprove` does not depend on `llvm_refine`. -/
 

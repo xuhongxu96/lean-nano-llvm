@@ -1,36 +1,34 @@
 import Lean
-import LeanNanoLlvm.Refinement.Tactic
+import LeanNanoLlvm.Refinement.Symexec
 
 /-!
 # Poison Elimination (`llvm_bv`)
 
+The third layer of the refinement pipeline; see `LeanNanoLlvm.Refinement.Tactic`.
+
 `llvm_bv` turns the value-refinement goals left by `llvm_symexec` into plain `BitVec` (and
 `Bool` / `IEEEFloat`) goals, so that a proof only has to deal with bit-vector reasoning.
 
-## Why `llvm_vc` leaves poison structure behind
+## Why plain `simp_llvm` is not enough
 
 After symbolic execution, a returned integer is a `PoisonOr (BitVec w)` built from nested
 `if guard then .poison else ...` terms (flags such as `nsw`, `nuw`, `disjoint`, `exact`) and
-from `if cond then t else f` terms (`select`). Three things kept these from reducing:
+from `if cond then t else f` terms (`select`).
 
 * `PoisonOr.IsRefinedBy` is deliberately not unfolded by `simp`, and `simp_llvm` only rewrites
-  it when one branch of a source-side `if` is literally `.poison`. A source-side `select` whose
-  arms are both (guarded) values has no matching rule.
-* That `if` is built at type `IntW w`, a plain `def` for `PoisonOr (BitVec w)`. `simp` matches
-  at reducible transparency, so even rules stated for `PoisonOr` do not fire on it.
-* `llvm_vc` then falls back to `split` and closes leaves with `rfl` / `trivial`. On a `BitVec`
-  goal with a large literal (e.g. `x + 4294967232#32 = x ^^^ 64#32`) these raise
-  `maximum recursion depth`, a runtime exception that `try` / `first` do not catch, so the whole
-  tactic failed. `Tactic.lean` now wraps those closers in `llvm_guard`.
-
-`llvm_bv` adds the general rule for a source-side `if` (also at type `IntW w`), the rule
-`value ⊑ poison ↔ False`, and then splits the resulting conjunctions, implications and guards
-into separate goals.
+  it when one branch of a source-side `if` is literally `.poison`. A `select` whose arms are
+  both (guarded) values needs the general rule `isRefinedBy_ite_left` below.
+* That `if` is often built at type `IntW w`, a plain `def` for `PoisonOr (BitVec w)`. `simp`
+  matches at reducible transparency, so rules stated for `PoisonOr` do not fire on it; the
+  `_intW` variants below cover it.
+* Closing leaves with default-transparency `rfl` / `trivial` can raise `maximum recursion depth`
+  on `BitVec` goals with large literals (e.g. `x + 4294967232#32 = x ^^^ 64#32`). That runtime
+  exception escapes `try` / `first`, so this module only uses reducible closers and `llvm_guard`.
 
 ## What `llvm_bv` does
 
 1. On a top-level refinement goal (`x ⊒ y`, `x ⊒[cfg] y`, `x ⊒⟨env⟩ y`) it first runs
-   `llvm_intro; llvm_symexec`.
+   `llvm_intro; llvm_symexec`, and on a `Config.IsRefinedBy` goal it first runs `llvm_symexec`.
 2. On each `RegisterValue.IsRefinedBy _ (.bv w x) (.bv w y)` (or `.float`) goal it moves to
    `PoisonOr.IsRefinedBy x y` (an equivalence, so no information is lost) and case-splits every
    `PoisonOr` argument into `.poison` and `.value argN`. The value keeps the argument's name.
@@ -55,7 +53,7 @@ namespace LeanNanoLlvm.Refinement
 open LeanNanoLlvm
 open Semantics
 
-/-! ### Rewrite rules used by `llvm_bv` (not added to `simp_llvm`, to keep `llvm_vc` stable) -/
+/-! ### Rewrite rules used by `llvm_bv` (kept out of `simp_llvm`, which other tactics also use) -/
 
 /-- A source-side `if` (e.g. from `select`) refines `y` iff each branch does under its guard. -/
 theorem PoisonOr.isRefinedBy_ite_left {α : Type} {c : Prop} [Decidable c]
@@ -250,6 +248,12 @@ private def reduceGoal : Nat → TacticM (List MVarId)
 
 /-- Reduce one value-refinement goal to pure leaves. -/
 private def reduceValueGoal : TacticM (List MVarId) := do
+  -- Fast path: source and target already agree (also covers `ptr`, `void` and vector values).
+  if ← closesWith `(tactic|
+      first
+      | exact RegisterValue.IsRefinedBy.refl _
+      | (llvm_simp; exact RegisterValue.IsRefinedBy.refl _)) then
+    return []
   discard <| tryRt (evalTactic (← `(tactic|
     first
     | rw [RegisterValue.isRefinedBy_bv_iff_poisonOr]
@@ -266,21 +270,24 @@ private def reduceValueGoal : TacticM (List MVarId) := do
 
 /-- `llvm_bv` eliminates poison and `select` case structure from refinement goals and leaves
     only pure `BitVec` / `Bool` / `IEEEFloat` goals. On a top-level refinement goal it first runs
-    `llvm_intro; llvm_symexec`. Leaves that are immediate are closed; every other leaf is left
+    `llvm_intro; llvm_symexec` (on a `Config.IsRefinedBy` goal, `llvm_symexec`). Leaves that are immediate are closed; every other leaf is left
     open, with the poison guards it depends on as named hypotheses (`h`, `h_1`, ...). Goals that
     symbolic execution could not finish (`Config.IsRefinedBy`) are left unchanged. -/
 elab "llvm_bv" : tactic => do
-  let tgt ← instantiateMVars (← getMainTarget)
-  if isDefinitionRefinement tgt.cleanupAnnotations then
-    evalTactic (← `(tactic| llvm_intro; llvm_symexec))
   let mut out := #[]
   for g in ← getGoals do
     setGoals [g]
     let tgt ← instantiateMVars (← getMainTarget)
-    if tgt.isAppOf ``Config.IsRefinedBy then
-      out := out.push g
-    else
-      out := out ++ (← reduceValueGoal)
+    if isDefinitionRefinement tgt.cleanupAnnotations then
+      evalTactic (← `(tactic| llvm_intro; llvm_symexec))
+    else if tgt.isAppOf ``Config.IsRefinedBy then
+      evalTactic (← `(tactic| llvm_symexec))
+    for g' in ← getGoals do
+      setGoals [g']
+      if (← instantiateMVars (← getMainTarget)).isAppOf ``Config.IsRefinedBy then
+        out := out.push g'
+      else
+        out := out ++ (← reduceValueGoal)
   setGoals out.toList
 
 end Tactic
