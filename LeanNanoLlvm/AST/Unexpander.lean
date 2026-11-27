@@ -91,91 +91,242 @@ private def asCode? (stx : Syntax) : Option (TSyntax `nanollvm_code) :=
   | `([llvm-code| $code:nanollvm_code]) => some ⟨code⟩
   | _ => none
 
-private def asBool? (stx : Syntax) : Option Bool :=
+private def stripParens (stx : Syntax) : Syntax :=
   match stx with
+  | `(($x)) => x.raw
+  | _ => stx
+
+private def asBool? (stx : Syntax) : Option Bool :=
+  match stripParens stx with
   | `($id:ident) =>
-    match id.getId with
+    match id.getId.eraseMacroScopes with
     | `true | ``Bool.true => some true
     | `false | ``Bool.false => some false
     | _ => none
   | _ => none
 
+private def asStr? (stx : Syntax) : Option String :=
+  match stripParens stx with
+  | `($s:str) => some s.getString
+  | _ => none
+
 private def asTypedExp? (stx : Syntax) : UnexpandM (TSyntax `nanollvm_typed_exp) := do
-  match stx with
+  match stripParens stx with
   | `(($ty, $e)) | `(⟨$ty, $e⟩) =>
     match asType? ty, asExp? e with
     | some ty, some e => `(nanollvm_typed_exp| $ty:nanollvm_type $e:nanollvm_exp)
     | _, _ => throw ()
   | _ => throw ()
 
+private def asSignedIntVal? (stx : Syntax) : Option Int :=
+  match stripParens stx with
+  | `(Int.ofNat $n:num) | `($n:num) => some (n.getNat : Int)
+  | `(-$n:num) => some (-(n.getNat : Int))
+  | `(Int.negSucc $n:num) => some (-(n.getNat + 1 : Int))
+  | _ => none
+
 private def asSignedInt? (stx : Syntax) : UnexpandM (TSyntax `nanollvm_signed_int) := do
-  let stx := match stx with | `(($x)) => x.raw | _ => stx
-  match stx with
-  | `(Int.ofNat $n:num) | `($n:num) => `(nanollvm_signed_int| $n:num)
-  | `(-$n:num) => `(nanollvm_signed_int| -$n:num)
-  | `(Int.negSucc $n:num) =>
-    let k := Syntax.mkNumLit (toString (n.getNat + 1))
-    `(nanollvm_signed_int| -$k:num)
-  | _ => throw ()
+  match asSignedIntVal? stx with
+  | some v =>
+    if v ≥ 0 then
+      let k := Syntax.mkNumLit (toString v.toNat)
+      `(nanollvm_signed_int| $k:num)
+    else
+      let k := Syntax.mkNumLit (toString (-v).toNat)
+      `(nanollvm_signed_int| -$k:num)
+  | none => throw ()
+
+/-- Extract `(fieldName, fieldValue)` pairs from a Lean `Term.structInst` (`{ a := v, ... }` or `{ }`). -/
+private def extractStructFields? (stx : Syntax) : Option (Array (Name × Syntax)) := do
+  let s := stripParens stx
+  if s.getKind != ``Lean.Parser.Term.structInst then
+    none
+  let fieldsNode := s[2]
+  if fieldsNode.getKind != ``Lean.Parser.Term.structInstFields then
+    none
+  let mut out : Array (Name × Syntax) := #[]
+  for f in fieldsNode[0].getSepArgs do
+    if f.getKind != ``Lean.Parser.Term.structInstField then
+      none
+    let lval := f[0]
+    if lval.getKind != ``Lean.Parser.Term.structInstLVal then
+      none
+    let nm := lval[0].getId.eraseMacroScopes
+    let defNode := f[1][2]
+    if defNode.getKind != ``Lean.Parser.Term.structInstFieldDef then
+      none
+    let val := defNode[2]
+    out := out.push (nm, val)
+  some out
+
+private def fmfArrayFromBools (bNnan bNinf bNsz bArcp bContract bAfn bReassoc : Bool) :
+    UnexpandM (Array (TSyntax `nanollvm_fmf_flag)) := do
+  if bNnan && bNinf && bNsz && bArcp && bContract && bAfn && bReassoc then
+    return #[← `(nanollvm_fmf_flag| fast)]
+  let mut out : Array (TSyntax `nanollvm_fmf_flag) := #[]
+  if bNnan     then out := out.push (← `(nanollvm_fmf_flag| nnan))
+  if bNinf     then out := out.push (← `(nanollvm_fmf_flag| ninf))
+  if bNsz      then out := out.push (← `(nanollvm_fmf_flag| nsz))
+  if bArcp     then out := out.push (← `(nanollvm_fmf_flag| arcp))
+  if bContract then out := out.push (← `(nanollvm_fmf_flag| contract))
+  if bAfn      then out := out.push (← `(nanollvm_fmf_flag| afn))
+  if bReassoc  then out := out.push (← `(nanollvm_fmf_flag| reassoc))
+  pure out
 
 private def unexpandFMFFlags (stx : Syntax) : UnexpandM (Array (TSyntax `nanollvm_fmf_flag)) := do
-  match stx with
-  | `({ }) | `(FastMathFlags.none) => pure #[]
-  | `(FastMathFlags.fast) => pure #[← `(nanollvm_fmf_flag| fast)]
-  | `({ $fields,* }) =>
-    let mut out : Array (TSyntax `nanollvm_fmf_flag) := #[]
-    for f in fields.getElems do
-      match f with
-      | `(Parser.Term.structInstField| $nm:ident := $val) =>
-        if asBool? val == some true then
-          let flag ← match nm.getId.eraseMacroScopes with
-            | `nnan => `(nanollvm_fmf_flag| nnan)
-            | `ninf => `(nanollvm_fmf_flag| ninf)
-            | `nsz => `(nanollvm_fmf_flag| nsz)
-            | `arcp => `(nanollvm_fmf_flag| arcp)
-            | `contract => `(nanollvm_fmf_flag| contract)
-            | `afn => `(nanollvm_fmf_flag| afn)
-            | `reassoc => `(nanollvm_fmf_flag| reassoc)
-            | _ => throw ()
-          out := out.push flag
-      | _ => throw ()
-    pure out
-  | _ => throw ()
+  let s := stripParens stx
+  match s with
+  | `($id:ident) =>
+    match id.getId.eraseMacroScopes with
+    | ``FastMathFlags.none | `FastMathFlags.none => return #[]
+    | ``FastMathFlags.fast | `FastMathFlags.fast => return #[← `(nanollvm_fmf_flag| fast)]
+    | _ => throw ()
+  | `($f:ident $b1 $b2 $b3 $b4 $b5 $b6 $b7) =>
+    match f.getId.eraseMacroScopes, asBool? b1, asBool? b2, asBool? b3, asBool? b4, asBool? b5, asBool? b6, asBool? b7 with
+    | ``FastMathFlags.mk, some b1, some b2, some b3, some b4, some b5, some b6, some b7
+    | `FastMathFlags.mk, some b1, some b2, some b3, some b4, some b5, some b6, some b7 =>
+      fmfArrayFromBools b1 b2 b3 b4 b5 b6 b7
+    | _, _, _, _, _, _, _, _ => throw ()
+  | _ =>
+    match extractStructFields? s with
+    | some fields =>
+      let mut bNnan := false
+      let mut bNinf := false
+      let mut bNsz := false
+      let mut bArcp := false
+      let mut bContract := false
+      let mut bAfn := false
+      let mut bReassoc := false
+      for (nm, val) in fields do
+        match asBool? val with
+        | none => throw ()
+        | some b =>
+          match nm with
+          | `nnan => bNnan := b
+          | `ninf => bNinf := b
+          | `nsz => bNsz := b
+          | `arcp => bArcp := b
+          | `contract => bContract := b
+          | `afn => bAfn := b
+          | `reassoc => bReassoc := b
+          | _ => throw ()
+      fmfArrayFromBools bNnan bNinf bNsz bArcp bContract bAfn bReassoc
+    | none => throw ()
+
+private def gepArrayFromBools (hasInbounds hasNusw hasNuw : Bool) :
+    UnexpandM (Array (TSyntax `nanollvm_gep_flag)) := do
+  let mut out : Array (TSyntax `nanollvm_gep_flag) := #[]
+  if hasInbounds then out := out.push (← `(nanollvm_gep_flag| inbounds))
+  else if hasNusw then out := out.push (← `(nanollvm_gep_flag| nusw))
+  if hasNuw then out := out.push (← `(nanollvm_gep_flag| nuw))
+  pure out
 
 private def unexpandGEPFlags (stx : Syntax) : UnexpandM (Array (TSyntax `nanollvm_gep_flag)) := do
-  match stx with
-  | `({ }) | `(GEPFlags.none) => pure #[]
-  | `(GEPFlags.mkInbounds) => pure #[← `(nanollvm_gep_flag| inbounds)]
-  | `({ $fields,* }) =>
-    let mut hasInbounds := false
-    let mut hasNusw := false
-    let mut hasNuw := false
-    for f in fields.getElems do
-      match f with
-      | `(Parser.Term.structInstField| $nm:ident := $val) =>
-        if asBool? val == some true then
-          match nm.getId.eraseMacroScopes with
-          | `inbounds => hasInbounds := true
-          | `nusw => hasNusw := true
-          | `nuw => hasNuw := true
+  let s := stripParens stx
+  match s with
+  | `($id:ident) =>
+    match id.getId.eraseMacroScopes with
+    | ``GEPFlags.none | `GEPFlags.none => return #[]
+    | ``GEPFlags.mkInbounds | `GEPFlags.mkInbounds => return #[← `(nanollvm_gep_flag| inbounds)]
+    | _ => throw ()
+  | `($f:ident $b1 $b2 $b3) =>
+    match f.getId.eraseMacroScopes, asBool? b1, asBool? b2, asBool? b3 with
+    | ``GEPFlags.mk, some b1, some b2, some b3
+    | `GEPFlags.mk, some b1, some b2, some b3 => gepArrayFromBools b1 b2 b3
+    | _, _, _, _ => throw ()
+  | _ =>
+    match extractStructFields? s with
+    | some fields =>
+      let mut hasInbounds := false
+      let mut hasNusw := false
+      let mut hasNuw := false
+      for (nm, val) in fields do
+        match asBool? val with
+        | none => throw ()
+        | some b =>
+          match nm with
+          | `inbounds => hasInbounds := b
+          | `nusw => hasNusw := b
+          | `nuw => hasNuw := b
           | _ => throw ()
-      | _ => throw ()
-    let mut out : Array (TSyntax `nanollvm_gep_flag) := #[]
-    if hasInbounds then out := out.push (← `(nanollvm_gep_flag| inbounds))
-    else if hasNusw then out := out.push (← `(nanollvm_gep_flag| nusw))
-    if hasNuw then out := out.push (← `(nanollvm_gep_flag| nuw))
-    pure out
+      gepArrayFromBools hasInbounds hasNusw hasNuw
+    | none => throw ()
+
+private def unexpandCallSiteInfo (stx : Syntax) : UnexpandM (Bool × String) := do
+  let s := stripParens stx
+  match s with
+  | `($id:ident) =>
+    match id.getId.eraseMacroScopes with
+    | ``CallSiteInfo.default | `CallSiteInfo.default => return (false, "")
+    | _ => throw ()
+  | `($f:ident $tl $ccVal) =>
+    match f.getId.eraseMacroScopes, asBool? tl, asStr? ccVal with
+    | ``CallSiteInfo.mk, some tl, some ccStr
+    | `CallSiteInfo.mk, some tl, some ccStr => return (tl, ccStr)
+    | _, _, _ => throw ()
+  | _ =>
+    match extractStructFields? s with
+    | some fields =>
+      let mut isTail := false
+      let mut ccStr := ""
+      for (nm, val) in fields do
+        match nm with
+        | `isTail =>
+          match asBool? val with
+          | some b => isTail := b
+          | none => throw ()
+        | `callingConv =>
+          match asStr? val with
+          | some str => ccStr := str
+          | none => throw ()
+        | _ => throw ()
+      pure (isTail, ccStr)
+    | none => throw ()
+
+private def unexpandDenormalModeKind (stx : Syntax) : UnexpandM (TSyntax `ident) := do
+  match stripParens stx with
+  | `($id:ident) =>
+    match id.getId.eraseMacroScopes with
+    | ``DenormalModeKind.ieee | `DenormalModeKind.ieee | `ieee => pure (mkIdent `ieee)
+    | ``DenormalModeKind.preserveSign | `DenormalModeKind.preserveSign | `preserveSign => pure (mkIdent `preservesign)
+    | ``DenormalModeKind.positiveZero | `DenormalModeKind.positiveZero | `positiveZero => pure (mkIdent `positivezero)
+    | _ => throw ()
   | _ => throw ()
 
+private def unexpandDenormalMode (stx : Syntax) : UnexpandM (TSyntax `nanollvm_fn_attr) := do
+  let s := stripParens stx
+  match s with
+  | `($f:ident $inK $outK) =>
+    match f.getId.eraseMacroScopes with
+    | ``DenormalMode.mk | `DenormalMode.mk =>
+      let inId ← unexpandDenormalModeKind inK
+      let outId ← unexpandDenormalModeKind outK
+      `(nanollvm_fn_attr| denormal_fpenv($outId:ident | $inId:ident))
+    | _ => throw ()
+  | _ =>
+    match extractStructFields? s with
+    | some fields =>
+      let mut inId := mkIdent `ieee
+      let mut outId := mkIdent `ieee
+      for (nm, val) in fields do
+        match nm with
+        | `input => inId ← unexpandDenormalModeKind val
+        | `output => outId ← unexpandDenormalModeKind val
+        | _ => throw ()
+      `(nanollvm_fn_attr| denormal_fpenv($outId:ident | $inId:ident))
+    | none => throw ()
+
 private def unexpandValueAttr (stx : Syntax) : UnexpandM (TSyntax `nanollvm_value_attr) := do
-  match stx with
+  match stripParens stx with
   | `($id:ident) =>
-    match id.getId with
+    match id.getId.eraseMacroScopes with
     | ``ValueAttr.noundef | `ValueAttr.noundef | `noundef => `(nanollvm_value_attr| noundef)
     | ``ValueAttr.nonnull | `ValueAttr.nonnull | `nonnull => `(nanollvm_value_attr| nonnull)
+    | ``ValueAttr.noalias | `ValueAttr.noalias | `noalias => `(nanollvm_value_attr| noalias)
+    | ``ValueAttr.readonly | `ValueAttr.readonly | `readonly => `(nanollvm_value_attr| readonly)
     | _ => throw ()
   | `($f:ident $n:num) =>
-    match f.getId with
+    match f.getId.eraseMacroScopes with
     | ``ValueAttr.align | `ValueAttr.align | `align => `(nanollvm_value_attr| align $n:num)
     | ``ValueAttr.dereferenceable | `ValueAttr.dereferenceable | `dereferenceable =>
       `(nanollvm_value_attr| dereferenceable($n:num))
@@ -185,39 +336,54 @@ private def unexpandValueAttr (stx : Syntax) : UnexpandM (TSyntax `nanollvm_valu
       `(nanollvm_value_attr| nofpclass($n:num))
     | _ => throw ()
   | `($f:ident $lo $hi) =>
-    match f.getId with
+    match f.getId.eraseMacroScopes with
     | ``ValueAttr.range | `ValueAttr.range | `range =>
       let loS ← asSignedInt? lo
       let hiS ← asSignedInt? hi
       `(nanollvm_value_attr| range($loS:nanollvm_signed_int, $hiS:nanollvm_signed_int))
     | _ => throw ()
+  | `($f:ident [$pairs,*]) =>
+    match f.getId.eraseMacroScopes with
+    | ``ValueAttr.rangeList | `ValueAttr.rangeList | `rangeList =>
+      let pairArr ← pairs.getElems.mapM fun p =>
+        match stripParens p with
+        | `(($lo, $hi)) | `(⟨$lo, $hi⟩) => do
+          let loS ← asSignedInt? lo
+          let hiS ← asSignedInt? hi
+          `(nanollvm_range_pair| $loS:nanollvm_signed_int, $hiS:nanollvm_signed_int)
+        | _ => throw ()
+      let pairSep : Syntax.TSepArray `nanollvm_range_pair "," := pairArr
+      `(nanollvm_value_attr| range_list($pairSep,*))
+    | _ => throw ()
   | `($f:ident $ty) =>
-    match f.getId, asType? ty with
+    match f.getId.eraseMacroScopes, asType? (stripParens ty) with
     | ``ValueAttr.byval, some ty | `ValueAttr.byval, some ty | `byval, some ty =>
       `(nanollvm_value_attr| byval($ty:nanollvm_type))
+    | ``ValueAttr.sret, some ty | `ValueAttr.sret, some ty | `sret, some ty =>
+      `(nanollvm_value_attr| sret($ty:nanollvm_type))
     | _, _ => throw ()
   | _ => throw ()
 
 private def unexpandValueAttrList (stx : Syntax) : UnexpandM (Array (TSyntax `nanollvm_value_attr)) := do
-  match stx with
+  match stripParens stx with
   | `([]) => pure #[]
   | `([$attrs,*]) => attrs.getElems.mapM unexpandValueAttr
   | _ => throw ()
 
 private def unexpandICmpPred (stx : Syntax) : UnexpandM (TSyntax `ident) := do
-  match stx with
+  match stripParens stx with
   | `($id:ident) =>
-    let nm? := match id.getId with
-      | ``ICmpPred.eq  | `eq  => some `eq
-      | ``ICmpPred.ne  | `ne  => some `ne
-      | ``ICmpPred.ugt | `ugt => some `ugt
-      | ``ICmpPred.uge | `uge => some `uge
-      | ``ICmpPred.ult | `ult => some `ult
-      | ``ICmpPred.ule | `ule => some `ule
-      | ``ICmpPred.sgt | `sgt => some `sgt
-      | ``ICmpPred.sge | `sge => some `sge
-      | ``ICmpPred.slt | `slt => some `slt
-      | ``ICmpPred.sle | `sle => some `sle
+    let nm? := match id.getId.eraseMacroScopes with
+      | ``ICmpPred.eq  | `ICmpPred.eq  | `eq  => some `eq
+      | ``ICmpPred.ne  | `ICmpPred.ne  | `ne  => some `ne
+      | ``ICmpPred.ugt | `ICmpPred.ugt | `ugt => some `ugt
+      | ``ICmpPred.uge | `ICmpPred.uge | `uge => some `uge
+      | ``ICmpPred.ult | `ICmpPred.ult | `ult => some `ult
+      | ``ICmpPred.ule | `ICmpPred.ule | `ule => some `ule
+      | ``ICmpPred.sgt | `ICmpPred.sgt | `sgt => some `sgt
+      | ``ICmpPred.sge | `ICmpPred.sge | `sge => some `sge
+      | ``ICmpPred.slt | `ICmpPred.slt | `slt => some `slt
+      | ``ICmpPred.sle | `ICmpPred.sle | `sle => some `sle
       | _ => none
     match nm? with
     | some nm => pure (mkIdent nm)
@@ -225,38 +391,64 @@ private def unexpandICmpPred (stx : Syntax) : UnexpandM (TSyntax `ident) := do
   | _ => throw ()
 
 private def unexpandFCmpPred (stx : Syntax) : UnexpandM (TSyntax `ident) := do
-  match stx with
+  match stripParens stx with
   | `($id:ident) =>
-    let nm? := match id.getId with
-      | ``FCmpPred.ffalse | `ffalse => some `false
-      | ``FCmpPred.oeq    | `oeq    => some `oeq
-      | ``FCmpPred.ogt    | `ogt    => some `ogt
-      | ``FCmpPred.oge    | `oge    => some `oge
-      | ``FCmpPred.olt    | `olt    => some `olt
-      | ``FCmpPred.ole    | `ole    => some `ole
-      | ``FCmpPred.one    | `one    => some `one
-      | ``FCmpPred.ord    | `ord    => some `ord
-      | ``FCmpPred.ueq    | `ueq    => some `ueq
-      | ``FCmpPred.ugt    | `ugt    => some `ugt
-      | ``FCmpPred.uge    | `uge    => some `uge
-      | ``FCmpPred.ult    | `ult    => some `ult
-      | ``FCmpPred.ule    | `ule    => some `ule
-      | ``FCmpPred.une    | `une    => some `une
-      | ``FCmpPred.uno    | `uno    => some `uno
-      | ``FCmpPred.ftrue  | `ftrue  => some `true
+    let nm? := match id.getId.eraseMacroScopes with
+      | ``FCmpPred.ffalse | `FCmpPred.ffalse | `ffalse => some `false
+      | ``FCmpPred.oeq    | `FCmpPred.oeq    | `oeq    => some `oeq
+      | ``FCmpPred.ogt    | `FCmpPred.ogt    | `ogt    => some `ogt
+      | ``FCmpPred.oge    | `FCmpPred.oge    | `oge    => some `oge
+      | ``FCmpPred.olt    | `FCmpPred.olt    | `olt    => some `olt
+      | ``FCmpPred.ole    | `FCmpPred.ole    | `ole    => some `ole
+      | ``FCmpPred.one    | `FCmpPred.one    | `one    => some `one
+      | ``FCmpPred.ord    | `FCmpPred.ord    | `ord    => some `ord
+      | ``FCmpPred.ueq    | `FCmpPred.ueq    | `ueq    => some `ueq
+      | ``FCmpPred.ugt    | `FCmpPred.ugt    | `ugt    => some `ugt
+      | ``FCmpPred.uge    | `FCmpPred.uge    | `uge    => some `uge
+      | ``FCmpPred.ult    | `FCmpPred.ult    | `ult    => some `ult
+      | ``FCmpPred.ule    | `FCmpPred.ule    | `ule    => some `ule
+      | ``FCmpPred.une    | `FCmpPred.une    | `une    => some `une
+      | ``FCmpPred.uno    | `FCmpPred.uno    | `uno    => some `uno
+      | ``FCmpPred.ftrue  | `FCmpPred.ftrue  | `ftrue  => some `true
       | _ => none
     match nm? with
     | some nm => pure (mkIdent nm)
     | none => throw ()
   | _ => throw ()
 
+private def isReservedRawIdKeyword (s : String) : Bool :=
+  s ∈ [
+    "type", "void", "true", "false", "null", "undef", "poison", "zeroinitializer",
+    "def", "let", "in", "where", "match", "with", "do", "fun", "if", "then", "else",
+    "for", "return", "import", "open", "end", "section", "namespace", "by", "have",
+    "show", "from", "at", "as", "struct", "structure", "inductive", "theorem", "lemma",
+    "global", "constant", "declare", "define", "align", "addrspace", "label", "to",
+    "cc", "tail", "noreturn", "nobuiltin", "fast", "nnan", "ninf", "nsz", "arcp",
+    "contract", "afn", "reassoc", "inbounds", "nusw", "nuw", "noundef", "nonnull",
+    "noalias", "readonly", "volatile", "samesign", "exact", "disjoint", "nneg",
+    "splat", "fbits", "fspecial", "blockaddress", "denormal_fpenv", "range", "range_list",
+    "dereferenceable", "dereferenceable_or_null", "nofpclass", "byval", "sret"
+  ]
+
+private def isSimpleRawIdIdent (s : String) : Bool :=
+  match s.toList with
+  | [] => false
+  | c :: cs =>
+    (c.isAlpha || c == '_') &&
+    cs.all (fun ch => ch.isAlphanum || ch == '_') &&
+    !isReservedRawIdKeyword s
+
 /-! ### Identifiers -/
 
 @[app_unexpander RawId.name]
 def unexpandRawIdName : Unexpander
   | `($_ $s:str) =>
-    let name := mkIdent $ Name.mkSimple s.getString
-    `([llvm-rawid| $name:ident])
+    let str := s.getString
+    if isSimpleRawIdIdent str then
+      let name := mkIdent (Name.mkSimple str)
+      `([llvm-rawid| $name:ident])
+    else
+      `([llvm-rawid| $s:str])
   | _ => throw ()
 
 @[app_unexpander RawId.anonymous]
@@ -310,21 +502,53 @@ def unexpandLlvmRetTypeRet : Unexpander
 @[app_unexpander LlvmType.int]
 def unexpandLlvmTypeInt : Unexpander
   | `($_ $w:num) =>
-    let id := mkIdent $ Name.mkSimple s!"i{w.getNat}"
+    let id := mkIdent (Name.mkSimple s!"i{w.getNat}")
     `([llvm-type| $id:ident])
   | `($_ $w:term) =>
     `([llvm-type| i$($w:term)])
   | _ => throw ()
 
+@[app_unexpander LlvmType.byte]
+def unexpandLlvmTypeByte : Unexpander
+  | `($_ $w:num) =>
+    let id := mkIdent (Name.mkSimple s!"b{w.getNat}")
+    `([llvm-type| $id:ident])
+  | `($_ $w:term) =>
+    `([llvm-type| b$($w:term)])
+  | _ => throw ()
+
+@[app_unexpander LlvmType.i1]
+def unexpandLlvmTypeI1 : Unexpander | `($_) => let id := mkIdent `i1; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.i8]
+def unexpandLlvmTypeI8 : Unexpander | `($_) => let id := mkIdent `i8; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.i16]
+def unexpandLlvmTypeI16 : Unexpander | `($_) => let id := mkIdent `i16; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.i32]
+def unexpandLlvmTypeI32 : Unexpander | `($_) => let id := mkIdent `i32; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.i64]
+def unexpandLlvmTypeI64 : Unexpander | `($_) => let id := mkIdent `i64; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.f16]
+def unexpandLlvmTypeF16 : Unexpander | `($_) => let id := mkIdent `half; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.bf16]
+def unexpandLlvmTypeBF16 : Unexpander | `($_) => let id := mkIdent `bfloat; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.f32]
+def unexpandLlvmTypeF32 : Unexpander | `($_) => let id := mkIdent `float; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.f64]
+def unexpandLlvmTypeF64 : Unexpander | `($_) => let id := mkIdent `double; `([llvm-type| $id:ident])
+@[app_unexpander LlvmType.f128]
+def unexpandLlvmTypeF128 : Unexpander | `($_) => let id := mkIdent `fp128; `([llvm-type| $id:ident])
+
 @[app_unexpander LlvmType.float]
 def unexpandLlvmTypeFloat : Unexpander
   | `($_ $ft:ident) =>
-    let name? := match ft.getId with
-      | ``FloatType.half   | `half   => some `half
-      | ``FloatType.bfloat | `bfloat => some `bfloat
-      | ``FloatType.float  | `float  => some `float
-      | ``FloatType.double | `double => some `double
-      | ``FloatType.fp128  | `fp128  => some `fp128
+    let name? := match ft.getId.eraseMacroScopes with
+      | ``FloatType.half      | `FloatType.half      | `half      => some `half
+      | ``FloatType.bfloat    | `FloatType.bfloat    | `bfloat    => some `bfloat
+      | ``FloatType.float     | `FloatType.float     | `float     => some `float
+      | ``FloatType.double    | `FloatType.double    | `double    => some `double
+      | ``FloatType.x86_fp80  | `FloatType.x86_fp80  | `x86_fp80  => some `x86_fp80
+      | ``FloatType.fp128     | `FloatType.fp128     | `fp128     => some `fp128
+      | ``FloatType.ppc_fp128 | `FloatType.ppc_fp128 | `ppc_fp128 => some `ppc_fp128
       | _ => none
     match name? with
     | some nm =>
@@ -338,7 +562,9 @@ def unexpandLlvmTypePtr : Unexpander
   | `($_ 0) =>
     let id := mkIdent `ptr
     `([llvm-type| $id:ident])
-  | `($_ $n:num) => `([llvm-type| ptr addrspace($n:num)])
+  | `($_ $n:num) =>
+    let id := mkIdent `ptr
+    `([llvm-type| $id:ident addrspace($n:num)])
   | `($_) =>
     let id := mkIdent `ptr
     `([llvm-type| $id:ident])
@@ -370,6 +596,14 @@ def unexpandLlvmTypeStruct : Unexpander
       let fs : Syntax.TSepArray `nanollvm_type "," := fs
       `([llvm-type| <{ $fs,* }>])
     | _, _ => throw ()
+  | _ => throw ()
+
+@[app_unexpander LlvmType.named]
+def unexpandLlvmTypeNamed : Unexpander
+  | `($_ $nm) =>
+    match asRawId? nm with
+    | some nm => `([llvm-type| %$nm:nanollvm_rawid])
+    | none => throw ()
   | _ => throw ()
 
 @[app_unexpander LlvmType.function]
@@ -598,15 +832,15 @@ def unexpandExpIdentifier : Unexpander
 def unexpandExpBool : Unexpander
   | `($_ $a) =>
     match asBool? a with
-    | some true  => `([llvm-exp| true])
-    | some false => `([llvm-exp| false])
+    | some true  => let id := mkIdent `true; `([llvm-exp| $id:ident])
+    | some false => let id := mkIdent `false; `([llvm-exp| $id:ident])
     | none => throw ()
   | _ => throw ()
 
 @[app_unexpander Exp.int]
 def unexpandExpInt : Unexpander
   | `($_ $arg) =>
-    match arg with
+    match stripParens arg with
     | `(Int.ofNat $n:num) | `($n:num) => `([llvm-exp| $n:num])
     | `(Int.negSucc $n:num) =>
       let k := Syntax.mkNumLit (toString (n.getNat + 1))
@@ -619,6 +853,68 @@ def unexpandExpInt : Unexpander
 @[app_unexpander Exp.floatBits]
 def unexpandExpFloatBits : Unexpander
   | `($_ $n:num) => `([llvm-exp| fbits($n:num)])
+  | _ => throw ()
+
+private def mkFloatDecSciLit (m : Nat) (exp10 : Int) : TSyntax `scientific :=
+  let s :=
+    if exp10 == -1 && m == 0 then
+      "0.0"
+    else if exp10 < 0 then
+      let digits := toString m
+      let e := (-exp10).toNat
+      if digits.length > e then
+        let intPart := digits.take (digits.length - e)
+        let fracPart := digits.drop (digits.length - e)
+        s!"{intPart}.{fracPart}"
+      else
+        s!"{m}e{exp10}"
+    else
+      s!"{m}e{exp10}"
+  Syntax.mkScientificLit s
+
+@[app_unexpander Exp.floatDec]
+def unexpandExpFloatDec : Unexpander
+  | `($_ $neg $m:num $exp10) =>
+    match asBool? neg, asSignedIntVal? exp10 with
+    | some false, some e =>
+      let sci := mkFloatDecSciLit m.getNat e
+      `([llvm-exp| $sci:scientific])
+    | some true, some e =>
+      let sci := mkFloatDecSciLit m.getNat e
+      `([llvm-exp| -$sci:scientific])
+    | _, _ => throw ()
+  | _ => throw ()
+
+private def unexpandFloatSpecialCore (neg isInf quiet : Syntax) (pOpt : Option (TSyntax `num)) :
+    UnexpandM (TSyntax `term) :=
+  match asBool? neg, asBool? isInf, asBool? quiet with
+  | some neg, some isInf, some quiet =>
+    let kind :=
+      if isInf then mkIdent `inf
+      else if quiet then mkIdent `qnan
+      else mkIdent `snan
+    if neg then
+      `([llvm-exp| fspecial(- $kind:ident $[($pOpt:num)]?)])
+    else
+      `([llvm-exp| fspecial(+ $kind:ident $[($pOpt:num)]?)])
+  | _, _, _ => throw ()
+
+@[app_unexpander Exp.floatSpecial]
+def unexpandExpFloatSpecial : Unexpander
+  | `($_ $neg $isInf $quiet $payload:num) =>
+    let pOpt : Option (TSyntax `num) :=
+      if payload.getNat == 0 then none else some payload
+    unexpandFloatSpecialCore neg isInf quiet pOpt
+  | `($_ $neg $isInf $quiet) =>
+    unexpandFloatSpecialCore neg isInf quiet none
+  | _ => throw ()
+
+@[app_unexpander Exp.blockAddress]
+def unexpandExpBlockAddress : Unexpander
+  | `($_ $fn $blk) =>
+    match asRawId? fn, asRawId? blk with
+    | some fn, some blk => `([llvm-exp| blockaddress(@$fn:nanollvm_rawid, %$blk:nanollvm_rawid)])
+    | _, _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Exp.null]
@@ -672,6 +968,83 @@ def unexpandExpSplat : Unexpander
     `([llvm-exp| splat ($te:nanollvm_typed_exp)])
   | _ => throw ()
 
+@[app_unexpander Exp.gepConst]
+def unexpandExpGepConst : Unexpander
+  | `($_ $flags $baseTy $ptr [$idxs,*]) => do
+    let gFlags ← unexpandGEPFlags flags
+    match asType? baseTy with
+    | some baseTy =>
+      let ptrTe ← asTypedExp? ptr
+      let idxArr ← idxs.getElems.mapM asTypedExp?
+      `([llvm-exp| getelementptr $gFlags:nanollvm_gep_flag* ($baseTy:nanollvm_type, $ptrTe:nanollvm_typed_exp $[, $idxArr:nanollvm_typed_exp]*)])
+    | none => throw ()
+  | _ => throw ()
+
+@[app_unexpander Exp.convConst]
+def unexpandExpConvConst : Unexpander
+  | `($_ $op $fromTy $v $toTy) =>
+    match asConversionOp? op, asType? fromTy, asExp? v, asType? toTy with
+    | some op, some fromTy, some v, some toTy =>
+      `([llvm-exp| $op:nanollvm_conversion_op ($fromTy:nanollvm_type $v:nanollvm_exp to $toTy:nanollvm_type)])
+    | _, _, _, _ => throw ()
+  | _ => throw ()
+
+@[app_unexpander Exp.binConst]
+def unexpandExpBinConst : Unexpander
+  | `($_ $op $ty $v1 $v2) =>
+    match asIntBinOp? op, asType? ty, asExp? v1, asExp? v2 with
+    | some op, some ty, some v1, some v2 =>
+      `([llvm-exp| $op:nanollvm_int_bin_op ($ty:nanollvm_type $v1:nanollvm_exp, $ty:nanollvm_type $v2:nanollvm_exp)])
+    | _, _, _, _ => throw ()
+  | _ => throw ()
+
+@[app_unexpander Exp.insertElemConst]
+def unexpandExpInsertElemConst : Unexpander
+  | `($_ $vecTy $vec $valTy $val $idxTy $idx) => do
+    match asType? vecTy, asExp? vec, asType? valTy, asExp? val, asType? idxTy, asExp? idx with
+    | some vecTy, some vec, some valTy, some val, some idxTy, some idx =>
+      let vTe ← `(nanollvm_typed_exp| $vecTy:nanollvm_type $vec:nanollvm_exp)
+      let eTe ← `(nanollvm_typed_exp| $valTy:nanollvm_type $val:nanollvm_exp)
+      let iTe ← `(nanollvm_typed_exp| $idxTy:nanollvm_type $idx:nanollvm_exp)
+      `([llvm-exp| insertelement ($vTe:nanollvm_typed_exp, $eTe:nanollvm_typed_exp, $iTe:nanollvm_typed_exp)])
+    | _, _, _, _, _, _ => throw ()
+  | _ => throw ()
+
+@[app_unexpander Exp.extractElemConst]
+def unexpandExpExtractElemConst : Unexpander
+  | `($_ $vecTy $vec $idxTy $idx) => do
+    match asType? vecTy, asExp? vec, asType? idxTy, asExp? idx with
+    | some vecTy, some vec, some idxTy, some idx =>
+      let vTe ← `(nanollvm_typed_exp| $vecTy:nanollvm_type $vec:nanollvm_exp)
+      let iTe ← `(nanollvm_typed_exp| $idxTy:nanollvm_type $idx:nanollvm_exp)
+      `([llvm-exp| extractelement ($vTe:nanollvm_typed_exp, $iTe:nanollvm_typed_exp)])
+    | _, _, _, _ => throw ()
+  | _ => throw ()
+
+private def unexpandShuffleMaskElems (mask : Syntax.TSepArray `term ",") :
+    UnexpandM (Syntax.TSepArray `nanollvm_shuffle_elem ",") := do
+  if mask.getElems.isEmpty then throw ()
+  let i32Id := mkIdent `i32
+  let elems ← mask.getElems.mapM fun el =>
+    match stripParens el with
+    | `(some $n:num) | `(Option.some $n:num) => `(nanollvm_shuffle_elem| $i32Id:ident $n:num)
+    | `(none) | `(Option.none) => `(nanollvm_shuffle_elem| $i32Id:ident poison)
+    | _ => throw ()
+  pure elems
+
+@[app_unexpander Exp.shuffleVecConst]
+def unexpandExpShuffleVecConst : Unexpander
+  | `($_ $vecTy $v1 $v2 [$mask,*]) => do
+    let elemsSep ← unexpandShuffleMaskElems mask
+    let lenLit := Syntax.mkNumLit (toString mask.getElems.size)
+    match asType? vecTy, asExp? v1, asExp? v2 with
+    | some vecTy, some v1, some v2 =>
+      let v1Te ← `(nanollvm_typed_exp| $vecTy:nanollvm_type $v1:nanollvm_exp)
+      let v2Te ← `(nanollvm_typed_exp| $vecTy:nanollvm_type $v2:nanollvm_exp)
+      `([llvm-exp| shufflevector ($v1Te:nanollvm_typed_exp, $v2Te:nanollvm_typed_exp, <$lenLit:num x i32> <$elemsSep,*>)])
+    | _, _, _ => throw ()
+  | _ => throw ()
+
 /-! ### Instructions -/
 
 @[app_unexpander Instruction.intBinaryOp]
@@ -685,29 +1058,37 @@ def unexpandInstructionIntBinaryOp : Unexpander
 
 @[app_unexpander Instruction.floatUnaryOp]
 def unexpandInstructionFloatUnaryOp : Unexpander
-  | `($_ (FloatUnaryOp.fneg $fmf) $ty $v) => do
-    let flags ← unexpandFMFFlags fmf
+  | `($_ $op $ty $v) => do
+    let flags ← match stripParens op with
+      | `($f:ident $fmf) =>
+        match f.getId.eraseMacroScopes with
+        | ``FloatUnaryOp.fneg | `FloatUnaryOp.fneg | `fneg => unexpandFMFFlags fmf
+        | _ => throw ()
+      | `($f:ident) =>
+        match f.getId.eraseMacroScopes with
+        | ``FloatUnaryOp.fneg | `FloatUnaryOp.fneg | `fneg => pure #[]
+        | _ => throw ()
+      | _ => throw ()
     match asType? ty, asExp? v with
     | some ty, some v => `([llvm-instruction| fneg $flags:nanollvm_fmf_flag* $ty:nanollvm_type $v:nanollvm_exp])
-    | _, _ => throw ()
-  | `($_ FloatUnaryOp.fneg $ty $v) =>
-    match asType? ty, asExp? v with
-    | some ty, some v => `([llvm-instruction| fneg $ty:nanollvm_type $v:nanollvm_exp])
     | _, _ => throw ()
   | _ => throw ()
 
 @[app_unexpander Instruction.floatBinaryOp]
 def unexpandInstructionFloatBinaryOp : Unexpander
-  | `($_ ($op $fmf) $ty $v1 $v2) => do
-    let flags ← unexpandFMFFlags fmf
+  | `($_ $opStx $ty $v1 $v2) => do
+    let (opNm, flags) ← match stripParens opStx with
+      | `($op:ident $fmf) => pure (op.getId.eraseMacroScopes, ← unexpandFMFFlags fmf)
+      | `($op:ident) => pure (op.getId.eraseMacroScopes, #[])
+      | _ => throw ()
     match asType? ty, asExp? v1, asExp? v2 with
     | some ty, some v1, some v2 =>
-      let fpOp : TSyntax `nanollvm_fp_bin_op ← match op with
-        | `(FloatBinaryOp.fadd) => `(nanollvm_fp_bin_op| fadd $flags:nanollvm_fmf_flag*)
-        | `(FloatBinaryOp.fsub) => `(nanollvm_fp_bin_op| fsub $flags:nanollvm_fmf_flag*)
-        | `(FloatBinaryOp.fmul) => `(nanollvm_fp_bin_op| fmul $flags:nanollvm_fmf_flag*)
-        | `(FloatBinaryOp.fdiv) => `(nanollvm_fp_bin_op| fdiv $flags:nanollvm_fmf_flag*)
-        | `(FloatBinaryOp.frem) => `(nanollvm_fp_bin_op| frem $flags:nanollvm_fmf_flag*)
+      let fpOp : TSyntax `nanollvm_fp_bin_op ← match opNm with
+        | ``FloatBinaryOp.fadd | `FloatBinaryOp.fadd | `fadd => `(nanollvm_fp_bin_op| fadd $flags:nanollvm_fmf_flag*)
+        | ``FloatBinaryOp.fsub | `FloatBinaryOp.fsub | `fsub => `(nanollvm_fp_bin_op| fsub $flags:nanollvm_fmf_flag*)
+        | ``FloatBinaryOp.fmul | `FloatBinaryOp.fmul | `fmul => `(nanollvm_fp_bin_op| fmul $flags:nanollvm_fmf_flag*)
+        | ``FloatBinaryOp.fdiv | `FloatBinaryOp.fdiv | `fdiv => `(nanollvm_fp_bin_op| fdiv $flags:nanollvm_fmf_flag*)
+        | ``FloatBinaryOp.frem | `FloatBinaryOp.frem | `frem => `(nanollvm_fp_bin_op| frem $flags:nanollvm_fmf_flag*)
         | _ => throw ()
       `([llvm-instruction| $fpOp:nanollvm_fp_bin_op $ty:nanollvm_type $v1:nanollvm_exp, $v2:nanollvm_exp])
     | _, _, _ => throw ()
@@ -755,23 +1136,31 @@ def unexpandInstructionSelect : Unexpander
     | _, _, _, _, _ => throw ()
   | _ => throw ()
 
+private def unexpandPhiCore (ty fmf : Syntax) (incs : Syntax.TSepArray `term ",") (mds : Array (TSyntax `nanollvm_value_attr)) :
+    UnexpandM (TSyntax `term) := do
+  if incs.getElems.isEmpty then throw ()
+  let flags ← unexpandFMFFlags fmf
+  match asType? ty with
+  | none => throw ()
+  | some ty =>
+    let incArr ← incs.getElems.mapM fun inc =>
+      match stripParens inc with
+      | `(($e, $lbl)) | `(⟨$e, $lbl⟩) =>
+        match asExp? e, asRawId? lbl with
+        | some e, some lbl => `(nanollvm_phi_incoming| [$e:nanollvm_exp, %$lbl:nanollvm_rawid])
+        | _, _ => throw ()
+      | _ => throw ()
+    let inc0 := incArr[0]!
+    let incRest := incArr.extract 1 incArr.size
+    `([llvm-instruction| phi $flags:nanollvm_fmf_flag* $ty:nanollvm_type $inc0:nanollvm_phi_incoming $[, $incRest:nanollvm_phi_incoming]* $[, !$mds:nanollvm_value_attr]*])
+
 @[app_unexpander Instruction.phi]
 def unexpandInstructionPhi : Unexpander
-  | `($_ $ty $fmf [$incs,*]) => do
-    if incs.getElems.isEmpty then throw ()
-    let flags ← unexpandFMFFlags fmf
-    match asType? ty with
-    | none => throw ()
-    | some ty =>
-      let incArr ← incs.getElems.mapM fun inc =>
-        match inc with
-        | `(($e, $lbl)) =>
-          match asExp? e, asRawId? lbl with
-          | some e, some lbl => `(nanollvm_phi_incoming| [$e:nanollvm_exp, %$lbl:nanollvm_rawid])
-          | _, _ => throw ()
-        | _ => throw ()
-      let incSep : Syntax.TSepArray `nanollvm_phi_incoming "," := incArr
-      `([llvm-instruction| phi $flags:nanollvm_fmf_flag* $ty:nanollvm_type $incSep,*])
+  | `($_ $ty $fmf [$incs,*] $md) => do
+    let mds ← unexpandValueAttrList md
+    unexpandPhiCore ty fmf incs mds
+  | `($_ $ty $fmf [$incs,*]) =>
+    unexpandPhiCore ty fmf incs #[]
   | _ => throw ()
 
 @[app_unexpander Instruction.alloca]
@@ -781,18 +1170,18 @@ def unexpandInstructionAlloca : Unexpander
     | none => throw ()
     | some ty =>
       let mut opts : Array (TSyntax `nanollvm_alloca_opt) := #[]
-      match numEl with
+      match stripParens numEl with
       | `(none) | `(Option.none) => pure ()
       | `(some $te) | `(Option.some $te) =>
         let te ← asTypedExp? te
         opts := opts.push (← `(nanollvm_alloca_opt| $te:nanollvm_typed_exp))
       | _ => throw ()
-      match al with
+      match stripParens al with
       | `(none) | `(Option.none) => pure ()
       | `(some $n:num) | `(Option.some $n:num) =>
         opts := opts.push (← `(nanollvm_alloca_opt| align $n:num))
       | _ => throw ()
-      match as with
+      match stripParens as with
       | `(0) => pure ()
       | `($n:num) => opts := opts.push (← `(nanollvm_alloca_opt| addrspace($n:num)))
       | _ => throw ()
@@ -802,13 +1191,13 @@ def unexpandInstructionAlloca : Unexpander
     | none => throw ()
     | some ty =>
       let mut opts : Array (TSyntax `nanollvm_alloca_opt) := #[]
-      match numEl with
+      match stripParens numEl with
       | `(none) | `(Option.none) => pure ()
       | `(some $te) | `(Option.some $te) =>
         let te ← asTypedExp? te
         opts := opts.push (← `(nanollvm_alloca_opt| $te:nanollvm_typed_exp))
       | _ => throw ()
-      match al with
+      match stripParens al with
       | `(none) | `(Option.none) => pure ()
       | `(some $n:num) | `(Option.some $n:num) =>
         opts := opts.push (← `(nanollvm_alloca_opt| align $n:num))
@@ -816,34 +1205,43 @@ def unexpandInstructionAlloca : Unexpander
       `([llvm-instruction| alloca $ty:nanollvm_type $[, $opts:nanollvm_alloca_opt]*])
   | _ => throw ()
 
+private def unexpandLoadCore (ty pTy ptr al : Syntax) (isVol nu : Bool) (mds : Array (TSyntax `nanollvm_value_attr)) :
+    UnexpandM (TSyntax `term) := do
+  match asType? ty, asType? pTy, asExp? ptr with
+  | some ty, some pTy, some ptr =>
+    let mut opts : Array (TSyntax `nanollvm_load_opt) := #[]
+    match stripParens al with
+    | `(none) | `(Option.none) => pure ()
+    | `(some $n:num) | `(Option.some $n:num) =>
+      opts := opts.push (← `(nanollvm_load_opt| align $n:num))
+    | _ => throw ()
+    if nu then opts := opts.push (← `(nanollvm_load_opt| !noundef))
+    for md in mds do
+      opts := opts.push (← `(nanollvm_load_opt| !$md:nanollvm_value_attr))
+    if isVol then
+      `([llvm-instruction| load volatile $ty:nanollvm_type, $pTy:nanollvm_type $ptr:nanollvm_exp $[, $opts:nanollvm_load_opt]*])
+    else
+      `([llvm-instruction| load $ty:nanollvm_type, $pTy:nanollvm_type $ptr:nanollvm_exp $[, $opts:nanollvm_load_opt]*])
+  | _, _, _ => throw ()
+
 @[app_unexpander Instruction.load]
 def unexpandInstructionLoad : Unexpander
-  | `($_ $ty $pTy $ptr $al $isVol $nu) | `($_ $ty $pTy $ptr $al $isVol $nu []) => do
-    match asType? ty, asType? pTy, asExp? ptr, asBool? isVol, asBool? nu with
-    | some ty, some pTy, some ptr, some isVol, some nu =>
-      let mut opts : Array (TSyntax `nanollvm_load_opt) := #[]
-      match al with
-      | `(none) | `(Option.none) => pure ()
-      | `(some $n:num) | `(Option.some $n:num) =>
-        opts := opts.push (← `(nanollvm_load_opt| align $n:num))
-      | _ => throw ()
-      if nu then opts := opts.push (← `(nanollvm_load_opt| !noundef))
-      if isVol then
-        `([llvm-instruction| load volatile $ty:nanollvm_type, $pTy:nanollvm_type $ptr:nanollvm_exp $[, $opts:nanollvm_load_opt]*])
-      else
-        `([llvm-instruction| load $ty:nanollvm_type, $pTy:nanollvm_type $ptr:nanollvm_exp $[, $opts:nanollvm_load_opt]*])
-    | _, _, _, _, _ => throw ()
-  | `($_ $ty $pTy $ptr $al) => do
-    match asType? ty, asType? pTy, asExp? ptr with
-    | some ty, some pTy, some ptr =>
-      let mut opts : Array (TSyntax `nanollvm_load_opt) := #[]
-      match al with
-      | `(none) | `(Option.none) => pure ()
-      | `(some $n:num) | `(Option.some $n:num) =>
-        opts := opts.push (← `(nanollvm_load_opt| align $n:num))
-      | _ => throw ()
-      `([llvm-instruction| load $ty:nanollvm_type, $pTy:nanollvm_type $ptr:nanollvm_exp $[, $opts:nanollvm_load_opt]*])
-    | _, _, _ => throw ()
+  | `($_ $ty $pTy $ptr $al $isVol $nu $md) => do
+    match asBool? isVol, asBool? nu with
+    | some isVol, some nu =>
+      let mds ← unexpandValueAttrList md
+      unexpandLoadCore ty pTy ptr al isVol nu mds
+    | _, _ => throw ()
+  | `($_ $ty $pTy $ptr $al $isVol $nu) => do
+    match asBool? isVol, asBool? nu with
+    | some isVol, some nu => unexpandLoadCore ty pTy ptr al isVol nu #[]
+    | _, _ => throw ()
+  | `($_ $ty $pTy $ptr $al $isVol) => do
+    match asBool? isVol with
+    | some isVol => unexpandLoadCore ty pTy ptr al isVol false #[]
+    | none => throw ()
+  | `($_ $ty $pTy $ptr $al) =>
+    unexpandLoadCore ty pTy ptr al false false #[]
   | _ => throw ()
 
 @[app_unexpander Instruction.store]
@@ -851,7 +1249,7 @@ def unexpandInstructionStore : Unexpander
   | `($_ $vTy $v $pTy $ptr $al $isVol) => do
     match asType? vTy, asExp? v, asType? pTy, asExp? ptr, asBool? isVol with
     | some vTy, some v, some pTy, some ptr, some isVol =>
-      match al with
+      match stripParens al with
       | `(none) | `(Option.none) =>
         if isVol then `([llvm-instruction| store volatile $vTy:nanollvm_type $v:nanollvm_exp, $pTy:nanollvm_type $ptr:nanollvm_exp])
         else `([llvm-instruction| store $vTy:nanollvm_type $v:nanollvm_exp, $pTy:nanollvm_type $ptr:nanollvm_exp])
@@ -863,7 +1261,7 @@ def unexpandInstructionStore : Unexpander
   | `($_ $vTy $v $pTy $ptr $al) => do
     match asType? vTy, asExp? v, asType? pTy, asExp? ptr with
     | some vTy, some v, some pTy, some ptr =>
-      match al with
+      match stripParens al with
       | `(none) | `(Option.none) =>
         `([llvm-instruction| store $vTy:nanollvm_type $v:nanollvm_exp, $pTy:nanollvm_type $ptr:nanollvm_exp])
       | `(some $n:num) | `(Option.some $n:num) =>
@@ -934,69 +1332,125 @@ def unexpandInstructionInsertElement : Unexpander
 @[app_unexpander Instruction.shufflevector]
 def unexpandInstructionShuffleVector : Unexpander
   | `($_ $vecTy $v1 $v2 [$mask,*]) => do
-    if mask.getElems.isEmpty then throw ()
+    let elemsSep ← unexpandShuffleMaskElems mask
+    let lenLit := Syntax.mkNumLit (toString mask.getElems.size)
     match asType? vecTy, asExp? v1, asExp? v2 with
     | some vecTy, some v1, some v2 =>
-      let i32Id := mkIdent `i32
-      let elems ← mask.getElems.mapM fun el =>
-        match el with
-        | `(some $n:num) | `(Option.some $n:num) => `(nanollvm_shuffle_elem| $i32Id:ident $n:num)
-        | `(none) | `(Option.none) => `(nanollvm_shuffle_elem| $i32Id:ident poison)
-        | _ => throw ()
-      let elemsSep : Syntax.TSepArray `nanollvm_shuffle_elem "," := elems
-      let lenLit := Syntax.mkNumLit (toString mask.getElems.size)
-      `([llvm-instruction| shufflevector $vecTy:nanollvm_type $v1:nanollvm_exp, $vecTy:nanollvm_type $v2:nanollvm_exp, < $lenLit:num x i32 > < $elemsSep,* >])
+      `([llvm-instruction| shufflevector $vecTy:nanollvm_type $v1:nanollvm_exp, $vecTy:nanollvm_type $v2:nanollvm_exp, <$lenLit:num x i32> <$elemsSep,*>])
     | _, _, _ => throw ()
   | _ => throw ()
 
+private def unexpandCallArgs (args : Syntax.TSepArray `term ",") :
+    UnexpandM (Syntax.TSepArray `nanollvm_call_arg ",") := do
+  let callArgs ← args.getElems.mapM fun a =>
+    match stripParens a with
+    | `(($t, $e, $attrs)) | `(⟨$t, $e, $attrs⟩) => do
+      let as ← unexpandValueAttrList attrs
+      match asType? t, asExp? e with
+      | some t, some e => `(nanollvm_call_arg| $t:nanollvm_type $as:nanollvm_value_attr* $e:nanollvm_exp)
+      | _, _ => throw ()
+    | _ => throw ()
+  pure callArgs
+
+private def unexpandOpBundles (stx : Syntax) : UnexpandM (Option (Syntax.TSepArray `nanollvm_op_bundle ",")) := do
+  match stripParens stx with
+  | `([]) => pure none
+  | `([$bs,*]) =>
+    if bs.getElems.isEmpty then return none
+    let arr ← bs.getElems.mapM fun b =>
+      match stripParens b with
+      | `(($tag:str, [$tes,*])) | `(⟨$tag:str, [$tes,*]⟩) => do
+        let teArr ← tes.getElems.mapM asTypedExp?
+        let teSep : Syntax.TSepArray `nanollvm_typed_exp "," := teArr
+        `(nanollvm_op_bundle| $tag:str ($teSep,*))
+      | _ => throw ()
+    let sep : Syntax.TSepArray `nanollvm_op_bundle "," := arr
+    pure (some sep)
+  | _ => throw ()
+
+private def unexpandCallCore (retTy fmf callee : Syntax) (args : Syntax.TSepArray `term ",")
+    (rAttrs : Array (TSyntax `nanollvm_value_attr))
+    (bundlesOpt : Option (Syntax.TSepArray `nanollvm_op_bundle ","))
+    (isNoReturn isTail : Bool) (ccStr : String) : UnexpandM (TSyntax `term) := do
+  let flags ← unexpandFMFFlags fmf
+  let callArgsSep ← unexpandCallArgs args
+  match asType? retTy, asExp? callee with
+  | some retTy, some callee =>
+    let ccOpt : Option (TSyntax `str) := if ccStr.isEmpty then none else some (Syntax.mkStrLit ccStr)
+    match isTail, isNoReturn, bundlesOpt with
+    | false, false, none =>
+      `([llvm-instruction| call $flags:nanollvm_fmf_flag* $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*)])
+    | true, false, none =>
+      `([llvm-instruction| tail call $flags:nanollvm_fmf_flag* $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*)])
+    | false, true, none =>
+      `([llvm-instruction| call $flags:nanollvm_fmf_flag* $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*) noreturn])
+    | true, true, none =>
+      `([llvm-instruction| tail call $flags:nanollvm_fmf_flag* $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*) noreturn])
+    | false, false, some bs =>
+      `([llvm-instruction| call $flags:nanollvm_fmf_flag* $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*) [$bs,*]])
+    | true, false, some bs =>
+      `([llvm-instruction| tail call $flags:nanollvm_fmf_flag* $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*) [$bs,*]])
+    | false, true, some bs =>
+      `([llvm-instruction| call $flags:nanollvm_fmf_flag* $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*) [$bs,*] noreturn])
+    | true, true, some bs =>
+      `([llvm-instruction| tail call $flags:nanollvm_fmf_flag* $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*) [$bs,*] noreturn])
+  | _, _ => throw ()
+
 @[app_unexpander Instruction.call]
 def unexpandInstructionCall : Unexpander
-  | `($_ $retTy $fmf $callee [$args,*] $retAttrs) => do
-    let flags ← unexpandFMFFlags fmf
+  | `($_ $retTy $fmf $callee [$args,*] $retAttrs $bundles $isNoRet $site) => do
     let rAttrs ← unexpandValueAttrList retAttrs
-    match asType? retTy, asExp? callee with
-    | some retTy, some callee =>
-      let callArgs ← args.getElems.mapM fun a =>
-        match a with
-        | `(($t, $e, $attrs)) => do
-          let as ← unexpandValueAttrList attrs
-          match asType? t, asExp? e with
-          | some t, some e => `(nanollvm_call_arg| $t:nanollvm_type $as:nanollvm_value_attr* $e:nanollvm_exp)
-          | _, _ => throw ()
-        | _ => throw ()
-      let callArgsSep : Syntax.TSepArray `nanollvm_call_arg "," := callArgs
-      `([llvm-instruction| call $flags:nanollvm_fmf_flag* $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*)])
-    | _, _ => throw ()
-  | `($_ $retTy $fmf $callee [$args,*]) => do
-    let flags ← unexpandFMFFlags fmf
-    match asType? retTy, asExp? callee with
-    | some retTy, some callee =>
-      let callArgs ← args.getElems.mapM fun a =>
-        match a with
-        | `(($t, $e, $attrs)) => do
-          let as ← unexpandValueAttrList attrs
-          match asType? t, asExp? e with
-          | some t, some e => `(nanollvm_call_arg| $t:nanollvm_type $as:nanollvm_value_attr* $e:nanollvm_exp)
-          | _, _ => throw ()
-        | _ => throw ()
-      let callArgsSep : Syntax.TSepArray `nanollvm_call_arg "," := callArgs
-      `([llvm-instruction| call $flags:nanollvm_fmf_flag* $retTy:nanollvm_type $callee:nanollvm_exp($callArgsSep,*)])
-    | _, _ => throw ()
+    let bundlesOpt ← unexpandOpBundles bundles
+    match asBool? isNoRet with
+    | some isNoRet =>
+      let (isTail, ccStr) ← unexpandCallSiteInfo site
+      unexpandCallCore retTy fmf callee args rAttrs bundlesOpt isNoRet isTail ccStr
+    | none => throw ()
+  | `($_ $retTy $fmf $callee [$args,*] $retAttrs $bundles $isNoRet) => do
+    let rAttrs ← unexpandValueAttrList retAttrs
+    let bundlesOpt ← unexpandOpBundles bundles
+    match asBool? isNoRet with
+    | some isNoRet =>
+      unexpandCallCore retTy fmf callee args rAttrs bundlesOpt isNoRet false ""
+    | none => throw ()
+  | `($_ $retTy $fmf $callee [$args,*] $retAttrs $bundles) => do
+    let rAttrs ← unexpandValueAttrList retAttrs
+    let bundlesOpt ← unexpandOpBundles bundles
+    unexpandCallCore retTy fmf callee args rAttrs bundlesOpt false false ""
+  | `($_ $retTy $fmf $callee [$args,*] $retAttrs) => do
+    let rAttrs ← unexpandValueAttrList retAttrs
+    unexpandCallCore retTy fmf callee args rAttrs none false false ""
+  | `($_ $retTy $fmf $callee [$args,*]) =>
+    unexpandCallCore retTy fmf callee args #[] none false false ""
   | _ => throw ()
 
 @[app_unexpander Instruction.freeze]
 def unexpandInstructionFreeze : Unexpander
-  | `($_ ⟨$ty, $v⟩) | `($_ (($ty, $v))) =>
-    match asType? ty, asExp? v with
-    | some ty, some v => `([llvm-instruction| freeze $ty:nanollvm_type $v:nanollvm_exp])
-    | _, _ => throw ()
   | `($_ $tv) =>
-    match tv with
+    match stripParens tv with
     | `(⟨$ty, $v⟩) | `(($ty, $v)) =>
       match asType? ty, asExp? v with
       | some ty, some v => `([llvm-instruction| freeze $ty:nanollvm_type $v:nanollvm_exp])
       | _, _ => throw ()
     | _ => throw ()
+  | _ => throw ()
+
+@[app_unexpander Instruction.bitinsert]
+def unexpandInstructionBitinsert : Unexpander
+  | `($_ $bTy $b $vTy $v $oTy $o) =>
+    match asType? bTy, asExp? b, asType? vTy, asExp? v, asType? oTy, asExp? o with
+    | some bTy, some b, some vTy, some v, some oTy, some o =>
+      `([llvm-instruction| bitinsert $bTy:nanollvm_type $b:nanollvm_exp, $vTy:nanollvm_type $v:nanollvm_exp, $oTy:nanollvm_type $o:nanollvm_exp])
+    | _, _, _, _, _, _ => throw ()
+  | _ => throw ()
+
+@[app_unexpander Instruction.bitextract]
+def unexpandInstructionBitextract : Unexpander
+  | `($_ $rTy $sTy $s $oTy $o) =>
+    match asType? rTy, asType? sTy, asExp? s, asType? oTy, asExp? o with
+    | some rTy, some sTy, some s, some oTy, some o =>
+      `([llvm-instruction| bitextract $rTy:nanollvm_type, $sTy:nanollvm_type $s:nanollvm_exp, $oTy:nanollvm_type $o:nanollvm_exp])
+    | _, _, _, _, _ => throw ()
   | _ => throw ()
 
 /-! ### Terminators -/
@@ -1008,7 +1462,7 @@ def unexpandTerminatorRetVoid : Unexpander
 @[app_unexpander Terminator.ret]
 def unexpandTerminatorRet : Unexpander
   | `($_ $tv) =>
-    match tv with
+    match stripParens tv with
     | `(($ty, $v)) | `(⟨$ty, $v⟩) =>
       match asType? ty, asExp? v with
       | some ty, some v => `([llvm-terminator| ret $ty:nanollvm_type $v:nanollvm_exp])
@@ -1039,8 +1493,8 @@ def unexpandTerminatorSwitch : Unexpander
     match asType? ty, asExp? cond, asRawId? defDest with
     | some ty, some cond, some defDest =>
       let caseArr ← cases.getElems.mapM fun c =>
-        match c with
-        | `(($v, $lbl)) => do
+        match stripParens c with
+        | `(($v, $lbl)) | `(⟨$v, $lbl⟩) => do
           let vS ← asSignedInt? v
           match asRawId? lbl with
           | some lbl => `(nanollvm_switch_case| $ty:nanollvm_type $vS:nanollvm_signed_int, label %$lbl:nanollvm_rawid)
@@ -1050,54 +1504,110 @@ def unexpandTerminatorSwitch : Unexpander
     | _, _, _ => throw ()
   | _ => throw ()
 
+@[app_unexpander Terminator.indirectBr]
+def unexpandTerminatorIndirectBr : Unexpander
+  | `($_ $addr [$dests,*]) => do
+    match asExp? addr with
+    | some addr =>
+      let destArr ← dests.getElems.mapM fun d =>
+        match asRawId? d with
+        | some lbl => `(nanollvm_indirectbr_dest| label %$lbl:nanollvm_rawid)
+        | none => throw ()
+      let destSep : Syntax.TSepArray `nanollvm_indirectbr_dest "," := destArr
+      `([llvm-terminator| indirectbr ptr $addr:nanollvm_exp, [$destSep,*]])
+    | none => throw ()
+  | _ => throw ()
+
 @[app_unexpander Terminator.unreachable]
 def unexpandTerminatorUnreachable : Unexpander
   | `($_) => `([llvm-terminator| unreachable])
 
 /-! ### Declarations, Blocks, Definitions, Globals, Modules -/
 
+private def unexpandDeclarationCore (name ty : Syntax)
+    (aAttrsList : Array (Array (TSyntax `nanollvm_value_attr)))
+    (rAttrs : Array (TSyntax `nanollvm_value_attr))
+    (isNoRet isNoBuiltin : Bool)
+    (denormOpt : Option (TSyntax `nanollvm_fn_attr))
+    (ccStr : String) : UnexpandM (TSyntax `term) := do
+  match asRawId? name, asType? ty with
+  | some name, some ty =>
+    match ty with
+    | `(nanollvm_type| $retTy($params,*)) =>
+      let retTy : TSyntax `nanollvm_type := ⟨retTy⟩
+      let mut dArgs : Array (TSyntax `nanollvm_decl_arg) := #[]
+      for i in [:params.getElems.size] do
+        match params.getElems[i]!.raw with
+        | `(nanollvm_fn_param| ...) =>
+          dArgs := dArgs.push (← `(nanollvm_decl_arg| ...))
+        | `(nanollvm_fn_param| $t:nanollvm_type) =>
+          let as := aAttrsList.getD i #[]
+          dArgs := dArgs.push (← `(nanollvm_decl_arg| $t:nanollvm_type $as:nanollvm_value_attr*))
+        | _ => throw ()
+      let dArgsSep : Syntax.TSepArray `nanollvm_decl_arg "," := dArgs
+      let mut fnAttrs : Array (TSyntax `nanollvm_fn_attr) := #[]
+      if isNoRet then fnAttrs := fnAttrs.push (← `(nanollvm_fn_attr| noreturn))
+      if isNoBuiltin then fnAttrs := fnAttrs.push (← `(nanollvm_fn_attr| nobuiltin))
+      if let some d := denormOpt then fnAttrs := fnAttrs.push d
+      let ccOpt : Option (TSyntax `str) := if ccStr.isEmpty then none else some (Syntax.mkStrLit ccStr)
+      `([llvm-declaration| declare $[cc $ccOpt:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$name:nanollvm_rawid($dArgsSep,*) $fnAttrs:nanollvm_fn_attr*])
+    | _ => throw ()
+  | _, _ => throw ()
+
+private def unexpandArgAttrLists (argAttrs : Syntax) :
+    UnexpandM (Array (Array (TSyntax `nanollvm_value_attr))) :=
+  match stripParens argAttrs with
+  | `([]) => pure #[]
+  | `([$xs,*]) => xs.getElems.mapM unexpandValueAttrList
+  | _ => throw ()
+
+private def unexpandDenormOpt (denorm : Syntax) : UnexpandM (Option (TSyntax `nanollvm_fn_attr)) := do
+  match stripParens denorm with
+  | `(none) | `(Option.none) => pure none
+  | `(some $d) | `(Option.some $d) => pure (some (← unexpandDenormalMode d))
+  | _ => throw ()
+
 @[app_unexpander Declaration.mk]
 def unexpandDeclarationMk : Unexpander
+  | `($_ $name $ty $argAttrs $retAttrs $isNoRet $isNoBuiltin $denorm $ccVal) => do
+    let rAttrs ← unexpandValueAttrList retAttrs
+    let aAttrsList ← unexpandArgAttrLists argAttrs
+    let denormOpt ← unexpandDenormOpt denorm
+    match asBool? isNoRet, asBool? isNoBuiltin, asStr? ccVal with
+    | some isNoRet, some isNoBuiltin, some ccStr =>
+      unexpandDeclarationCore name ty aAttrsList rAttrs isNoRet isNoBuiltin denormOpt ccStr
+    | _, _, _ => throw ()
+  | `($_ $name $ty $argAttrs $retAttrs $isNoRet $isNoBuiltin $denorm) => do
+    let rAttrs ← unexpandValueAttrList retAttrs
+    let aAttrsList ← unexpandArgAttrLists argAttrs
+    let denormOpt ← unexpandDenormOpt denorm
+    match asBool? isNoRet, asBool? isNoBuiltin with
+    | some isNoRet, some isNoBuiltin =>
+      unexpandDeclarationCore name ty aAttrsList rAttrs isNoRet isNoBuiltin denormOpt ""
+    | _, _ => throw ()
+  | `($_ $name $ty $argAttrs $retAttrs $isNoRet $isNoBuiltin) => do
+    let rAttrs ← unexpandValueAttrList retAttrs
+    let aAttrsList ← unexpandArgAttrLists argAttrs
+    match asBool? isNoRet, asBool? isNoBuiltin with
+    | some isNoRet, some isNoBuiltin =>
+      unexpandDeclarationCore name ty aAttrsList rAttrs isNoRet isNoBuiltin none ""
+    | _, _ => throw ()
+  | `($_ $name $ty $argAttrs $retAttrs $isNoRet) => do
+    let rAttrs ← unexpandValueAttrList retAttrs
+    let aAttrsList ← unexpandArgAttrLists argAttrs
+    match asBool? isNoRet with
+    | some isNoRet =>
+      unexpandDeclarationCore name ty aAttrsList rAttrs isNoRet false none ""
+    | none => throw ()
   | `($_ $name $ty $argAttrs $retAttrs) => do
     let rAttrs ← unexpandValueAttrList retAttrs
-    let aAttrsList : Array (Array (TSyntax `nanollvm_value_attr)) ←
-      match argAttrs with
-      | `([]) => pure #[]
-      | `([$xs,*]) => xs.getElems.mapM unexpandValueAttrList
-      | _ => throw ()
-    match asRawId? name, asType? ty with
-    | some name, some ty =>
-      match ty with
-      | `(nanollvm_type| $retTy($params,*)) =>
-        let retTy : TSyntax `nanollvm_type := ⟨retTy⟩
-        let mut dArgs : Array (TSyntax `nanollvm_decl_arg) := #[]
-        for i in [:params.getElems.size] do
-          match params.getElems[i]!.raw with
-          | `(nanollvm_fn_param| ...) =>
-            dArgs := dArgs.push (← `(nanollvm_decl_arg| ...))
-          | `(nanollvm_fn_param| $t:nanollvm_type) =>
-            let as := aAttrsList.getD i #[]
-            dArgs := dArgs.push (← `(nanollvm_decl_arg| $t:nanollvm_type $as:nanollvm_value_attr*))
-          | _ => throw ()
-        let dArgsSep : Syntax.TSepArray `nanollvm_decl_arg "," := dArgs
-        `([llvm-declaration| declare $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$name:nanollvm_rawid($dArgsSep,*)])
-      | _ => throw ()
-    | _, _ => throw ()
-  | `($_ $name $ty) => do
-    match asRawId? name, asType? ty with
-    | some name, some ty =>
-      match ty with
-      | `(nanollvm_type| $retTy($params,*)) =>
-        let retTy : TSyntax `nanollvm_type := ⟨retTy⟩
-        let dArgs ← params.getElems.mapM fun p =>
-          match p.raw with
-          | `(nanollvm_fn_param| ...) => `(nanollvm_decl_arg| ...)
-          | `(nanollvm_fn_param| $t:nanollvm_type) => `(nanollvm_decl_arg| $t:nanollvm_type)
-          | _ => throw ()
-        let dArgsSep : Syntax.TSepArray `nanollvm_decl_arg "," := dArgs
-        `([llvm-declaration| declare $retTy:nanollvm_type @$name:nanollvm_rawid($dArgsSep,*)])
-      | _ => throw ()
-    | _, _ => throw ()
+    let aAttrsList ← unexpandArgAttrLists argAttrs
+    unexpandDeclarationCore name ty aAttrsList rAttrs false false none ""
+  | `($_ $name $ty $argAttrs) => do
+    let aAttrsList ← unexpandArgAttrLists argAttrs
+    unexpandDeclarationCore name ty aAttrsList #[] false false none ""
+  | `($_ $name $ty) =>
+    unexpandDeclarationCore name ty #[] #[] false false none ""
   | _ => throw ()
 
 @[app_unexpander Prod.mk]
@@ -1116,10 +1626,10 @@ def unexpandProdMk : Unexpander
 
 @[app_unexpander List.cons]
 def unexpandCodeListCons : Unexpander
-  | `($(_) $x $tail) => do
+  | `($(_) $x $rest) => do
     let x : TSyntax `nanollvm_codeline ← asCodeline x
     let xs : Array (TSyntax `nanollvm_codeline) ←
-      match tail with
+      match rest with
       | `([llvm-code| $xs:nanollvm_codeline*]) => xs.mapM asCodeline
       | `([]) => pure #[]
       | `([$xs,*]) => xs.getElems.mapM asCodeline
@@ -1140,8 +1650,8 @@ def unexpandBlockMk : Unexpander
         match code with
         | `([]) => `(nanollvm_code| )
         | _ => throw ()
-    let term : TSyntax `nanollvm_terminator ← match term with
-      | `(($_, $term)) =>
+    let term : TSyntax `nanollvm_terminator ← match stripParens term with
+      | `(($_, $term)) | `(⟨$_, $term⟩) =>
         match asTerminator? term with
         | some term => pure term
         | none => throw ()
@@ -1157,7 +1667,7 @@ def unexpandDefinitionMk : Unexpander
     match asDeclaration? proto with
     | some proto =>
       match proto with
-      | `(nanollvm_declaration| declare $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$name:nanollvm_rawid($dArgs,*)) =>
+      | `(nanollvm_declaration| declare $[cc $ccName:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$name:nanollvm_rawid($dArgs,*) $fnAttrs:nanollvm_fn_attr*) =>
         let argVals : Option (Array (TSyntax `nanollvm_rawid)) := argVals.getElems.mapM asRawId?
         let blksOpt : Option (Array (TSyntax `nanollvm_block)) := blks.getElems.mapM asBlock?
         match argVals, blksOpt with
@@ -1178,7 +1688,7 @@ def unexpandDefinitionMk : Unexpander
             | _ => throw ()
           if idx != argVals.size then throw ()
           let argsSep : Syntax.TSepArray `nanollvm_arg "," := args
-          `([llvm-definition| define $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$name:nanollvm_rawid($argsSep,*) {
+          `([llvm-definition| define $[cc $ccName:str]? $rAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$name:nanollvm_rawid($argsSep,*) $fnAttrs:nanollvm_fn_attr* {
             $[$blksArr]*
           }])
         | _, _ => throw ()
@@ -1191,18 +1701,18 @@ def unexpandGlobalVariableMk : Unexpander
   | `($_ $name $ty $isConst $init $al $as) => do
     match asRawId? name, asType? ty, asBool? isConst with
     | some name, some ty, some isConst =>
-      let initOpt : Option (TSyntax `nanollvm_exp) ← match init with
+      let initOpt : Option (TSyntax `nanollvm_exp) ← match stripParens init with
         | `(none) | `(Option.none) => pure none
         | `(some $e) | `(Option.some $e) =>
           match asExp? e with
           | some e => pure (some e)
           | none => throw ()
         | _ => throw ()
-      let alignOpt : Option (TSyntax `num) ← match al with
+      let alignOpt : Option (TSyntax `num) ← match stripParens al with
         | `(none) | `(Option.none) => pure none
         | `(some $n:num) | `(Option.some $n:num) => pure (some n)
         | _ => throw ()
-      let asOpt : Option (TSyntax `num) ← match as with
+      let asOpt : Option (TSyntax `num) ← match stripParens as with
         | `(0) => pure none
         | `($n:num) => pure (some n)
         | _ => throw ()
@@ -1211,6 +1721,14 @@ def unexpandGlobalVariableMk : Unexpander
       else
         `([llvm-global| @$name:nanollvm_rawid = $[addrspace($asOpt:num)]? global $ty:nanollvm_type $[$initOpt:nanollvm_exp]? $[, align $alignOpt:num]?])
     | _, _, _ => throw ()
+  | _ => throw ()
+
+@[app_unexpander TopLevelEntity.typeDef]
+def unexpandTopLevelEntityTypeDef : Unexpander
+  | `($_ $nm $ty) =>
+    match asRawId? nm, asType? ty with
+    | some nm, some ty => `([llvm-entity| %$nm:nanollvm_rawid = type $ty:nanollvm_type])
+    | _, _ => throw ()
   | _ => throw ()
 
 @[app_unexpander TopLevelEntity.global]

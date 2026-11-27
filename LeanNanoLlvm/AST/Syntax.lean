@@ -7,19 +7,125 @@ open Lean Lean.Meta Lean.Elab Lean.Elab.Term
 open LeanNanoLlvm.AST
 open scoped LeanNanoLlvm.AST.Syntax
 
+deriving instance Lean.ToExpr for DenormalModeKind
+deriving instance Lean.ToExpr for DenormalMode
+deriving instance Lean.ToExpr for RawId
+deriving instance Lean.ToExpr for Identifier
+deriving instance Lean.ToExpr for InstructionId
 deriving instance Lean.ToExpr for FloatType
 deriving instance Lean.ToExpr for FastMathFlags
 deriving instance Lean.ToExpr for ICmpPred
 deriving instance Lean.ToExpr for FCmpPred
 deriving instance Lean.ToExpr for GEPFlags
+deriving instance Lean.ToExpr for IntBinaryOp
+deriving instance Lean.ToExpr for FloatUnaryOp
+deriving instance Lean.ToExpr for FloatBinaryOp
+deriving instance Lean.ToExpr for ConversionOp
+deriving instance Lean.ToExpr for CallSiteInfo
+
+mutual
+  private def llvmRetTypeToExpr : LlvmRetType → Expr
+    | .void => mkConst ``LlvmRetType.void
+    | .ret ty => mkApp (mkConst ``LlvmRetType.ret) (llvmTypeToExpr ty)
+
+  private def llvmTypeToExpr : LlvmType → Expr
+    | .int w => mkApp (mkConst ``LlvmType.int) (toExpr w)
+    | .byte w => mkApp (mkConst ``LlvmType.byte) (toExpr w)
+    | .float ft => mkApp (mkConst ``LlvmType.float) (toExpr ft)
+    | .ptr as => mkApp (mkConst ``LlvmType.ptr) (toExpr as)
+    | .vector n elem => mkApp2 (mkConst ``LlvmType.vector) (toExpr n) (llvmTypeToExpr elem)
+    | .array n elem => mkApp2 (mkConst ``LlvmType.array) (toExpr n) (llvmTypeToExpr elem)
+    | .struct packed fields =>
+      mkApp2 (mkConst ``LlvmType.struct) (toExpr packed) (llvmTypeListToExpr fields)
+    | .named nm => mkApp (mkConst ``LlvmType.named) (toExpr nm)
+    | .function ret args isVarArg =>
+      mkApp3 (mkConst ``LlvmType.function) (llvmRetTypeToExpr ret) (llvmTypeListToExpr args) (toExpr isVarArg)
+
+  private def llvmTypeListToExpr : List LlvmType → Expr
+    | [] => mkApp (mkConst ``List.nil [levelZero]) (mkConst ``LlvmType)
+    | t :: ts => mkApp3 (mkConst ``List.cons [levelZero]) (mkConst ``LlvmType) (llvmTypeToExpr t) (llvmTypeListToExpr ts)
+end
+
+instance : ToExpr LlvmRetType where
+  toExpr := llvmRetTypeToExpr
+  toTypeExpr := mkConst ``LlvmRetType
+
+instance : ToExpr LlvmType where
+  toExpr := llvmTypeToExpr
+  toTypeExpr := mkConst ``LlvmType
+
+deriving instance Lean.ToExpr for ValueAttr
+
+private def mkPairExpr (α β : Expr) (a b : Expr) : Expr :=
+  mkApp4 (mkConst ``Prod.mk [levelZero, levelZero]) α β a b
+
+private def mkPairTyExpr (α β : Expr) : Expr :=
+  mkApp2 (mkConst ``Prod [levelZero, levelZero]) α β
+
+mutual
+  private def expToExpr : Exp → Expr
+    | .identifier id => mkApp (mkConst ``Exp.identifier) (toExpr id)
+    | .bool b => mkApp (mkConst ``Exp.bool) (toExpr b)
+    | .int x => mkApp (mkConst ``Exp.int) (toExpr x)
+    | .floatBits b => mkApp (mkConst ``Exp.floatBits) (toExpr b)
+    | .floatDec neg m e => mkApp3 (mkConst ``Exp.floatDec) (toExpr neg) (toExpr m) (toExpr e)
+    | .floatSpecial neg isInf quiet payload =>
+      mkApp4 (mkConst ``Exp.floatSpecial) (toExpr neg) (toExpr isInf) (toExpr quiet) (toExpr payload)
+    | .blockAddress fn blk => mkApp2 (mkConst ``Exp.blockAddress) (toExpr fn) (toExpr blk)
+    | .null => mkConst ``Exp.null
+    | .zeroinitializer => mkConst ``Exp.zeroinitializer
+    | .undef => mkConst ``Exp.undef
+    | .poison => mkConst ``Exp.poison
+    | .array elems => mkApp (mkConst ``Exp.array) (expTypedListToExpr elems)
+    | .struct packed fields => mkApp2 (mkConst ``Exp.struct) (toExpr packed) (expTypedListToExpr fields)
+    | .vector elems => mkApp (mkConst ``Exp.vector) (expTypedListToExpr elems)
+    | .splat (t, e) =>
+      mkApp (mkConst ``Exp.splat) (mkPairExpr (mkConst ``LlvmType) (mkConst ``Exp) (toExpr t) (expToExpr e))
+    | .gepConst flags baseTy (pTy, pExp) idxs =>
+      mkApp4 (mkConst ``Exp.gepConst) (toExpr flags) (toExpr baseTy)
+        (mkPairExpr (mkConst ``LlvmType) (mkConst ``Exp) (toExpr pTy) (expToExpr pExp))
+        (expTypedListToExpr idxs)
+    | .convConst op fromTy val toTy =>
+      mkApp4 (mkConst ``Exp.convConst) (toExpr op) (toExpr fromTy) (expToExpr val) (toExpr toTy)
+    | .binConst op ty v1 v2 =>
+      mkApp4 (mkConst ``Exp.binConst) (toExpr op) (toExpr ty) (expToExpr v1) (expToExpr v2)
+    | .insertElemConst vecTy vec elemTy elem idxTy idx =>
+      mkApp6 (mkConst ``Exp.insertElemConst) (toExpr vecTy) (expToExpr vec) (toExpr elemTy) (expToExpr elem) (toExpr idxTy) (expToExpr idx)
+    | .extractElemConst vecTy vec idxTy idx =>
+      mkApp4 (mkConst ``Exp.extractElemConst) (toExpr vecTy) (expToExpr vec) (toExpr idxTy) (expToExpr idx)
+    | .shuffleVecConst vecTy v1 v2 mask =>
+      mkApp4 (mkConst ``Exp.shuffleVecConst) (toExpr vecTy) (expToExpr v1) (expToExpr v2) (toExpr mask)
+
+  private def expTypedListToExpr : List (LlvmType × Exp) → Expr
+    | [] => mkApp (mkConst ``List.nil [levelZero]) (mkPairTyExpr (mkConst ``LlvmType) (mkConst ``Exp))
+    | (t, e) :: rest =>
+      let pairTy := mkPairTyExpr (mkConst ``LlvmType) (mkConst ``Exp)
+      let pair := mkPairExpr (mkConst ``LlvmType) (mkConst ``Exp) (toExpr t) (expToExpr e)
+      mkApp3 (mkConst ``List.cons [levelZero]) pairTy pair (expTypedListToExpr rest)
+end
+
+instance : ToExpr Exp where
+  toExpr := expToExpr
+  toTypeExpr := mkConst ``Exp
+
+deriving instance Lean.ToExpr for Instruction
+deriving instance Lean.ToExpr for Terminator
+deriving instance Lean.ToExpr for Declaration
+deriving instance Lean.ToExpr for Block
+deriving instance Lean.ToExpr for Definition
+deriving instance Lean.ToExpr for GlobalVariable
+deriving instance Lean.ToExpr for TopLevelEntity
+deriving instance Lean.ToExpr for TopLevel
 
 declare_syntax_cat nanollvm_rawid
 scoped syntax ident : nanollvm_rawid
 scoped syntax num : nanollvm_rawid
+scoped syntax str : nanollvm_rawid
 
 def elabNanoLlvmRawId : Syntax → TermElabM Expr
   | `(nanollvm_rawid| $s:ident) => mkAppM ``RawId.name #[mkStrLit s.getId.toString]
   | `(nanollvm_rawid| $n:num) => mkAppM ``RawId.anonymous #[mkNatLit n.getNat]
+  | `(nanollvm_rawid| $s:str) => mkAppM ``RawId.name #[mkStrLit s.getString]
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-rawid|" p:nanollvm_rawid "]" : term => elabNanoLlvmRawId p
@@ -62,89 +168,110 @@ scoped syntax "..." : nanollvm_fn_param
 scoped syntax "void" : nanollvm_type
 scoped syntax ident : nanollvm_type
 scoped syntax "i$(" term ")" : nanollvm_type
+scoped syntax "b$(" term ")" : nanollvm_type
 scoped syntax nanollvm_type " addrspace(" num ")" : nanollvm_type
-scoped syntax "<" num &"x" nanollvm_type ">" : nanollvm_type
-scoped syntax "[" num &"x" nanollvm_type "]" : nanollvm_type
+scoped syntax "<" num ppHardSpace &"x" ppHardSpace nanollvm_type ">" : nanollvm_type
+scoped syntax "[" num ppHardSpace &"x" ppHardSpace nanollvm_type "]" : nanollvm_type
 scoped syntax "{" nanollvm_type,* "}" : nanollvm_type
 scoped syntax "<{" nanollvm_type,* "}>" : nanollvm_type
 scoped syntax "%" nanollvm_rawid : nanollvm_type
 scoped syntax nanollvm_type "(" nanollvm_fn_param,* ")" : nanollvm_type
 
 mutual
-partial def elabNanoLlvmType : Syntax → TermElabM Expr
-  | `(nanollvm_type| $id:ident) => do
-    let s := id.getId.toString
-    match s with
-    | "half"   => mkAppM ``LlvmType.float #[mkConst ``FloatType.half]
-    | "bfloat" => mkAppM ``LlvmType.float #[mkConst ``FloatType.bfloat]
-    | "float"  => mkAppM ``LlvmType.float #[mkConst ``FloatType.float]
-    | "double" => mkAppM ``LlvmType.float #[mkConst ``FloatType.double]
-    | "fp128"  => mkAppM ``LlvmType.float #[mkConst ``FloatType.fp128]
-    | "ptr"    => mkAppM ``LlvmType.ptr #[mkNatLit 0]
-    | _ =>
-      if s.startsWith "i" then
-        let numStr := s.drop 1
-        match numStr.toNat? with
-        | some n => mkAppM ``LlvmType.int #[mkNatLit n]
-        | none => throwErrorAt id "Invalid LLVM type: {s}"
-      else
-        throwErrorAt id "Unknown LLVM type: {s}"
+private def elabNanoLlvmTypeAux : Nat → Syntax → TermElabM Expr
+  | 0, stx => throwErrorAt stx "LLVM type nesting depth exceeded"
+  | fuel + 1, stx =>
+    match stx with
+    | `(nanollvm_type| $id:ident) => do
+      let s := id.getId.toString
+      match s with
+      | "half"      => mkAppM ``LlvmType.float #[mkConst ``FloatType.half]
+      | "bfloat"    => mkAppM ``LlvmType.float #[mkConst ``FloatType.bfloat]
+      | "float"     => mkAppM ``LlvmType.float #[mkConst ``FloatType.float]
+      | "double"    => mkAppM ``LlvmType.float #[mkConst ``FloatType.double]
+      | "x86_fp80"  => mkAppM ``LlvmType.float #[mkConst ``FloatType.x86_fp80]
+      | "fp128"     => mkAppM ``LlvmType.float #[mkConst ``FloatType.fp128]
+      | "ppc_fp128" => mkAppM ``LlvmType.float #[mkConst ``FloatType.ppc_fp128]
+      | "ptr"       => mkAppM ``LlvmType.ptr #[mkNatLit 0]
+      | _ =>
+        if s.startsWith "i" then
+          let numStr := s.drop 1
+          match numStr.toNat? with
+          | some n => mkAppM ``LlvmType.int #[mkNatLit n]
+          | none => throwErrorAt id "Invalid LLVM type: {s}"
+        else if s.startsWith "b" then
+          let numStr := s.drop 1
+          match numStr.toNat? with
+          | some n => mkAppM ``LlvmType.byte #[mkNatLit n]
+          | none => throwErrorAt id "Invalid LLVM type: {s}"
+        else
+          throwErrorAt id "Unknown LLVM type: {s}"
 
-  | `(nanollvm_type| i$($w:term)) => do
-    let wExpr ← elabTermEnsuringType w (mkConst ``Nat)
-    mkAppM ``LlvmType.int #[wExpr]
+    | `(nanollvm_type| i$($w:term)) => do
+      let wExpr ← elabTermEnsuringType w (mkConst ``Nat)
+      mkAppM ``LlvmType.int #[wExpr]
 
-  | `(nanollvm_type| $base:nanollvm_type addrspace($as:num)) => do
-    match base with
-    | `(nanollvm_type| $id:ident) =>
-      if id.getId.toString == "ptr" then
-        mkAppM ``LlvmType.ptr #[mkNatLit as.getNat]
-      else
-        throwErrorAt base "Expected 'ptr' before addrspace(...), got {id}"
-    | _ => throwErrorAt base "Expected 'ptr' before addrspace(...)"
+    | `(nanollvm_type| b$($w:term)) => do
+      let wExpr ← elabTermEnsuringType w (mkConst ``Nat)
+      mkAppM ``LlvmType.byte #[wExpr]
 
-  | `(nanollvm_type| < $n:num x $elem:nanollvm_type >) => do
-    let elemTy ← elabNanoLlvmType elem
-    mkAppM ``LlvmType.vector #[mkNatLit n.getNat, elemTy]
+    | `(nanollvm_type| $base:nanollvm_type addrspace($as:num)) => do
+      match base with
+      | `(nanollvm_type| $id:ident) =>
+        if id.getId.toString == "ptr" then
+          mkAppM ``LlvmType.ptr #[mkNatLit as.getNat]
+        else
+          throwErrorAt base "Expected 'ptr' before addrspace(...), got {id}"
+      | _ => throwErrorAt base "Expected 'ptr' before addrspace(...)"
 
-  | `(nanollvm_type| [ $n:num x $elem:nanollvm_type ]) => do
-    let elemTy ← elabNanoLlvmType elem
-    mkAppM ``LlvmType.array #[mkNatLit n.getNat, elemTy]
+    | `(nanollvm_type| < $n:num x $elem:nanollvm_type >) => do
+      let elemTy ← elabNanoLlvmTypeAux fuel elem
+      mkAppM ``LlvmType.vector #[mkNatLit n.getNat, elemTy]
 
-  | `(nanollvm_type| { $fields:nanollvm_type,* }) => do
-    let fVals ← fields.getElems.mapM (fun x => elabNanoLlvmType x.raw)
-    let fList ← mkListLit (mkConst ``LlvmType) fVals.toList
-    mkAppM ``LlvmType.struct #[toExpr Bool.false, fList]
+    | `(nanollvm_type| [ $n:num x $elem:nanollvm_type ]) => do
+      let elemTy ← elabNanoLlvmTypeAux fuel elem
+      mkAppM ``LlvmType.array #[mkNatLit n.getNat, elemTy]
 
-  | `(nanollvm_type| <{ $fields:nanollvm_type,* }>) => do
-    let fVals ← fields.getElems.mapM (fun x => elabNanoLlvmType x.raw)
-    let fList ← mkListLit (mkConst ``LlvmType) fVals.toList
-    mkAppM ``LlvmType.struct #[toExpr Bool.true, fList]
+    | `(nanollvm_type| { $fields:nanollvm_type,* }) => do
+      let fVals ← fields.getElems.mapM (fun x => elabNanoLlvmTypeAux fuel x.raw)
+      let fList ← mkListLit (mkConst ``LlvmType) fVals.toList
+      mkAppM ``LlvmType.struct #[toExpr Bool.false, fList]
 
-  | `(nanollvm_type| %$nm:nanollvm_rawid) => do
-    mkAppM ``LlvmType.named #[← elabNanoLlvmRawId nm]
+    | `(nanollvm_type| <{ $fields:nanollvm_type,* }>) => do
+      let fVals ← fields.getElems.mapM (fun x => elabNanoLlvmTypeAux fuel x.raw)
+      let fList ← mkListLit (mkConst ``LlvmType) fVals.toList
+      mkAppM ``LlvmType.struct #[toExpr Bool.true, fList]
 
-  | `(nanollvm_type| $ret:nanollvm_type ( $params:nanollvm_fn_param,* )) => do
-    let ret ← elabNanoLlvmRetType ret
-    let mut argVals : Array Expr := #[]
-    let mut isVarArg := false
-    for p in params.getElems do
-      if isVarArg then throwErrorAt p "Vararg '...' must be the last parameter"
-      match p.raw with
-      | `(nanollvm_fn_param| ...) => isVarArg := true
-      | `(nanollvm_fn_param| $t:nanollvm_type) => argVals := argVals.push (← elabNanoLlvmType t)
-      | _ => throwUnsupportedSyntax
-    let argList ← mkListLit (mkConst ``LlvmType) argVals.toList
-    mkAppM ``LlvmType.function #[ret, argList, toExpr isVarArg]
+    | `(nanollvm_type| %$nm:nanollvm_rawid) => do
+      mkAppM ``LlvmType.named #[← elabNanoLlvmRawId nm]
 
-  | _ => throwUnsupportedSyntax
+    | `(nanollvm_type| $ret:nanollvm_type ( $params:nanollvm_fn_param,* )) => do
+      let ret ← elabNanoLlvmRetTypeAux fuel ret
+      let mut argVals : Array Expr := #[]
+      let mut isVarArg := false
+      for p in params.getElems do
+        if isVarArg then throwErrorAt p "Vararg '...' must be the last parameter"
+        match p.raw with
+        | `(nanollvm_fn_param| ...) => isVarArg := true
+        | `(nanollvm_fn_param| $t:nanollvm_type) => argVals := argVals.push (← elabNanoLlvmTypeAux fuel t)
+        | _ => throwUnsupportedSyntax
+      let argList ← mkListLit (mkConst ``LlvmType) argVals.toList
+      mkAppM ``LlvmType.function #[ret, argList, toExpr isVarArg]
 
-partial def elabNanoLlvmRetType : Syntax → TermElabM Expr
-  | `(nanollvm_type| void) => pure (mkConst ``LlvmRetType.void)
-  | stx => do
-    let ty ← elabNanoLlvmType stx
-    mkAppM ``LlvmRetType.ret #[ty]
+    | _ => throwUnsupportedSyntax
+
+private def elabNanoLlvmRetTypeAux : Nat → Syntax → TermElabM Expr
+  | 0, stx => throwErrorAt stx "LLVM return type nesting depth exceeded"
+  | fuel + 1, stx =>
+    match stx with
+    | `(nanollvm_type| void) => pure (mkConst ``LlvmRetType.void)
+    | stx => do
+      let ty ← elabNanoLlvmTypeAux fuel stx
+      mkAppM ``LlvmRetType.ret #[ty]
 end
+
+def elabNanoLlvmType (stx : Syntax) : TermElabM Expr := elabNanoLlvmTypeAux 1000 stx
+def elabNanoLlvmRetType (stx : Syntax) : TermElabM Expr := elabNanoLlvmRetTypeAux 1000 stx
 
 elab "[llvm-type|" p:nanollvm_type "]" : term => elabNanoLlvmType p
 
@@ -165,6 +292,9 @@ private def elabSignedInt : Syntax → MetaM Expr
   | `(nanollvm_signed_int| -$n:num) => mkIntLitExpr (-(n.getNat : Int))
   | _ => throwUnsupportedSyntax
 
+declare_syntax_cat nanollvm_range_pair
+scoped syntax nanollvm_signed_int ", " nanollvm_signed_int : nanollvm_range_pair
+
 declare_syntax_cat nanollvm_value_attr
 scoped syntax "noundef" : nanollvm_value_attr
 scoped syntax "nonnull" : nanollvm_value_attr
@@ -172,6 +302,7 @@ scoped syntax "align " num : nanollvm_value_attr
 scoped syntax "dereferenceable(" num ")" : nanollvm_value_attr
 scoped syntax "dereferenceable_or_null(" num ")" : nanollvm_value_attr
 scoped syntax "range(" nanollvm_signed_int ", " nanollvm_signed_int ")" : nanollvm_value_attr
+scoped syntax "range_list(" nanollvm_range_pair,* ")" : nanollvm_value_attr
 scoped syntax "nofpclass(" num ")" : nanollvm_value_attr
 scoped syntax "byval(" nanollvm_type ")" : nanollvm_value_attr
 scoped syntax "sret(" nanollvm_type ")" : nanollvm_value_attr
@@ -190,6 +321,15 @@ def elabNanoLlvmValueAttr : Syntax → TermElabM Expr
       let loE ← elabSignedInt lo
       let hiE ← elabSignedInt hi
       mkAppM ``ValueAttr.range #[loE, hiE]
+  | `(nanollvm_value_attr| range_list($pairs:nanollvm_range_pair,*)) => do
+      let pairTy ← mkAppM ``Prod #[mkConst ``Int, mkConst ``Int]
+      let pairEs ← pairs.getElems.toList.mapM fun p =>
+        match p.raw with
+        | `(nanollvm_range_pair| $lo:nanollvm_signed_int, $hi:nanollvm_signed_int) => do
+          mkAppM ``Prod.mk #[← elabSignedInt lo, ← elabSignedInt hi]
+        | _ => throwUnsupportedSyntax
+      let lst ← mkListLit pairTy pairEs
+      mkAppM ``ValueAttr.rangeList #[lst]
   | `(nanollvm_value_attr| nofpclass($m:num)) =>
       mkAppM ``ValueAttr.nofpclass #[mkNatLit m.getNat]
   | `(nanollvm_value_attr| byval($ty:nanollvm_type)) => do
@@ -206,129 +346,7 @@ private def elabValueAttrList (attrs : Array (TSyntax `nanollvm_value_attr)) : T
   let es ← attrs.toList.mapM (fun a => elabNanoLlvmValueAttr a.raw)
   mkListLit (mkConst ``ValueAttr) es
 
-/-! ### Expressions & Constants -/
-
-declare_syntax_cat nanollvm_exp
-declare_syntax_cat nanollvm_typed_exp
-
-scoped syntax nanollvm_type ppHardSpace nanollvm_exp : nanollvm_typed_exp
-
-scoped syntax nanollvm_identifier : nanollvm_exp
-scoped syntax "<" ident ":int>" : nanollvm_exp
-scoped syntax ident : nanollvm_exp
-scoped syntax num : nanollvm_exp
-scoped syntax "-" num : nanollvm_exp
-scoped syntax scientific : nanollvm_exp
-scoped syntax "-" scientific : nanollvm_exp
-scoped syntax "fbits(" num ")" : nanollvm_exp
-scoped syntax "null" : nanollvm_exp
-scoped syntax "zeroinitializer" : nanollvm_exp
-scoped syntax "undef" : nanollvm_exp
-scoped syntax "poison" : nanollvm_exp
-scoped syntax "[" nanollvm_typed_exp,* "]" : nanollvm_exp
-scoped syntax "{" nanollvm_typed_exp,* "}" : nanollvm_exp
-scoped syntax "<{" nanollvm_typed_exp,* "}>" : nanollvm_exp
-scoped syntax "<" nanollvm_typed_exp,+ ">" : nanollvm_exp
-scoped syntax "splat" "(" nanollvm_typed_exp ")" : nanollvm_exp
-scoped syntax "getelementptr" (" inbounds ")? "(" nanollvm_type ", " nanollvm_typed_exp (", " nanollvm_typed_exp)* ")" : nanollvm_exp
-scoped syntax "ptrtoint" "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
-scoped syntax "ptrtoaddr" "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
-scoped syntax "inttoptr" "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
-scoped syntax "bitcast" "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
-scoped syntax "add" "(" nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ")" : nanollvm_exp
-scoped syntax "sub" "(" nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ")" : nanollvm_exp
-
-private def mkPairTyLlvmExp : MetaM Expr :=
-  mkAppM ``Prod #[mkConst ``LlvmType, mkConst ``Exp]
-
-mutual
-partial def elabNanoLlvmTypedExp : Syntax → TermElabM Expr
-  | `(nanollvm_typed_exp| $ty:nanollvm_type $e:nanollvm_exp) => do
-    let ty ← elabNanoLlvmType ty
-    let e ← elabNanoLlvmExp e
-    mkAppM ``Prod.mk #[ty, e]
-  | _ => throwUnsupportedSyntax
-
-partial def elabNanoLlvmExp : Syntax → TermElabM Expr
-  | `(nanollvm_exp| $id:nanollvm_identifier) => do
-    let id ← elabNanoLlvmIdentifier id
-    mkAppM ``Exp.identifier #[id]
-  | `(nanollvm_exp| <$id:ident:int>) => do
-    let e ← elabTerm id none
-    let t ← whnf (← inferType e)
-    if ← isDefEq t (mkConst ``Int) then
-      mkAppM ``Exp.int #[e]
-    else if ← isDefEq t (mkConst ``Nat) then
-      mkAppM ``Exp.int #[← mkAppM ``Int.ofNat #[e]]
-    else
-      throwErrorAt id "Expected Int/Nat expression in LLVM expression, got type {t}"
-  | `(nanollvm_exp| $id:ident) => do
-    match id.getId.toString with
-    | "true"  => mkAppM ``Exp.bool #[mkConst ``Bool.true]
-    | "false" => mkAppM ``Exp.bool #[mkConst ``Bool.false]
-    | other   => throwErrorAt id "Unknown LLVM expression keyword '{other}'"
-  | `(nanollvm_exp| $n:num) => do
-    let int ← mkAppM ``Int.ofNat #[mkNatLit n.getNat]
-    mkAppM ``Exp.int #[int]
-  | `(nanollvm_exp| -$n:num) => do
-    let int ← mkIntLitExpr (-(n.getNat : Int))
-    mkAppM ``Exp.int #[int]
-  | `(nanollvm_exp| $s:scientific) => do
-    let (m, negExp, e) := s.getScientific
-    let exp10 : Int := if negExp then -(e : Int) else (e : Int)
-    let exp10E ← mkIntLitExpr exp10
-    mkAppM ``Exp.floatDec #[toExpr Bool.false, mkNatLit m, exp10E]
-  | `(nanollvm_exp| -$s:scientific) => do
-    let (m, negExp, e) := s.getScientific
-    let exp10 : Int := if negExp then -(e : Int) else (e : Int)
-    let exp10E ← mkIntLitExpr exp10
-    mkAppM ``Exp.floatDec #[toExpr Bool.true, mkNatLit m, exp10E]
-  | `(nanollvm_exp| fbits($n:num)) =>
-    mkAppM ``Exp.floatBits #[mkNatLit n.getNat]
-  | `(nanollvm_exp| null) => pure (mkConst ``Exp.null)
-  | `(nanollvm_exp| zeroinitializer) => pure (mkConst ``Exp.zeroinitializer)
-  | `(nanollvm_exp| undef) => pure (mkConst ``Exp.undef)
-  | `(nanollvm_exp| poison) => pure (mkConst ``Exp.poison)
-  | `(nanollvm_exp| [ $elems:nanollvm_typed_exp,* ]) => do
-    let lst ← mkListLit (← mkPairTyLlvmExp) (← elems.getElems.toList.mapM (fun x => elabNanoLlvmTypedExp x.raw))
-    mkAppM ``Exp.array #[lst]
-  | `(nanollvm_exp| { $elems:nanollvm_typed_exp,* }) => do
-    let lst ← mkListLit (← mkPairTyLlvmExp) (← elems.getElems.toList.mapM (fun x => elabNanoLlvmTypedExp x.raw))
-    mkAppM ``Exp.struct #[toExpr Bool.false, lst]
-  | `(nanollvm_exp| <{ $elems:nanollvm_typed_exp,* }>) => do
-    let lst ← mkListLit (← mkPairTyLlvmExp) (← elems.getElems.toList.mapM (fun x => elabNanoLlvmTypedExp x.raw))
-    mkAppM ``Exp.struct #[toExpr Bool.true, lst]
-  | `(nanollvm_exp| < $elems:nanollvm_typed_exp,* >) => do
-    let lst ← mkListLit (← mkPairTyLlvmExp) (← elems.getElems.toList.mapM (fun x => elabNanoLlvmTypedExp x.raw))
-    mkAppM ``Exp.vector #[lst]
-  | `(nanollvm_exp| splat ($te:nanollvm_typed_exp)) => do
-    let e ← elabNanoLlvmTypedExp te
-    mkAppM ``Exp.splat #[e]
-  | `(nanollvm_exp| getelementptr $[inbounds%$ib]? ($baseTy:nanollvm_type, $ptr:nanollvm_typed_exp $[, $idxs:nanollvm_typed_exp]*)) => do
-    let fl : GEPFlags := if ib.isSome then GEPFlags.mkInbounds else GEPFlags.none
-    let flE ← mkAppM ``GEPFlags.mk #[toExpr fl.inbounds, toExpr fl.nusw, toExpr fl.nuw]
-    let idxList ← mkListLit (← mkPairTyLlvmExp) (← idxs.toList.mapM (fun x => elabNanoLlvmTypedExp x.raw))
-    mkAppM ``Exp.gepConst #[flE, ← elabNanoLlvmType baseTy, ← elabNanoLlvmTypedExp ptr, idxList]
-  | `(nanollvm_exp| ptrtoint ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
-    mkAppM ``Exp.convConst #[mkConst ``ConversionOp.ptrtoint, ← elabNanoLlvmType fTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType tTy]
-  | `(nanollvm_exp| ptrtoaddr ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
-    mkAppM ``Exp.convConst #[mkConst ``ConversionOp.ptrtoaddr, ← elabNanoLlvmType fTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType tTy]
-  | `(nanollvm_exp| inttoptr ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
-    mkAppM ``Exp.convConst #[mkConst ``ConversionOp.inttoptr, ← elabNanoLlvmType fTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType tTy]
-  | `(nanollvm_exp| bitcast ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
-    mkAppM ``Exp.convConst #[mkConst ``ConversionOp.bitcast, ← elabNanoLlvmType fTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType tTy]
-  | `(nanollvm_exp| add ($ty:nanollvm_type $v1:nanollvm_exp, $_ty2:nanollvm_type $v2:nanollvm_exp)) => do
-    let op ← mkAppM ``IntBinaryOp.add #[toExpr Bool.false, toExpr Bool.false]
-    mkAppM ``Exp.binConst #[op, ← elabNanoLlvmType ty, ← elabNanoLlvmExp v1, ← elabNanoLlvmExp v2]
-  | `(nanollvm_exp| sub ($ty:nanollvm_type $v1:nanollvm_exp, $_ty2:nanollvm_type $v2:nanollvm_exp)) => do
-    let op ← mkAppM ``IntBinaryOp.sub #[toExpr Bool.false, toExpr Bool.false]
-    mkAppM ``Exp.binConst #[op, ← elabNanoLlvmType ty, ← elabNanoLlvmExp v1, ← elabNanoLlvmExp v2]
-  | _ => throwUnsupportedSyntax
-end
-
-elab "[llvm-exp|" p:nanollvm_exp "]" : term => elabNanoLlvmExp p
-
-/-! ### Fast-Math Flags & Predicates -/
+/-! ### Fast-Math Flags, GEP Flags, Operators & Predicates -/
 
 declare_syntax_cat nanollvm_fmf_flag
 scoped syntax "fast" : nanollvm_fmf_flag
@@ -353,19 +371,32 @@ def elabFastMathFlags (flags : Array (TSyntax `nanollvm_fmf_flag)) : FastMathFla
     | "reassoc"  => { acc with «reassoc» := Bool.true }
     | _          => acc
 
+declare_syntax_cat nanollvm_gep_flag
+scoped syntax "inbounds" : nanollvm_gep_flag
+scoped syntax "nusw" : nanollvm_gep_flag
+scoped syntax "nuw" : nanollvm_gep_flag
+
+def elabGEPFlags (flags : Array (TSyntax `nanollvm_gep_flag)) : GEPFlags :=
+  flags.foldl (init := GEPFlags.none) fun acc stx =>
+    match stx.raw[0].getAtomVal with
+    | "inbounds" => { acc with «inbounds» := Bool.true, «nusw» := Bool.true }
+    | "nusw"     => { acc with «nusw» := Bool.true }
+    | "nuw"      => { acc with «nuw» := Bool.true }
+    | _          => acc
+
 declare_syntax_cat nanollvm_int_bin_op
-scoped syntax "add" " nuw "? " nsw"? : nanollvm_int_bin_op
-scoped syntax "sub" " nuw "? " nsw"? : nanollvm_int_bin_op
-scoped syntax "mul" " nuw "? " nsw"? : nanollvm_int_bin_op
-scoped syntax "shl" " nuw "? " nsw"? : nanollvm_int_bin_op
-scoped syntax "udiv" " exact "? : nanollvm_int_bin_op
-scoped syntax "sdiv" " exact "? : nanollvm_int_bin_op
-scoped syntax "lshr" " exact "? : nanollvm_int_bin_op
-scoped syntax "ashr" " exact "? : nanollvm_int_bin_op
+scoped syntax "add" " nuw"? " nsw"? : nanollvm_int_bin_op
+scoped syntax "sub" " nuw"? " nsw"? : nanollvm_int_bin_op
+scoped syntax "mul" " nuw"? " nsw"? : nanollvm_int_bin_op
+scoped syntax "shl" " nuw"? " nsw"? : nanollvm_int_bin_op
+scoped syntax "udiv" " exact"? : nanollvm_int_bin_op
+scoped syntax "sdiv" " exact"? : nanollvm_int_bin_op
+scoped syntax "lshr" " exact"? : nanollvm_int_bin_op
+scoped syntax "ashr" " exact"? : nanollvm_int_bin_op
 scoped syntax "urem" : nanollvm_int_bin_op
 scoped syntax "srem" : nanollvm_int_bin_op
 scoped syntax "and" : nanollvm_int_bin_op
-scoped syntax "or" " disjoint "? : nanollvm_int_bin_op
+scoped syntax "or" " disjoint"? : nanollvm_int_bin_op
 scoped syntax "xor" : nanollvm_int_bin_op
 
 def elabNanoLlvmIntBinOp (stx : Syntax) : TermElabM Expr := do
@@ -440,14 +471,14 @@ def elabFCmpPred (id : TSyntax `ident) : TermElabM Expr := do
   | s       => throwErrorAt id "unknown fcmp predicate: {s}"
 
 declare_syntax_cat nanollvm_conversion_op
-scoped syntax "trunc" " nuw "? " nsw"? : nanollvm_conversion_op
-scoped syntax "zext" " nneg "? : nanollvm_conversion_op
+scoped syntax "trunc" " nuw"? " nsw"? : nanollvm_conversion_op
+scoped syntax "zext" " nneg"? : nanollvm_conversion_op
 scoped syntax "sext" : nanollvm_conversion_op
 scoped syntax "fptrunc" nanollvm_fmf_flag* : nanollvm_conversion_op
 scoped syntax "fpext" nanollvm_fmf_flag* : nanollvm_conversion_op
 scoped syntax "fptoui" : nanollvm_conversion_op
 scoped syntax "fptosi" : nanollvm_conversion_op
-scoped syntax "uitofp" " nneg "? nanollvm_fmf_flag* : nanollvm_conversion_op
+scoped syntax "uitofp" " nneg"? nanollvm_fmf_flag* : nanollvm_conversion_op
 scoped syntax "sitofp" nanollvm_fmf_flag* : nanollvm_conversion_op
 scoped syntax "ptrtoint" : nanollvm_conversion_op
 scoped syntax "ptrtoaddr" : nanollvm_conversion_op
@@ -484,23 +515,183 @@ def elabNanoLlvmConversionOp (stx : Syntax) : TermElabM Expr := do
 
 elab "[llvm-conversion-op|" p:nanollvm_conversion_op "]" : term => elabNanoLlvmConversionOp p
 
+declare_syntax_cat nanollvm_shuffle_elem
+scoped syntax nanollvm_type ppHardSpace num : nanollvm_shuffle_elem
+scoped syntax nanollvm_type ppHardSpace "poison" : nanollvm_shuffle_elem
+
+private def mkOptionExpr (ty : Expr) : Option Expr → MetaM Expr
+  | none => mkAppOptM ``Option.none #[ty]
+  | some e => mkAppOptM ``Option.some #[ty, e]
+
+private def elabShuffleMask (mask : Syntax.TSepArray `nanollvm_shuffle_elem ",") : TermElabM Expr := do
+  let optNatTy ← mkAppM ``Option #[mkConst ``Nat]
+  let maskElems ← mask.getElems.toList.mapM fun el =>
+    match el.raw with
+    | `(nanollvm_shuffle_elem| $_t:nanollvm_type $n:num) => mkOptionExpr (mkConst ``Nat) (some (mkNatLit n.getNat))
+    | `(nanollvm_shuffle_elem| $_t:nanollvm_type poison) => mkOptionExpr (mkConst ``Nat) none
+    | _ => throwUnsupportedSyntax
+  mkListLit optNatTy maskElems
+
+/-! ### Expressions & Constants -/
+
+declare_syntax_cat nanollvm_exp
+declare_syntax_cat nanollvm_typed_exp
+
+scoped syntax nanollvm_type ppHardSpace nanollvm_exp : nanollvm_typed_exp
+
+scoped syntax nanollvm_identifier : nanollvm_exp
+scoped syntax "<" ident ":int>" : nanollvm_exp
+scoped syntax atomic(ident notFollowedBy(":")) : nanollvm_exp
+scoped syntax num : nanollvm_exp
+scoped syntax "-" num : nanollvm_exp
+scoped syntax scientific : nanollvm_exp
+scoped syntax "-" scientific : nanollvm_exp
+scoped syntax "fbits(" num ")" : nanollvm_exp
+scoped syntax "fspecial(" ("+" <|> "-") ident ("(" num ")")? ")" : nanollvm_exp
+scoped syntax "blockaddress(" "@" nanollvm_rawid ", " "%" nanollvm_rawid ")" : nanollvm_exp
+scoped syntax "null" : nanollvm_exp
+scoped syntax "zeroinitializer" : nanollvm_exp
+scoped syntax "undef" : nanollvm_exp
+scoped syntax "poison" : nanollvm_exp
+scoped syntax "[" nanollvm_typed_exp,* "]" : nanollvm_exp
+scoped syntax "{" nanollvm_typed_exp,* "}" : nanollvm_exp
+scoped syntax "<{" nanollvm_typed_exp,* "}>" : nanollvm_exp
+scoped syntax "<" nanollvm_typed_exp,+ ">" : nanollvm_exp
+scoped syntax "splat" "(" nanollvm_typed_exp ")" : nanollvm_exp
+scoped syntax "getelementptr" nanollvm_gep_flag* "(" nanollvm_type ", " nanollvm_typed_exp (", " nanollvm_typed_exp)* ")" : nanollvm_exp
+scoped syntax nanollvm_conversion_op "(" nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type ")" : nanollvm_exp
+scoped syntax nanollvm_int_bin_op "(" nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ")" : nanollvm_exp
+scoped syntax "insertelement" "(" nanollvm_typed_exp ", " nanollvm_typed_exp ", " nanollvm_typed_exp ")" : nanollvm_exp
+scoped syntax "extractelement" "(" nanollvm_typed_exp ", " nanollvm_typed_exp ")" : nanollvm_exp
+scoped syntax "shufflevector" "(" nanollvm_typed_exp ", " nanollvm_typed_exp ", " "<" num ppHardSpace &"x" ppHardSpace &"i32" ">" " <" nanollvm_shuffle_elem,+ ">" ")" : nanollvm_exp
+
+private def mkPairTyLlvmExp : MetaM Expr :=
+  mkAppM ``Prod #[mkConst ``LlvmType, mkConst ``Exp]
+
+mutual
+private def elabNanoLlvmTypedExpAux : Nat → Syntax → TermElabM Expr
+  | 0, stx => throwErrorAt stx "LLVM typed expression nesting depth exceeded"
+  | fuel + 1, stx =>
+    match stx with
+    | `(nanollvm_typed_exp| $ty:nanollvm_type $e:nanollvm_exp) => do
+      let ty ← elabNanoLlvmType ty
+      let e ← elabNanoLlvmExpAux fuel e
+      mkAppM ``Prod.mk #[ty, e]
+    | _ => throwUnsupportedSyntax
+
+private def elabNanoLlvmExpAux : Nat → Syntax → TermElabM Expr
+  | 0, stx => throwErrorAt stx "LLVM expression nesting depth exceeded"
+  | fuel + 1, stx =>
+    match stx with
+    | `(nanollvm_exp| $id:nanollvm_identifier) => do
+      let id ← elabNanoLlvmIdentifier id
+      mkAppM ``Exp.identifier #[id]
+    | `(nanollvm_exp| <$id:ident:int>) => do
+      let e ← elabTerm id none
+      let t ← whnf (← inferType e)
+      if ← isDefEq t (mkConst ``Int) then
+        mkAppM ``Exp.int #[e]
+      else if ← isDefEq t (mkConst ``Nat) then
+        mkAppM ``Exp.int #[← mkAppM ``Int.ofNat #[e]]
+      else
+        throwErrorAt id "Expected Int/Nat expression in LLVM expression, got type {t}"
+    | `(nanollvm_exp| $id:ident) => do
+      match id.getId.toString with
+      | "true"  => mkAppM ``Exp.bool #[mkConst ``Bool.true]
+      | "false" => mkAppM ``Exp.bool #[mkConst ``Bool.false]
+      | other   => throwErrorAt id "Unknown LLVM expression keyword '{other}'"
+    | `(nanollvm_exp| $n:num) => do
+      let int ← mkAppM ``Int.ofNat #[mkNatLit n.getNat]
+      mkAppM ``Exp.int #[int]
+    | `(nanollvm_exp| -$n:num) => do
+      let int ← mkIntLitExpr (-(n.getNat : Int))
+      mkAppM ``Exp.int #[int]
+    | `(nanollvm_exp| $s:scientific) => do
+      let (m, negExp, e) := s.getScientific
+      let exp10 : Int := if negExp then -(e : Int) else (e : Int)
+      let exp10E ← mkIntLitExpr exp10
+      mkAppM ``Exp.floatDec #[toExpr Bool.false, mkNatLit m, exp10E]
+    | `(nanollvm_exp| -$s:scientific) => do
+      let (m, negExp, e) := s.getScientific
+      let exp10 : Int := if negExp then -(e : Int) else (e : Int)
+      let exp10E ← mkIntLitExpr exp10
+      mkAppM ``Exp.floatDec #[toExpr Bool.true, mkNatLit m, exp10E]
+    | `(nanollvm_exp| fbits($n:num)) =>
+      mkAppM ``Exp.floatBits #[mkNatLit n.getNat]
+    | `(nanollvm_exp| fspecial(+ $kind:ident $[($p:num)]?)) => do
+      let payload := (p.map (·.getNat)).getD 0
+      match kind.getId.toString with
+      | "inf"  => mkAppM ``Exp.floatSpecial #[toExpr false, toExpr true, toExpr false, mkNatLit payload]
+      | "qnan" => mkAppM ``Exp.floatSpecial #[toExpr false, toExpr false, toExpr true, mkNatLit payload]
+      | "snan" => mkAppM ``Exp.floatSpecial #[toExpr false, toExpr false, toExpr false, mkNatLit payload]
+      | other  => throwErrorAt kind "Unknown float special kind '{other}'"
+    | `(nanollvm_exp| fspecial(- $kind:ident $[($p:num)]?)) => do
+      let payload := (p.map (·.getNat)).getD 0
+      match kind.getId.toString with
+      | "inf"  => mkAppM ``Exp.floatSpecial #[toExpr true, toExpr true, toExpr false, mkNatLit payload]
+      | "qnan" => mkAppM ``Exp.floatSpecial #[toExpr true, toExpr false, toExpr true, mkNatLit payload]
+      | "snan" => mkAppM ``Exp.floatSpecial #[toExpr true, toExpr false, toExpr false, mkNatLit payload]
+      | other  => throwErrorAt kind "Unknown float special kind '{other}'"
+    | `(nanollvm_exp| blockaddress(@$fn:nanollvm_rawid, %$blk:nanollvm_rawid)) => do
+      mkAppM ``Exp.blockAddress #[← elabNanoLlvmRawId fn, ← elabNanoLlvmRawId blk]
+    | `(nanollvm_exp| null) => pure (mkConst ``Exp.null)
+    | `(nanollvm_exp| zeroinitializer) => pure (mkConst ``Exp.zeroinitializer)
+    | `(nanollvm_exp| undef) => pure (mkConst ``Exp.undef)
+    | `(nanollvm_exp| poison) => pure (mkConst ``Exp.poison)
+    | `(nanollvm_exp| [ $elems:nanollvm_typed_exp,* ]) => do
+      let lst ← mkListLit (← mkPairTyLlvmExp) (← elems.getElems.toList.mapM (fun x => elabNanoLlvmTypedExpAux fuel x.raw))
+      mkAppM ``Exp.array #[lst]
+    | `(nanollvm_exp| { $elems:nanollvm_typed_exp,* }) => do
+      let lst ← mkListLit (← mkPairTyLlvmExp) (← elems.getElems.toList.mapM (fun x => elabNanoLlvmTypedExpAux fuel x.raw))
+      mkAppM ``Exp.struct #[toExpr Bool.false, lst]
+    | `(nanollvm_exp| <{ $elems:nanollvm_typed_exp,* }>) => do
+      let lst ← mkListLit (← mkPairTyLlvmExp) (← elems.getElems.toList.mapM (fun x => elabNanoLlvmTypedExpAux fuel x.raw))
+      mkAppM ``Exp.struct #[toExpr Bool.true, lst]
+    | `(nanollvm_exp| < $elems:nanollvm_typed_exp,* >) => do
+      let lst ← mkListLit (← mkPairTyLlvmExp) (← elems.getElems.toList.mapM (fun x => elabNanoLlvmTypedExpAux fuel x.raw))
+      mkAppM ``Exp.vector #[lst]
+    | `(nanollvm_exp| splat ($te:nanollvm_typed_exp)) => do
+      let e ← elabNanoLlvmTypedExpAux fuel te
+      mkAppM ``Exp.splat #[e]
+    | `(nanollvm_exp| getelementptr $flags:nanollvm_gep_flag* ($baseTy:nanollvm_type, $ptr:nanollvm_typed_exp $[, $idxs:nanollvm_typed_exp]*)) => do
+      let flE := toExpr (elabGEPFlags flags)
+      let idxList ← mkListLit (← mkPairTyLlvmExp) (← idxs.toList.mapM (fun x => elabNanoLlvmTypedExpAux fuel x.raw))
+      mkAppM ``Exp.gepConst #[flE, ← elabNanoLlvmType baseTy, ← elabNanoLlvmTypedExpAux fuel ptr, idxList]
+    | `(nanollvm_exp| $op:nanollvm_conversion_op ($fTy:nanollvm_type $v:nanollvm_exp to $tTy:nanollvm_type)) => do
+      mkAppM ``Exp.convConst #[← elabNanoLlvmConversionOp op, ← elabNanoLlvmType fTy, ← elabNanoLlvmExpAux fuel v, ← elabNanoLlvmType tTy]
+    | `(nanollvm_exp| $op:nanollvm_int_bin_op ($ty:nanollvm_type $v1:nanollvm_exp, $_ty2:nanollvm_type $v2:nanollvm_exp)) => do
+      mkAppM ``Exp.binConst #[← elabNanoLlvmIntBinOp op, ← elabNanoLlvmType ty, ← elabNanoLlvmExpAux fuel v1, ← elabNanoLlvmExpAux fuel v2]
+    | `(nanollvm_exp| insertelement ($vTe:nanollvm_typed_exp, $eTe:nanollvm_typed_exp, $iTe:nanollvm_typed_exp)) => do
+      match vTe.raw, eTe.raw, iTe.raw with
+      | `(nanollvm_typed_exp| $vTy:nanollvm_type $v:nanollvm_exp),
+        `(nanollvm_typed_exp| $eTy:nanollvm_type $e:nanollvm_exp),
+        `(nanollvm_typed_exp| $iTy:nanollvm_type $i:nanollvm_exp) =>
+          mkAppM ``Exp.insertElemConst #[← elabNanoLlvmType vTy, ← elabNanoLlvmExpAux fuel v, ← elabNanoLlvmType eTy, ← elabNanoLlvmExpAux fuel e, ← elabNanoLlvmType iTy, ← elabNanoLlvmExpAux fuel i]
+      | _, _, _ => throwUnsupportedSyntax
+    | `(nanollvm_exp| extractelement ($vTe:nanollvm_typed_exp, $iTe:nanollvm_typed_exp)) => do
+      match vTe.raw, iTe.raw with
+      | `(nanollvm_typed_exp| $vTy:nanollvm_type $v:nanollvm_exp),
+        `(nanollvm_typed_exp| $iTy:nanollvm_type $i:nanollvm_exp) =>
+          mkAppM ``Exp.extractElemConst #[← elabNanoLlvmType vTy, ← elabNanoLlvmExpAux fuel v, ← elabNanoLlvmType iTy, ← elabNanoLlvmExpAux fuel i]
+      | _, _ => throwUnsupportedSyntax
+    | `(nanollvm_exp| shufflevector ($v1Te:nanollvm_typed_exp, $v2Te:nanollvm_typed_exp, < $_mLen:num x i32 > < $mask:nanollvm_shuffle_elem,* >)) => do
+      match v1Te.raw, v2Te.raw with
+      | `(nanollvm_typed_exp| $vTy:nanollvm_type $v1:nanollvm_exp),
+        `(nanollvm_typed_exp| $_vTy2:nanollvm_type $v2:nanollvm_exp) =>
+          mkAppM ``Exp.shuffleVecConst #[← elabNanoLlvmType vTy, ← elabNanoLlvmExpAux fuel v1, ← elabNanoLlvmExpAux fuel v2, ← elabShuffleMask mask]
+      | _, _ => throwUnsupportedSyntax
+    | _ => throwUnsupportedSyntax
+end
+
+def elabNanoLlvmTypedExp (stx : Syntax) : TermElabM Expr := elabNanoLlvmTypedExpAux 1000 stx
+def elabNanoLlvmExp (stx : Syntax) : TermElabM Expr := elabNanoLlvmExpAux 1000 stx
+
+elab "[llvm-exp|" p:nanollvm_exp "]" : term => elabNanoLlvmExp p
+
 /-! ### Instructions -/
 
 declare_syntax_cat nanollvm_phi_incoming
-scoped syntax "[" nanollvm_exp "," "%" nanollvm_rawid "]" : nanollvm_phi_incoming
-
-declare_syntax_cat nanollvm_gep_flag
-scoped syntax "inbounds" : nanollvm_gep_flag
-scoped syntax "nusw" : nanollvm_gep_flag
-scoped syntax "nuw" : nanollvm_gep_flag
-
-def elabGEPFlags (flags : Array (TSyntax `nanollvm_gep_flag)) : GEPFlags :=
-  flags.foldl (init := GEPFlags.none) fun acc stx =>
-    match stx.raw[0].getAtomVal with
-    | "inbounds" => { acc with «inbounds» := Bool.true, «nusw» := Bool.true }
-    | "nusw"     => { acc with «nusw» := Bool.true }
-    | "nuw"      => { acc with «nuw» := Bool.true }
-    | _          => acc
+scoped syntax "[" nanollvm_exp ", " "%" nanollvm_rawid "]" : nanollvm_phi_incoming
 
 declare_syntax_cat nanollvm_alloca_opt
 scoped syntax "align " num : nanollvm_alloca_opt
@@ -509,41 +700,36 @@ scoped syntax nanollvm_typed_exp : nanollvm_alloca_opt
 
 declare_syntax_cat nanollvm_load_opt
 scoped syntax "align " num : nanollvm_load_opt
-scoped syntax "!noundef" : nanollvm_load_opt
-scoped syntax "!nonnull" : nanollvm_load_opt
-scoped syntax "!range(" nanollvm_signed_int ", " nanollvm_signed_int ")" : nanollvm_load_opt
+scoped syntax "!" nanollvm_value_attr : nanollvm_load_opt
 
 declare_syntax_cat nanollvm_call_arg
 scoped syntax nanollvm_type nanollvm_value_attr* ppHardSpace nanollvm_exp : nanollvm_call_arg
 
-declare_syntax_cat nanollvm_shuffle_elem
-scoped syntax nanollvm_type ppHardSpace num : nanollvm_shuffle_elem
-scoped syntax nanollvm_type ppHardSpace "poison" : nanollvm_shuffle_elem
+declare_syntax_cat nanollvm_op_bundle
+scoped syntax str "(" nanollvm_typed_exp,* ")" : nanollvm_op_bundle
 
 declare_syntax_cat nanollvm_instruction
 scoped syntax nanollvm_int_bin_op ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
 scoped syntax "fneg" nanollvm_fmf_flag* ppHardSpace nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
 scoped syntax nanollvm_fp_bin_op ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
-scoped syntax "icmp" " samesign "? ident ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
-scoped syntax "fcmp" nanollvm_fmf_flag* ident ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
+scoped syntax "icmp" " samesign"? ppHardSpace ident ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
+scoped syntax "fcmp" nanollvm_fmf_flag* ppHardSpace ident ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_exp : nanollvm_instruction
 scoped syntax nanollvm_conversion_op ppHardSpace nanollvm_type ppHardSpace nanollvm_exp " to " nanollvm_type : nanollvm_instruction
 scoped syntax "select" nanollvm_fmf_flag* ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
-scoped syntax "phi" nanollvm_fmf_flag* ppHardSpace nanollvm_type ppHardSpace nanollvm_phi_incoming,+ : nanollvm_instruction
+scoped syntax "phi" nanollvm_fmf_flag* ppHardSpace nanollvm_type ppHardSpace nanollvm_phi_incoming (atomic(", " nanollvm_phi_incoming))* (", " "!" nanollvm_value_attr)* : nanollvm_instruction
 scoped syntax "alloca" ppHardSpace nanollvm_type (", " nanollvm_alloca_opt)* : nanollvm_instruction
-scoped syntax "load" " volatile "? ppHardSpace nanollvm_type ", " nanollvm_type ppHardSpace nanollvm_exp (", " nanollvm_load_opt)* : nanollvm_instruction
-scoped syntax "store" " volatile "? ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp (", " "align " num)? : nanollvm_instruction
+scoped syntax "load" " volatile"? ppHardSpace nanollvm_type ", " nanollvm_type ppHardSpace nanollvm_exp (", " nanollvm_load_opt)* : nanollvm_instruction
+scoped syntax "store" " volatile"? ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp (", " "align " num)? : nanollvm_instruction
 scoped syntax "getelementptr" nanollvm_gep_flag* ppHardSpace nanollvm_type ", " nanollvm_type ppHardSpace nanollvm_exp (", " nanollvm_typed_exp)* : nanollvm_instruction
 scoped syntax "extractvalue" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " num,+ : nanollvm_instruction
 scoped syntax "insertvalue" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ", " num,+ : nanollvm_instruction
 scoped syntax "extractelement" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
 scoped syntax "insertelement" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
-scoped syntax "shufflevector" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ", " "<" num &"x" &"i32" ">" " <" nanollvm_shuffle_elem,+ ">" : nanollvm_instruction
-scoped syntax "call" nanollvm_fmf_flag* nanollvm_value_attr* ppHardSpace nanollvm_type ppHardSpace nanollvm_exp "(" nanollvm_call_arg,* ")" : nanollvm_instruction
+scoped syntax "shufflevector" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ", " "<" num ppHardSpace &"x" ppHardSpace &"i32" ">" " <" nanollvm_shuffle_elem,+ ">" : nanollvm_instruction
+scoped syntax ("tail ")? "call" nanollvm_fmf_flag* (" cc " str)? nanollvm_value_attr* ppHardSpace nanollvm_type ppHardSpace nanollvm_exp "(" nanollvm_call_arg,* ")" (" [" nanollvm_op_bundle,* "]")? (" noreturn")? : nanollvm_instruction
 scoped syntax "freeze" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
-
-private def mkOptionExpr (ty : Expr) : Option Expr → MetaM Expr
-  | none => mkAppOptM ``Option.none #[ty]
-  | some e => mkAppOptM ``Option.some #[ty, e]
+scoped syntax "bitinsert" ppHardSpace nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
+scoped syntax "bitextract" ppHardSpace nanollvm_type ", " nanollvm_type ppHardSpace nanollvm_exp ", " nanollvm_type ppHardSpace nanollvm_exp : nanollvm_instruction
 
 def elabNanoLlvmInstruction : Syntax → TermElabM Expr
   | `(nanollvm_instruction| $op:nanollvm_int_bin_op $ty:nanollvm_type $op1:nanollvm_exp, $op2:nanollvm_exp) => do
@@ -561,15 +747,16 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
     mkAppM ``Instruction.conversionOp #[← elabNanoLlvmConversionOp op, ← elabNanoLlvmType fromTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType toTy]
   | `(nanollvm_instruction| select $flags:nanollvm_fmf_flag* $cTy:nanollvm_type $c:nanollvm_exp, $vTy:nanollvm_type $tv:nanollvm_exp, $_fvTy:nanollvm_type $fv:nanollvm_exp) => do
     mkAppM ``Instruction.select #[toExpr (elabFastMathFlags flags), ← elabNanoLlvmType cTy, ← elabNanoLlvmExp c, ← elabNanoLlvmType vTy, ← elabNanoLlvmExp tv, ← elabNanoLlvmExp fv]
-  | `(nanollvm_instruction| phi $flags:nanollvm_fmf_flag* $ty:nanollvm_type $incs:nanollvm_phi_incoming,*) => do
+  | `(nanollvm_instruction| phi $flags:nanollvm_fmf_flag* $ty:nanollvm_type $inc0:nanollvm_phi_incoming $[, $incRest:nanollvm_phi_incoming]* $[, !$mds:nanollvm_value_attr]*) => do
     let pairTy ← mkAppM ``Prod #[mkConst ``Exp, mkConst ``RawId]
-    let incExprs ← incs.getElems.toList.mapM fun inc =>
+    let allIncs := #[inc0] ++ incRest
+    let incExprs ← allIncs.toList.mapM fun inc =>
       match inc.raw with
       | `(nanollvm_phi_incoming| [ $e:nanollvm_exp, %$lbl:nanollvm_rawid ]) => do
         mkAppM ``Prod.mk #[← elabNanoLlvmExp e, ← elabNanoLlvmRawId lbl]
       | _ => throwUnsupportedSyntax
     let lst ← mkListLit pairTy incExprs
-    mkAppM ``Instruction.phi #[← elabNanoLlvmType ty, toExpr (elabFastMathFlags flags), lst, ← mkListLit (mkConst ``ValueAttr) []]
+    mkAppM ``Instruction.phi #[← elabNanoLlvmType ty, toExpr (elabFastMathFlags flags), lst, ← elabValueAttrList mds]
   | `(nanollvm_instruction| alloca $ty:nanollvm_type $[, $opts:nanollvm_alloca_opt]*) => do
     let tyE ← elabNanoLlvmType ty
     let mut numElOpt : Option Expr := none
@@ -591,12 +778,10 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
     for opt in opts do
       match opt.raw with
       | `(nanollvm_load_opt| align $al:num) => alignOptVal := some (mkNatLit al.getNat)
-      | `(nanollvm_load_opt| !noundef) => hasNoundef := Bool.true
-      | `(nanollvm_load_opt| !nonnull) => mdAttrs := mdAttrs.push (mkConst ``ValueAttr.nonnull)
-      | `(nanollvm_load_opt| !range($lo:nanollvm_signed_int, $hi:nanollvm_signed_int)) => do
-          let loE ← elabSignedInt lo
-          let hiE ← elabSignedInt hi
-          mdAttrs := mdAttrs.push (← mkAppM ``ValueAttr.range #[loE, hiE])
+      | `(nanollvm_load_opt| !$attr:nanollvm_value_attr) =>
+        match attr.raw with
+        | `(nanollvm_value_attr| noundef) => hasNoundef := Bool.true
+        | _ => mdAttrs := mdAttrs.push (← elabNanoLlvmValueAttr attr.raw)
       | _ => throwUnsupportedSyntax
     let alignOpt ← mkOptionExpr (mkConst ``Nat) alignOptVal
     let mdList ← mkListLit (mkConst ``ValueAttr) mdAttrs.toList
@@ -618,15 +803,8 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
   | `(nanollvm_instruction| insertelement $vecTy:nanollvm_type $vec:nanollvm_exp, $valTy:nanollvm_type $val:nanollvm_exp, $idxTy:nanollvm_type $idx:nanollvm_exp) => do
     mkAppM ``Instruction.insertelement #[← elabNanoLlvmType vecTy, ← elabNanoLlvmExp vec, ← elabNanoLlvmType valTy, ← elabNanoLlvmExp val, ← elabNanoLlvmType idxTy, ← elabNanoLlvmExp idx]
   | `(nanollvm_instruction| shufflevector $vecTy:nanollvm_type $v1:nanollvm_exp, $_vecTy2:nanollvm_type $v2:nanollvm_exp, < $_mLen:num x i32 > < $mask:nanollvm_shuffle_elem,* >) => do
-    let optNatTy ← mkAppM ``Option #[mkConst ``Nat]
-    let maskElems ← mask.getElems.toList.mapM fun el =>
-      match el.raw with
-      | `(nanollvm_shuffle_elem| $_t:nanollvm_type $n:num) => mkOptionExpr (mkConst ``Nat) (some (mkNatLit n.getNat))
-      | `(nanollvm_shuffle_elem| $_t:nanollvm_type poison) => mkOptionExpr (mkConst ``Nat) none
-      | _ => throwUnsupportedSyntax
-    let maskList ← mkListLit optNatTy maskElems
-    mkAppM ``Instruction.shufflevector #[← elabNanoLlvmType vecTy, ← elabNanoLlvmExp v1, ← elabNanoLlvmExp v2, maskList]
-  | `(nanollvm_instruction| call $flags:nanollvm_fmf_flag* $retAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp ( $args:nanollvm_call_arg,* )) => do
+    mkAppM ``Instruction.shufflevector #[← elabNanoLlvmType vecTy, ← elabNanoLlvmExp v1, ← elabNanoLlvmExp v2, ← elabShuffleMask mask]
+  | `(nanollvm_instruction| $[tail%$tl]? call $flags:nanollvm_fmf_flag* $[cc $ccName:str]? $retAttrs:nanollvm_value_attr* $retTy:nanollvm_type $callee:nanollvm_exp ( $args:nanollvm_call_arg,* ) $[[ $bundles:nanollvm_op_bundle,* ]]? $[noreturn%$nr]?) => do
     let attrListT ← mkAppM ``List #[mkConst ``ValueAttr]
     let argInnerT ← mkAppM ``Prod #[mkConst ``Exp, attrListT]
     let argTupleT ← mkAppM ``Prod #[mkConst ``LlvmType, argInnerT]
@@ -637,11 +815,28 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
         mkAppM ``Prod.mk #[← elabNanoLlvmType t, inner]
       | _ => throwUnsupportedSyntax
     let argList ← mkListLit argTupleT argExprs
-    let emptyBundles ← mkListLit (← mkAppM ``Prod #[mkConst ``String, ← mkAppM ``List #[← mkAppM ``Prod #[mkConst ``LlvmType, mkConst ``Exp]]]) []
-    mkAppM ``Instruction.call #[← elabNanoLlvmRetType retTy, toExpr (elabFastMathFlags flags), ← elabNanoLlvmExp callee, argList, ← elabValueAttrList retAttrs, emptyBundles, toExpr false, mkConst ``CallSiteInfo.default]
+    let teListTy ← mkAppM ``List #[← mkPairTyLlvmExp]
+    let bundleTy ← mkAppM ``Prod #[mkConst ``String, teListTy]
+    let bundleExprs ← match bundles with
+      | none => pure []
+      | some bs => bs.getElems.toList.mapM fun b =>
+        match b.raw with
+        | `(nanollvm_op_bundle| $tag:str ($tes:nanollvm_typed_exp,*)) => do
+          let teEs ← tes.getElems.toList.mapM (fun x => elabNanoLlvmTypedExp x.raw)
+          let teLst ← mkListLit (← mkPairTyLlvmExp) teEs
+          mkAppM ``Prod.mk #[mkStrLit tag.getString, teLst]
+        | _ => throwUnsupportedSyntax
+    let bundleList ← mkListLit bundleTy bundleExprs
+    let site : CallSiteInfo := { isTail := tl.isSome, callingConv := (ccName.map (·.getString)).getD "" }
+    let siteE : Expr := if site == CallSiteInfo.default then Lean.mkConst ``CallSiteInfo.default else toExpr site
+    mkAppM ``Instruction.call #[← elabNanoLlvmRetType retTy, toExpr (elabFastMathFlags flags), ← elabNanoLlvmExp callee, argList, ← elabValueAttrList retAttrs, bundleList, toExpr nr.isSome, siteE]
   | `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp) => do
     let tv ← mkAppM ``Prod.mk #[← elabNanoLlvmType ty, ← elabNanoLlvmExp v]
     mkAppM ``Instruction.freeze #[tv]
+  | `(nanollvm_instruction| bitinsert $bTy:nanollvm_type $b:nanollvm_exp, $vTy:nanollvm_type $v:nanollvm_exp, $oTy:nanollvm_type $o:nanollvm_exp) => do
+    mkAppM ``Instruction.bitinsert #[← elabNanoLlvmType bTy, ← elabNanoLlvmExp b, ← elabNanoLlvmType vTy, ← elabNanoLlvmExp v, ← elabNanoLlvmType oTy, ← elabNanoLlvmExp o]
+  | `(nanollvm_instruction| bitextract $rTy:nanollvm_type, $sTy:nanollvm_type $s:nanollvm_exp, $oTy:nanollvm_type $o:nanollvm_exp) => do
+    mkAppM ``Instruction.bitextract #[← elabNanoLlvmType rTy, ← elabNanoLlvmType sTy, ← elabNanoLlvmExp s, ← elabNanoLlvmType oTy, ← elabNanoLlvmExp o]
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-instruction|" p:nanollvm_instruction "]" : term => elabNanoLlvmInstruction p
@@ -651,12 +846,16 @@ elab "[llvm-instruction|" p:nanollvm_instruction "]" : term => elabNanoLlvmInstr
 declare_syntax_cat nanollvm_switch_case
 scoped syntax nanollvm_type ppHardSpace nanollvm_signed_int ", " "label " "%" nanollvm_rawid : nanollvm_switch_case
 
+declare_syntax_cat nanollvm_indirectbr_dest
+scoped syntax "label " "%" nanollvm_rawid : nanollvm_indirectbr_dest
+
 declare_syntax_cat nanollvm_terminator
 scoped syntax "ret " "void" : nanollvm_terminator
 scoped syntax "ret " nanollvm_type ppHardSpace nanollvm_exp : nanollvm_terminator
 scoped syntax "br " "label " "%" nanollvm_rawid : nanollvm_terminator
 scoped syntax "br " &"i1" ppHardSpace nanollvm_exp ", " "label " "%" nanollvm_rawid ", " "label " "%" nanollvm_rawid : nanollvm_terminator
 scoped syntax "switch " nanollvm_type ppHardSpace nanollvm_exp ", " "label " "%" nanollvm_rawid " [" nanollvm_switch_case* "]" : nanollvm_terminator
+scoped syntax "indirectbr " &"ptr" ppHardSpace nanollvm_exp ", " "[" nanollvm_indirectbr_dest,* "]" : nanollvm_terminator
 scoped syntax "unreachable" : nanollvm_terminator
 
 def elabNanoLlvmTerminator : Syntax → TermElabM Expr
@@ -677,6 +876,13 @@ def elabNanoLlvmTerminator : Syntax → TermElabM Expr
       | _ => throwUnsupportedSyntax
     let caseList ← mkListLit pairTy caseExprs
     mkAppM ``Terminator.switch #[← elabNanoLlvmType ty, ← elabNanoLlvmExp cond, ← elabNanoLlvmRawId defDest, caseList]
+  | `(nanollvm_terminator| indirectbr ptr $addr:nanollvm_exp, [ $dests:nanollvm_indirectbr_dest,* ]) => do
+    let destExprs ← dests.getElems.toList.mapM fun d =>
+      match d.raw with
+      | `(nanollvm_indirectbr_dest| label %$lbl:nanollvm_rawid) => elabNanoLlvmRawId lbl
+      | _ => throwUnsupportedSyntax
+    let destList ← mkListLit (mkConst ``RawId) destExprs
+    mkAppM ``Terminator.indirectBr #[← elabNanoLlvmExp addr, destList]
   | `(nanollvm_terminator| unreachable) => pure (mkConst ``Terminator.unreachable)
   | _ => throwUnsupportedSyntax
 
@@ -684,15 +890,42 @@ elab "[llvm-terminator|" p:nanollvm_terminator "]" : term => elabNanoLlvmTermina
 
 /-! ### Declarations, Blocks, Definitions, Globals, Modules -/
 
+declare_syntax_cat nanollvm_fn_attr
+scoped syntax "noreturn" : nanollvm_fn_attr
+scoped syntax "nobuiltin" : nanollvm_fn_attr
+scoped syntax "denormal_fpenv(" ident "|" ident ")" : nanollvm_fn_attr
+
+private def elabDenormalModeKind (id : TSyntax `ident) : TermElabM DenormalModeKind := do
+  match id.getId.toString with
+  | "ieee" => pure .ieee
+  | "preservesign" => pure .preserveSign
+  | "positivezero" => pure .positiveZero
+  | other => throwErrorAt id "Unknown denormal mode kind '{other}'"
+
+private def elabFnAttrs (attrs : Array (TSyntax `nanollvm_fn_attr)) : TermElabM (Bool × Bool × Option DenormalMode) := do
+  let mut isNoReturn := false
+  let mut isNoBuiltin := false
+  let mut denorm : Option DenormalMode := none
+  for a in attrs do
+    match a.raw with
+    | `(nanollvm_fn_attr| noreturn) => isNoReturn := true
+    | `(nanollvm_fn_attr| nobuiltin) => isNoBuiltin := true
+    | `(nanollvm_fn_attr| denormal_fpenv($outId:ident | $inId:ident)) =>
+      let outK ← elabDenormalModeKind outId
+      let inK ← elabDenormalModeKind inId
+      denorm := some { input := inK, output := outK }
+    | _ => throwUnsupportedSyntax
+  pure (isNoReturn, isNoBuiltin, denorm)
+
 declare_syntax_cat nanollvm_decl_arg
 scoped syntax nanollvm_type nanollvm_value_attr* : nanollvm_decl_arg
 scoped syntax "..." : nanollvm_decl_arg
 
 declare_syntax_cat nanollvm_declaration
-scoped syntax "declare " nanollvm_value_attr* nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_decl_arg,* ")" : nanollvm_declaration
+scoped syntax "declare " ("cc " str ppHardSpace)? nanollvm_value_attr* nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_decl_arg,* ")" nanollvm_fn_attr* : nanollvm_declaration
 
 def elabNanoLlvmDeclaration : Syntax → TermElabM Expr
-  | `(nanollvm_declaration| declare $retAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$id:nanollvm_rawid($params:nanollvm_decl_arg,*)) => do
+  | `(nanollvm_declaration| declare $[cc $ccName:str]? $retAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$id:nanollvm_rawid($params:nanollvm_decl_arg,*) $fnAttrs:nanollvm_fn_attr*) => do
     let idE ← elabNanoLlvmRawId id
     let retTyE ← elabNanoLlvmRetType retTy
     let mut argTys : Array Expr := #[]
@@ -710,8 +943,10 @@ def elabNanoLlvmDeclaration : Syntax → TermElabM Expr
     let attrListT ← mkAppM ``List #[mkConst ``ValueAttr]
     let argAttrsList ← mkListLit attrListT argAttrs.toList
     let fnTy ← mkAppM ``LlvmType.function #[retTyE, argList, toExpr isVarArg]
-    let noneDenorm ← mkAppOptM ``Option.none #[some (mkConst ``DenormalMode)]
-    mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false, noneDenorm, toExpr ""]
+    let (isNoReturn, isNoBuiltin, denorm) ← elabFnAttrs fnAttrs
+    let denormE ← mkOptionExpr (mkConst ``DenormalMode) (denorm.map toExpr)
+    let ccStr := (ccName.map (·.getString)).getD ""
+    mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr isNoReturn, toExpr isNoBuiltin, denormE, toExpr ccStr]
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-declaration|" p:nanollvm_declaration "]" : term => elabNanoLlvmDeclaration p
@@ -774,11 +1009,11 @@ elab "[llvm-arg|" p:nanollvm_arg "]" : term => do
   | _ => throwUnsupportedSyntax
 
 declare_syntax_cat nanollvm_definition
-scoped syntax "define " nanollvm_value_attr* nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_arg,* ") "
+scoped syntax "define " ("cc " str ppHardSpace)? nanollvm_value_attr* nanollvm_type ppHardSpace "@" nanollvm_rawid "(" nanollvm_arg,* ")" nanollvm_fn_attr* ppHardSpace
        ppDedent(ppDedent("{" (ppLine nanollvm_block)+ ppLine "}")) : nanollvm_definition
 
 def elabNanoLlvmDefinition : Syntax → TermElabM Expr
-  | `(nanollvm_definition| define $retAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$id:nanollvm_rawid($args:nanollvm_arg,*) {
+  | `(nanollvm_definition| define $[cc $ccName:str]? $retAttrs:nanollvm_value_attr* $retTy:nanollvm_type @$id:nanollvm_rawid($args:nanollvm_arg,*) $fnAttrs:nanollvm_fn_attr* {
       $blocks:nanollvm_block*
     }) => do
     let idE ← elabNanoLlvmRawId id
@@ -808,8 +1043,10 @@ def elabNanoLlvmDefinition : Syntax → TermElabM Expr
       curLine := curLine + nLines
       blockExprs := blockExprs.push bE
     let blockList ← mkListLit (mkConst ``Block) blockExprs.toList
-    let noneDenorm ← mkAppOptM ``Option.none #[some (mkConst ``DenormalMode)]
-    let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr false, toExpr false, noneDenorm, toExpr ""]
+    let (isNoReturn, isNoBuiltin, denorm) ← elabFnAttrs fnAttrs
+    let denormE ← mkOptionExpr (mkConst ``DenormalMode) (denorm.map toExpr)
+    let ccStr := (ccName.map (·.getString)).getD ""
+    let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr isNoReturn, toExpr isNoBuiltin, denormE, toExpr ccStr]
     mkAppM ``Definition.mk #[decl, argNameList, blockList]
   | _ => throwUnsupportedSyntax
 
