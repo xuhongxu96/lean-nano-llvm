@@ -57,8 +57,27 @@ private def natOpt (name v : String) : Except String Nat :=
   | some n => .ok n
   | none => .error s!"for the --{name} option: '{v}' value invalid for uint argument!"
 
+/-- Setter of an option that takes a value (`--opt=v` or `--opt v`), if `name` is one. -/
+private def valueOpt (name : String) : Option (String → Options → Except String Options) :=
+  match name with
+  | "entry-function" => some fun v o => .ok { o with entry := v }
+  | "fake-argv0" => some fun v o => .ok { o with fakeArgv0 := v }
+  | "max-mem" => some fun v o => do let n ← natOpt name v; .ok { o with maxMem := n }
+  | "max-steps" => some fun v o => do let n ← natOpt name v; .ok { o with maxSteps := n }
+  | "max-stack-depth" => some fun v o => do let n ← natOpt name v; .ok { o with maxStackDepth := n }
+  | "vscale" => some fun v o => do let n ← natOpt name v; .ok { o with vscale := n }
+  | "seed" => some fun v o => do let n ← natOpt name v; .ok { o with seed := n }
+  | "undef-behavior" => some fun v o =>
+    if v == "nondet" || v == "zero" then .ok { o with undefMode? := some v }
+    else .error s!"for the --undef-behavior option: Cannot find option named '{v}'!"
+  | "nan-behavior" => some fun v o =>
+    if ["nondet", "preferred", "quieting", "unchanged", "target-specific"].contains v then
+      .ok { o with nanMode := v }
+    else .error s!"for the --nan-behavior option: Cannot find option named '{v}'!"
+  | _ => none
+
 /-- Parse `llubi` command-line options (LLVM `cl::opt` syntax: `-opt`, `--opt`, `--opt=v`, `--opt v`). -/
-partial def parseOptions (args : List String) : Except String Options :=
+def parseOptions (args : List String) : Except String Options :=
   go {} false args
 where
   go (o : Options) (seenFile : Bool) : List String → Except String Options
@@ -72,13 +91,6 @@ where
           | [n] => (n, none)
           | n :: vs => (n, some ("=".intercalate vs))
           | [] => (body, none)
-        let needVal (k : String → Options → Except String Options) : Except String Options :=
-          match val? with
-          | some v => k v o >>= fun o' => go o' seenFile rest
-          | none =>
-            match rest with
-            | v :: rest' => k v o >>= fun o' => go o' seenFile rest'
-            | [] => .error s!"option --{name} requires a value"
         match name with
         | "verbose" => do let b ← boolOpt (val?.getD ""); go { o with verbose := b } seenFile rest
         | "deterministic" => do let b ← boolOpt (val?.getD ""); go { o with deterministic := b } seenFile rest
@@ -87,22 +99,16 @@ where
         | "use-constant-int-for-fixed-length-splat" | "use-constant-fp-for-fixed-length-splat"
         | "use-constant-int-for-scalable-splat" | "use-constant-fp-for-scalable-splat" =>
           go o seenFile rest
-        | "entry-function" => needVal fun v o => .ok { o with entry := v }
-        | "fake-argv0" => needVal fun v o => .ok { o with fakeArgv0 := v }
-        | "max-mem" => needVal fun v o => do let n ← natOpt name v; .ok { o with maxMem := n }
-        | "max-steps" => needVal fun v o => do let n ← natOpt name v; .ok { o with maxSteps := n }
-        | "max-stack-depth" => needVal fun v o => do let n ← natOpt name v; .ok { o with maxStackDepth := n }
-        | "vscale" => needVal fun v o => do let n ← natOpt name v; .ok { o with vscale := n }
-        | "seed" => needVal fun v o => do let n ← natOpt name v; .ok { o with seed := n }
-        | "undef-behavior" => needVal fun v o =>
-          if v == "nondet" || v == "zero" then .ok { o with undefMode? := some v }
-          else .error s!"for the --undef-behavior option: Cannot find option named '{v}'!"
-        | "nan-behavior" => needVal fun v o =>
-          if ["nondet", "preferred", "quieting", "unchanged", "target-specific"].contains v then
-            .ok { o with nanMode := v }
-          else .error s!"for the --nan-behavior option: Cannot find option named '{v}'!"
-        | _ => .error s!"Unknown command line argument '{a}'."
+        | _ =>
+          match valueOpt name, val? with
+          | none, _ => .error s!"Unknown command line argument '{a}'."
+          | some set, some v => do go (← set v o) seenFile rest
+          | some set, none =>
+            match rest with
+            | v :: rest' => do go (← set v o) seenFile rest'
+            | [] => .error s!"option --{name} requires a value"
       else go { o with file := a } true rest
+  termination_by args => args.length
 
 /-! ### Nondeterminism: `std::mt19937_64` -/
 
