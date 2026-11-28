@@ -3,8 +3,10 @@
 
 Usage: assemble_final.py WORK VIEW
 
-The final numbers come from the code after all fixes (5f3039e, frozen worktree
-`/data/h445xu/repo/lnl-final`, provenance `provenance.final-5f3039e.json`):
+The final numbers come from the code after all fixes: llubi from 5f3039e (frozen worktree
+`/data/h445xu/repo/lnl-final`, provenance `provenance.final-5f3039e.json`), Lean from 5af1871
+(`/data/h445xu/repo/lnl-final2`, `provenance.lean-final-5af1871.json`; the `prove` rows computed
+by 5f3039e are kept, as `llvm_refine` did not change):
 
 * llubi: `results/llubi-run3*.jsonl` (all 3,048,296 runs).
 * Alive2: `results/alive2-*.jsonl` (oracle only; the 50 multi-pair rows re-run with the fixed
