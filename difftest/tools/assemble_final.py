@@ -3,16 +3,16 @@
 
 Usage: assemble_final.py WORK VIEW
 
-The final numbers come from the code after all fixes. The runs that produced them:
+The final numbers come from the code after all fixes (5f3039e, frozen worktree
+`/data/h445xu/repo/lnl-final`, provenance `provenance.final-5f3039e.json`):
 
-* llubi: `results/llubi-run3*.jsonl` (run 3, final code, all 3,048,296 runs).
+* llubi: `results/llubi-run3*.jsonl` (all 3,048,296 runs).
 * Alive2: `results/alive2-*.jsonl` (oracle only; the 50 multi-pair rows re-run with the fixed
   parser are in `alive2-no-undef-input.shard-0-of-1.jsonl`, their old rows removed).
-* Lean `prove` / `disprove-search`: run 2 (`lean.shard-*-of-32`, code 67a4ec4) for every pair
-  except those whose semantics changed after 67a4ec4 (pairs mentioning `x86_fp80`,
-  `ppc_fp128`, `denormal_fpenv` or `llvm.assume`, listed in `logs/lean-final-rerun-pairs.txt`),
-  which come from `lean-final*.jsonl` (final code).
-* Lean `disprove-witness`: `lean.shard-*-of-16` (final code).
+* Lean `prove` / `disprove-search` / `disprove-witness`: `results/lean-final*.jsonl`.
+
+Earlier runs stay on disk for the bug-finding history: run 1 (`results-run1-d3ba2af/`), run 2
+(`llubi.shard-*-of-8`, `lean.shard-*-of-32`).
 
 The view links the inputs and writes one result file per stage, so `dt triage` and `dt report`
 run on it unchanged. Every choice (which file a row comes from) is recorded in
@@ -74,25 +74,17 @@ def main() -> int:
                 n += 1
         sources[f"alive2-{cfg}"] = {"files": files, "rows": n}
 
-    # Lean
-    affected = {l.strip() for l in open(work / "logs" / "lean-final-rerun-pairs.txt") if l.strip()}
-    run2 = sorted(glob.glob(str(res / "lean.shard-*-of-32.jsonl")))
+    # Lean: final code only
     final = sorted(glob.glob(str(res / "lean-final*.jsonl")))
-    witness = sorted(glob.glob(str(res / "lean.shard-*-of-16.jsonl")))
-    seen, counts = set(), {"run2": 0, "final": 0, "witness": 0}
+    seen, n = set(), 0
     with open(view / "results" / "lean.jsonl", "w") as out:
-        for tag, files, keep in (("final", final, lambda r: True),
-                                 ("witness", witness, lambda r: r["obligation"] == "disprove-witness"),
-                                 ("run2", run2, lambda r: r["pair"] not in affected)):
-            for r in rows(files):
-                if r["run_id"] in seen or not keep(r):
-                    continue
-                seen.add(r["run_id"])
-                r["code_version"] = tag
-                out.write(json.dumps(r, sort_keys=True) + "\n")
-                counts[tag] += 1
-    sources["lean"] = {"run2_files": run2, "final_files": final, "witness_files": witness,
-                       "affected_pairs": len(affected), "rows": counts}
+        for r in rows(final):
+            if r["run_id"] in seen:
+                continue
+            seen.add(r["run_id"])
+            out.write(json.dumps(r, sort_keys=True) + "\n")
+            n += 1
+    sources["lean"] = {"files": final, "rows": n}
     (view / "results" / "SOURCES.json").write_text(json.dumps(sources, indent=2))
     print(json.dumps({k: (v["rows"] if "rows" in v else v) for k, v in sources.items()}, indent=1))
     return 0
