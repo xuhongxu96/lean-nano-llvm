@@ -351,7 +351,6 @@ structure DState where
   dl       : DataLayout
   modName  : String
   verbose  : Bool
-  maxSteps : Nat
 
 private def errLine (s : String) : IO Unit := do
   let h ← IO.getStderr
@@ -362,6 +361,23 @@ private def outStr (s : String) : IO Unit := do
   let h ← IO.getStdout
   h.putStr s
   h.flush
+
+/-- One piece of `llubi` output: a line on stderr, or raw text on stdout. -/
+inductive TraceOut where
+  | stderr (line : String)
+  | stdout (text : String)
+
+/-- Sink for trace output. The trace driver is generic in the monad, so the same code streams to
+the terminal (`IO`, via `TraceOut.toIO`) and is reasoned about (`traceLoop_result`). -/
+abbrev Emit (m : Type → Type) := TraceOut → m Unit
+
+/-- Write a piece of output to the process's stderr/stdout (flushing, so traces interleave). -/
+def TraceOut.toIO : TraceOut → IO Unit
+  | .stderr s => errLine s
+  | .stdout s => outStr s
+
+private def errLn {m : Type → Type} (emit : Emit m) (s : String) : m Unit := emit (.stderr s)
+private def outS {m : Type → Type} (emit : Emit m) (s : String) : m Unit := emit (.stdout s)
 
 private def textOf (d : DState) (fn : FunctionId) (iid : InstructionId) : String :=
   d.tables.text.getD (iidKey fn iid) "  <unknown instruction>"
@@ -374,9 +390,9 @@ private def pendingOf (fr : CallFrame) : InstructionId × (Instruction ⊕ Termi
 
 /-- Print `Stacktrace:` with one line per frame (innermost first). The innermost frame shows its
 pending instruction unless `topIsSite` (then every frame shows its waiting call site). -/
-private def dumpStackTrace (d : DState) (frames : List CallFrame) (callSites : List InstructionId)
-    (topIsSite : Bool := false) : IO Unit := do
-  errLine "Stacktrace:"
+private def dumpStackTrace {m : Type → Type} [Monad m] (emit : Emit m) (d : DState)
+    (frames : List CallFrame) (callSites : List InstructionId) (topIsSite : Bool := false) : m Unit := do
+  errLn emit "Stacktrace:"
   let mut idx := 0
   let sites : List (Option InstructionId) :=
     if topIsSite then callSites.map some else none :: callSites.map some
@@ -389,7 +405,7 @@ private def dumpStackTrace (d : DState) (frames : List CallFrame) (callSites : L
     let loc := match d.tables.line.get? k with
       | some l => s!" {d.modName}:{l + 1}"
       | none => ""
-    errLine s!"#{idx} {textOf d fn iid} at {printRawId "@" fn}{loc}"
+    errLn emit s!"#{idx} {textOf d fn iid} at {printRawId "@" fn}{loc}"
     idx := idx + 1
 
 private def withPeriod (msg : String) : String :=
@@ -511,35 +527,51 @@ inductive Outcome where
   | exited (code : Nat)
   | aborted
 
+/-- How `llubi` reports a final configuration: a return value, `exit(N)` (as an exit status),
+`abort()`, or a failure (UB, an error, or running out of steps or memory). -/
+def Outcome.ofConfig : Config → Outcome
+  | .halted v _ => .returned v
+  | .staticError msg =>
+    if msg.startsWith "Program exited with code " then
+      let codeStr := (msg.drop "Program exited with code ".length).toString
+      let code : Int := match codeStr.toInt? with | some i => i | none => 0
+      .exited ((code % 256).toNat)
+    else if msg == "Program aborted." || msg == "Program terminated." then .aborted
+    else .failed
+  | _ => .failed
+
+
 /-- Print the phi nodes at the start of the block a frame just jumped to. -/
-private def printPhis (d : DState) (mem : MemoryState) (fr : CallFrame) (tags : List (Nat × Nat)) : IO Unit := do
+private def printPhis {m : Type → Type} [Monad m] (emit : Emit m) (d : DState) (mem : MemoryState)
+    (fr : CallFrame) (tags : List (Nat × Nat)) : m Unit := do
   match fr.defn.findBlock? fr.curBlock with
   | some blk =>
     for (iid, ins) in blk.code do
       match ins, iid with
       | .phi .., .id rid =>
         match fr.registers.get? (.local_id rid) with
-        | some v => errLine s!"{textOf d fr.defn.prototype.name iid} => {v.llubiString mem d.dl tags}"
+        | some v => errLn emit s!"{textOf d fr.defn.prototype.name iid} => {v.llubiString mem d.dl tags}"
         | none => pure ()
       | _, _ => pure ()
   | none => pure ()
 
 /-- Print `Entering function:` and its argument lines for a freshly pushed frame. -/
-private def printEntry (d : DState) (mem : MemoryState) (fr : CallFrame) (tags : List (Nat × Nat)) : IO Unit := do
+def printEntry {m : Type → Type} [Monad m] (emit : Emit m) (d : DState) (mem : MemoryState)
+    (fr : CallFrame) (tags : List (Nat × Nat)) : m Unit := do
   let fn := fr.defn.prototype.name
-  errLine s!"Entering function: {fn.toString}"
+  errLn emit s!"Entering function: {fn.toString}"
   let params := d.tables.params.getD fn.toString []
   for (arg, ptxt) in fr.defn.args.zip params do
     match fr.registers.get? (.local_id arg) with
-    | some v => errLine s!"  {ptxt} = {v.llubiString mem d.dl tags}"
+    | some v => errLn emit s!"  {ptxt} = {v.llubiString mem d.dl tags}"
     | none => pure ()
 
-/-- Report a failure (`Stacktrace:` + message), returning `Outcome.failed`. -/
-private def reportFailure (d : DState) (frames : List CallFrame) (sites : List InstructionId)
-    (msg : String) (topIsSite : Bool := false) : IO Outcome := do
-  dumpStackTrace d frames sites topIsSite
-  errLine msg
-  return .failed
+/-- Report a failure (`Stacktrace:` + message). -/
+private def reportFailure {m : Type → Type} [Monad m] (emit : Emit m) (d : DState)
+    (frames : List CallFrame) (sites : List InstructionId) (msg : String) (topIsSite : Bool := false) :
+    m Unit := do
+  dumpStackTrace emit d frames sites topIsSite
+  errLn emit msg
 
 /-- `llubi`'s wording for running out of memory, which depends on what was being allocated. -/
 private def oomMessage (pend : Instruction ⊕ Terminator) : String :=
@@ -551,171 +583,278 @@ private def oomMessage (pend : Instruction ⊕ Terminator) : String :=
     else "Error: Insufficient heap space."
   | _ => "Error: Insufficient heap space."
 
-/-- Main trace loop. `sites` holds, for each caller frame (innermost first), the call instruction
-that is waiting for the callee. -/
-partial def traceLoop (d : DState) (o : OracleState) (c : Config) (steps : Nat)
-    (sites : List InstructionId) (byvals : List (List AllocId) := []) : IO Outcome := do
-  match c with
-  | .running st =>
-    match st.frames with
-    | [] => return .failed
-    | fr :: _ =>
-      if d.maxSteps != 0 && steps ≥ d.maxSteps then
-        return ← reportFailure d st.frames sites "Error: Exceeded maximum number of execution steps."
-      let fn := fr.defn.prototype.name
-      let (iid, pend) := pendingOf fr
-      let out? := match pend with
-        | .inl ins => libOutput? st fr ins o
-        | .inr _ => none
-      let (_, c', o') := execStep o c
-      match c' with
-      | .running st' =>
-        let n := st.frames.length
-        let n' := st'.frames.length
-        if n' == n + 1 then
+/-- Output of a step from `st` to the running configuration `c'`; returns the updated call-site
+bookkeeping (`sites`: the call waiting in each caller frame; `byvals`: each callee's byval copies). -/
+private def emitRunning {m : Type → Type} [Monad m] (emit : Emit m) (d : DState) (o : OracleState) (st : MachineState)
+    (c' : Config) (o' : OracleState) (sites : List InstructionId) (byvals : List (List AllocId)) :
+    m (List InstructionId × List (List AllocId)) := do
+  match st.frames with
+  | [] => return (sites, byvals)
+  | fr :: _ =>
+    let fn := fr.defn.prototype.name
+    let (iid, pend) := pendingOf fr
+    let out? := match pend with
+      | .inl ins => libOutput? st fr ins o
+      | .inr _ => none
+    match c' with
+    | .running st' =>
+      let n := st.frames.length
+      let n' := st'.frames.length
+      if n' == n + 1 then
+        if d.verbose then
+          match st'.frames with
+          | callee :: _ => printEntry emit d st'.memory callee o'.tags
+          | [] => pure ()
+        -- objects created while entering the callee are its byval copies
+        let copies := (List.range (st'.memory.nextAllocId - st.memory.nextAllocId)).map
+          (· + st.memory.nextAllocId)
+        return Prod.mk (iid :: sites) (copies :: byvals)
+      else if n' + 1 == n then
+        -- returned from a callee into its caller
+        if d.verbose then
+          errLn emit (textOf d fn iid)
+          errLn emit s!"Exiting function: {fn.toString}"
+          match sites, st'.frames with
+          | site :: _, caller :: _ =>
+            let ctext := textOf d caller.defn.prototype.name site
+            match site with
+            | .id rid =>
+              -- llubi reports the call's result before releasing the callee's byval copies
+              let memShown := (byvals.headD []).foldl (fun (m : MemoryState) id =>
+                match m.objects.get? id with
+                | some obj => { m with objects := m.objects.insert id { obj with state := .alive } }
+                | none => m) st'.memory
+              match caller.registers.get? (.local_id rid) with
+              | some v => errLn emit s!"{ctext} => {v.llubiString memShown d.dl o'.tags}"
+              | none => errLn emit ctext
+            | .void _ => errLn emit ctext
+          | _, _ => pure ()
+        return Prod.mk sites.tail byvals.tail
+      else
+        match pend with
+        | .inl _ =>
+          if let some s := out? then outS emit s
+          -- `callbr` is a terminator in LLVM: it is reported once, with its jump
+          if d.verbose && !(textOf d fn iid).startsWith "  callbr " then
+            match iid, st'.frames with
+            | .id rid, fr' :: _ =>
+              match fr'.registers.get? (.local_id rid) with
+              | some v => errLn emit s!"{textOf d fn iid} => {v.llubiString st'.memory d.dl o'.tags}"
+              | none => errLn emit (textOf d fn iid)
+            | _, _ => errLn emit (textOf d fn iid)
+          return Prod.mk sites byvals
+        | .inr _ =>
           if d.verbose then
             match st'.frames with
-            | callee :: _ => printEntry d st'.memory callee o'.tags
-            | [] => pure ()
-          -- objects created while entering the callee are its byval copies
-          let copies := (List.range (st'.memory.nextAllocId - st.memory.nextAllocId)).map
-            (· + st.memory.nextAllocId)
-          traceLoop d o' c' (steps + 1) (iid :: sites) (copies :: byvals)
-        else if n' + 1 == n then
-          -- returned from a callee into its caller
-          if d.verbose then
-            errLine (textOf d fn iid)
-            errLine s!"Exiting function: {fn.toString}"
-            match sites, st'.frames with
-            | site :: _, caller :: _ =>
-              let ctext := textOf d caller.defn.prototype.name site
-              match site with
-              | .id rid =>
-                -- llubi reports the call's result before releasing the callee's byval copies
-                let memShown := (byvals.headD []).foldl (fun (m : MemoryState) id =>
-                  match m.objects.get? id with
-                  | some obj => { m with objects := m.objects.insert id { obj with state := .alive } }
-                  | none => m) st'.memory
-                match caller.registers.get? (.local_id rid) with
-                | some v => errLine s!"{ctext} => {v.llubiString memShown d.dl o'.tags}"
-                | none => errLine ctext
-              | .void _ => errLine ctext
-            | _, _ => pure ()
-          traceLoop d o' c' (steps + 1) sites.tail byvals.tail
-        else
-          match pend with
-          | .inl _ =>
-            if let some s := out? then outStr s
-            -- `callbr` is a terminator in LLVM: it is reported once, with its jump
-            if d.verbose && !(textOf d fn iid).startsWith "  callbr " then
-              match iid, st'.frames with
-              | .id rid, fr' :: _ =>
-                match fr'.registers.get? (.local_id rid) with
-                | some v => errLine s!"{textOf d fn iid} => {v.llubiString st'.memory d.dl o'.tags}"
-                | none => errLine (textOf d fn iid)
-              | _, _ => errLine (textOf d fn iid)
-            traceLoop d o' c' (steps + 1) sites byvals
-          | .inr _ =>
-            if d.verbose then
-              match st'.frames with
-              | fr' :: _ =>
-                let w : WCtx := { toks := #[], dl := d.dl, typeDefs := [], mdDefs := [], mdSlots := [],
-                                  fnTypes := [], localSlots := d.tables.slots.getD fn.toString [] }
-                errLine s!"{textOf d fn iid} jump to {w.loc fr'.curBlock}"
-                printPhis d st'.memory fr' o'.tags
-              | [] => pure ()
-            traceLoop d o' c' (steps + 1) sites byvals
-      | .halted v _ =>
-        if d.verbose then
-          errLine (textOf d fn iid)
-          errLine s!"Exiting function: {fn.toString}"
-        return .returned v
-      | .ub msg0 =>
-        let msg := contextualMessage st fr o pend msg0
-        match pend, st.frames with
-        | .inr (.ret _), _ :: callers@(_ :: _) | .inr .retVoid, _ :: callers@(_ :: _) =>
-          -- return-time checks happen in the caller after the callee has exited
-          if d.verbose then
-            errLine (textOf d fn iid)
-            errLine s!"Exiting function: {fn.toString}"
-          reportFailure d callers sites s!"Immediate UB detected: {withPeriod msg}" (topIsSite := true)
-        | .inr term, _ =>
-          -- UB while evaluating phi nodes happens after `llubi` has reported the jump
-          let dest? : Option BlockId := match term with
-            | .br b => some b
-            | .condBr c t f =>
-              match execExp st.dataLayout st.config fr.registers st.memory .i1 c o with
-              | .ok (.bv 1 (.value b), _, _) => some (if b.toNat == 1 then t else f)
-              | _ => none
-            | .switch ty c dflt cases =>
-              match execExp st.dataLayout st.config fr.registers st.memory ty c o with
-              | .ok (.bv w (.value bv), _, _) =>
-                some ((cases.find? (fun (cv, _) => BitVec.ofInt w cv == bv)).map (·.2) |>.getD dflt)
-              | _ => none
-            | _ => none
-          let destHasPhi := match dest? with
-            | some b => match fr.defn.findBlock? b with
-              | some blk => blk.code.any fun | (_, .phi ..) => true | _ => false
-              | none => false
-            | none => false
-          match dest? with
-          | some b =>
-            if destHasPhi then
+            | fr' :: _ =>
               let w : WCtx := { toks := #[], dl := d.dl, typeDefs := [], mdDefs := [], mdSlots := [],
                                 fnTypes := [], localSlots := d.tables.slots.getD fn.toString [] }
-              if d.verbose then errLine s!"{textOf d fn iid} jump to {w.loc b}"
-              -- the failing phi is reported at the head of the destination block
-              let phiIid := match fr.defn.findBlock? b with
-                | some blk => (blk.code.head?.map (·.1)).getD iid
-                | none => iid
-              errLine "Stacktrace:"
-              let k := iidKey fn phiIid
-              let loc := match d.tables.line.get? k with
+              errLn emit s!"{textOf d fn iid} jump to {w.loc fr'.curBlock}"
+              printPhis emit d st'.memory fr' o'.tags
+            | [] => pure ()
+          return Prod.mk sites byvals
+    | _ => return (sites, byvals)
+
+/-- Output of a step from `st` to the final configuration `c'` (return, UB, error, exit). -/
+private def emitStop {m : Type → Type} [Monad m] (emit : Emit m) (d : DState) (o : OracleState)
+    (st : MachineState) (c' : Config) (sites : List InstructionId) :
+    m Unit := do
+  match st.frames with
+  | [] => return ()
+  | fr :: _ =>
+    let fn := fr.defn.prototype.name
+    let (iid, pend) := pendingOf fr
+    match c' with
+    | .halted _ _ =>
+      if d.verbose then
+        errLn emit (textOf d fn iid)
+        errLn emit s!"Exiting function: {fn.toString}"
+      return ()
+    | .ub msg0 =>
+      let msg := contextualMessage st fr o pend msg0
+      match pend, st.frames with
+      | .inr (.ret _), _ :: callers@(_ :: _) | .inr .retVoid, _ :: callers@(_ :: _) =>
+        -- return-time checks happen in the caller after the callee has exited
+        if d.verbose then
+          errLn emit (textOf d fn iid)
+          errLn emit s!"Exiting function: {fn.toString}"
+        reportFailure emit d callers sites s!"Immediate UB detected: {withPeriod msg}" (topIsSite := true)
+      | .inr term, _ =>
+        -- UB while evaluating phi nodes happens after `llubi` has reported the jump
+        let dest? : Option BlockId := match term with
+          | .br b => some b
+          | .condBr c t f =>
+            match execExp st.dataLayout st.config fr.registers st.memory .i1 c o with
+            | .ok (.bv 1 (.value b), _, _) => some (if b.toNat == 1 then t else f)
+            | _ => none
+          | .switch ty c dflt cases =>
+            match execExp st.dataLayout st.config fr.registers st.memory ty c o with
+            | .ok (.bv w (.value bv), _, _) =>
+              some ((cases.find? (fun (cv, _) => BitVec.ofInt w cv == bv)).map (·.2) |>.getD dflt)
+            | _ => none
+          | _ => none
+        let destHasPhi := match dest? with
+          | some b => match fr.defn.findBlock? b with
+            | some blk => blk.code.any fun | (_, .phi ..) => true | _ => false
+            | none => false
+          | none => false
+        match dest? with
+        | some b =>
+          if destHasPhi then
+            let w : WCtx := { toks := #[], dl := d.dl, typeDefs := [], mdDefs := [], mdSlots := [],
+                              fnTypes := [], localSlots := d.tables.slots.getD fn.toString [] }
+            if d.verbose then errLn emit s!"{textOf d fn iid} jump to {w.loc b}"
+            -- the failing phi is reported at the head of the destination block
+            let phiIid := match fr.defn.findBlock? b with
+              | some blk => (blk.code.head?.map (·.1)).getD iid
+              | none => iid
+            errLn emit "Stacktrace:"
+            let k := iidKey fn phiIid
+            let loc := match d.tables.line.get? k with
+              | some l => s!" {d.modName}:{l + 1}"
+              | none => ""
+            errLn emit s!"#0 {textOf d fn phiIid} at {printRawId "@" fn}{loc}"
+            let mut idx := 1
+            for (cfr, site) in st.frames.tail.zip sites do
+              let ck := iidKey cfr.defn.prototype.name site
+              let cloc := match d.tables.line.get? ck with
                 | some l => s!" {d.modName}:{l + 1}"
                 | none => ""
-              errLine s!"#0 {textOf d fn phiIid} at {printRawId "@" fn}{loc}"
-              let mut idx := 1
-              for (cfr, site) in st.frames.tail.zip sites do
-                let ck := iidKey cfr.defn.prototype.name site
-                let cloc := match d.tables.line.get? ck with
-                  | some l => s!" {d.modName}:{l + 1}"
-                  | none => ""
-                errLine s!"#{idx} {textOf d cfr.defn.prototype.name site} at {printRawId "@" cfr.defn.prototype.name}{cloc}"
-                idx := idx + 1
-              errLine s!"Immediate UB detected: {withPeriod (metadataWording msg)}"
-              return .failed
-            else reportFailure d st.frames sites s!"Immediate UB detected: {withPeriod msg}"
-          | none => reportFailure d st.frames sites s!"Immediate UB detected: {withPeriod msg}"
-        | _, _ => reportFailure d st.frames sites s!"Immediate UB detected: {withPeriod msg}"
-      | .staticError msg =>
-        if msg.startsWith "Call to undefined external function" then
-          errLine s!"Unrecognized instruction: {textOf d fn iid}"
-          return .failed
-        else
-        if msg.startsWith "Program exited with code " then
-          let codeStr := (msg.drop "Program exited with code ".length).toString
-          let code : Int := match codeStr.toInt? with | some i => i | none => 0
-          if d.verbose then errLine s!"Program exited with code {code}"
-          return .exited ((code % 256).toNat)
-        else if msg == "Program aborted." || msg == "Program terminated." then
-          if d.verbose then errLine msg
-          return .aborted
-        else
-          reportFailure d st.frames sites s!"Error: {withPeriod (contextualMessage st fr o pend msg)}"
-      | .resourceError .outOfMemory =>
-        reportFailure d st.frames sites (oomMessage pend)
-      | .resourceError .stackOverflow =>
-        reportFailure d st.frames sites "Error: Maximum stack depth exceeded."
-      | .resourceError .outOfFuel =>
-        reportFailure d st.frames sites "Error: Exceeded maximum number of execution steps."
-      | .resourceError (.immediateUB msg) =>
-        reportFailure d st.frames sites s!"Immediate UB detected: {withPeriod msg}"
-      | .resourceError (.staticError msg) =>
-        reportFailure d st.frames sites s!"Error: {withPeriod msg}"
-  | .halted v _ => return .returned v
-  | .ub msg => errLine s!"Immediate UB detected: {withPeriod msg}"; return .failed
-  | .staticError msg => errLine s!"Error: {withPeriod msg}"; return .failed
-  | .resourceError _ => errLine "Error: Out of memory."; return .failed
+              errLn emit s!"#{idx} {textOf d cfr.defn.prototype.name site} at {printRawId "@" cfr.defn.prototype.name}{cloc}"
+              idx := idx + 1
+            errLn emit s!"Immediate UB detected: {withPeriod (metadataWording msg)}"
+            return ()
+          else reportFailure emit d st.frames sites s!"Immediate UB detected: {withPeriod msg}"
+        | none => reportFailure emit d st.frames sites s!"Immediate UB detected: {withPeriod msg}"
+      | _, _ => reportFailure emit d st.frames sites s!"Immediate UB detected: {withPeriod msg}"
+    | .staticError msg =>
+      if msg.startsWith "Call to undefined external function" then
+        errLn emit s!"Unrecognized instruction: {textOf d fn iid}"
+        return ()
+      else
+      if msg.startsWith "Program exited with code " then
+        let codeStr := (msg.drop "Program exited with code ".length).toString
+        let code : Int := match codeStr.toInt? with | some i => i | none => 0
+        if d.verbose then errLn emit s!"Program exited with code {code}"
+        return ()
+      else if msg == "Program aborted." || msg == "Program terminated." then
+        if d.verbose then errLn emit msg
+        return ()
+      else
+        reportFailure emit d st.frames sites s!"Error: {withPeriod (contextualMessage st fr o pend msg)}"
+    | .resourceError .outOfMemory =>
+      reportFailure emit d st.frames sites (oomMessage pend)
+    | .resourceError .stackOverflow =>
+      reportFailure emit d st.frames sites "Error: Maximum stack depth exceeded."
+    | .resourceError .outOfFuel =>
+      reportFailure emit d st.frames sites "Error: Exceeded maximum number of execution steps."
+    | .resourceError (.immediateUB msg) =>
+      reportFailure emit d st.frames sites s!"Immediate UB detected: {withPeriod msg}"
+    | .resourceError (.staticError msg) =>
+      reportFailure emit d st.frames sites s!"Error: {withPeriod msg}"
+    | .running _ => return ()
+
+/-- Output for a configuration that is already final before any step. -/
+private def emitFinal {m : Type → Type} [Monad m] (emit : Emit m) (d : DState) : Config → m Unit
+  | .halted .. | .running _ => pure ()
+  | .ub msg => errLn emit s!"Immediate UB detected: {withPeriod msg}"
+  | c@(.staticError msg) =>
+    match Outcome.ofConfig c with
+    | .exited _ | .aborted => if d.verbose then errLn emit msg else pure ()
+    | _ => errLn emit s!"Error: {withPeriod msg}"
+  | .resourceError _ => errLn emit "Error: Out of memory."
+
+/-- Main trace loop: run `execStep` for at most `fuel` steps (`llubi`'s `--max-steps`), emitting the
+`--verbose` trace and diagnostics, and return the final configuration and oracle state. The
+configuration it returns is exactly that of the formal semantics' `runSteps` (`traceLoop_result`);
+`Outcome.ofConfig` of it is the run's outcome. -/
+def traceLoop {m : Type → Type} [Monad m] (emit : Emit m) :
+    Nat → DState → OracleState → Config → List InstructionId → List (List AllocId) →
+      m (Config × OracleState)
+  | 0, d, o, c@(.running st), sites, _ => do
+    if !st.frames.isEmpty then
+      reportFailure emit d st.frames sites "Error: Exceeded maximum number of execution steps."
+    pure (c, o)
+  | fuel + 1, d, o, c@(.running st), sites, byvals => do
+    let (_, c', o') := execStep o c
+    match c' with
+    | .running _ =>
+      let (sites', byvals') ← emitRunning emit d o st c' o' sites byvals
+      traceLoop emit fuel d o' c' sites' byvals'
+    | _ =>
+      emitStop emit d o st c' sites
+      pure (c', o')
+  | _, d, o, c, _, _ => do
+    emitFinal emit d c
+    pure (c, o)
+
+/-! ### The trace driver runs the formal semantics -/
+
+private theorem runSteps_succ_running' (n : Nat) (o : OracleState) (st : MachineState) (r)
+    (h : execStep o (.running st) = r) :
+    (runSteps (n + 1) o (.running st)).2 = (runSteps n r.2.2 r.2.1).2 := by
+  obtain ⟨ora, idx, nid, tg⟩ := o
+  obtain ⟨frames, mem, cfg, dl, fns, decls⟩ := st
+  obtain ⟨ev, c1, ⟨ora1, idx1, nid1, tg1⟩⟩ := r
+  dsimp only [runSteps]
+  rw [h]
+  cases ev <;> rfl
+
+private theorem runSteps_zero (o : OracleState) (c : Config) : runSteps 0 o c = ([], c, o) := rfl
+
+private theorem runSteps_final (n : Nat) (o : OracleState) (c : Config) (h : ∀ st, c ≠ .running st) :
+    (runSteps n o c).2 = (c, o) := by
+  cases n with
+  | zero => rfl
+  | succ n => cases c with
+    | running st => exact absurd rfl (h st)
+    | _ => rfl
+
+/-- **The `llubi` frontend executes exactly the formal semantics.** Whatever monad the trace is
+emitted into (`IO` included) and whatever it prints, `traceLoop` with `fuel` steps returns the
+configuration and oracle state that `runSteps` (the kernel-reducible small-step driver of the
+semantics) reaches in `fuel` steps. The `llubi` exit status is a function of that configuration
+(`Outcome.ofConfig`), so only the printed text (stack traces, instruction lines) lies outside the
+theorem; the byte-for-byte comparison against `llubi` covers it. -/
+theorem traceLoop_result {m : Type → Type} [Monad m] [LawfulMonad m] (emit : Emit m)
+    (fuel : Nat) (d : DState) (o : OracleState) (c : Config) (sites : List InstructionId)
+    (byvals : List (List AllocId)) :
+    (fun _ => (runSteps fuel o c).2) <$> traceLoop emit fuel d o c sites byvals =
+      traceLoop emit fuel d o c sites byvals := by
+  induction fuel generalizing o c sites byvals with
+  | zero =>
+    rw [runSteps_zero]
+    cases c <;> simp only [traceLoop, map_bind, map_pure]
+    split <;> simp only [map_bind, map_pure]
+  | succ n ih =>
+    cases c with
+    | running st =>
+      rw [runSteps_succ_running' n o st _ rfl]
+      simp only [traceLoop]
+      rcases hs : execStep o (.running st) with ⟨ev, c', o'⟩
+      cases c' with
+      | running st' =>
+        simp only [map_bind]
+        congr 1; funext x
+        exact ih o' (.running st') x.1 x.2
+      | _ =>
+        simp only [map_bind, map_pure]
+        rw [runSteps_final]
+        intro _ h; cases h
+    | _ =>
+      simp only [traceLoop, map_bind, map_pure]
+      rw [runSteps_final]
+      intro _ h; cases h
+
+/-- Corollary: the outcome (`llubi`'s exit status) the frontend reports is the outcome of the
+formal semantics' `runSteps` run. -/
+theorem traceLoop_outcome {m : Type → Type} [Monad m] [LawfulMonad m] (emit : Emit m)
+    (fuel : Nat) (d : DState) (o : OracleState) (c : Config) (sites : List InstructionId)
+    (byvals : List (List AllocId)) :
+    (fun r => Outcome.ofConfig r.1) <$> traceLoop emit fuel d o c sites byvals =
+      (fun _ => Outcome.ofConfig (runSteps fuel o c).2.1) <$> traceLoop emit fuel d o c sites byvals := by
+  conv => lhs; rw [← traceLoop_result]
+  simp [Functor.map_map]
 
 /-! ### Entry point -/
 
@@ -851,19 +990,20 @@ def llubiMain (args : List String) : IO UInt32 := do
   let w1 := { w0 with mdDefs := collectMdDefs w0 }
   let w := { w1 with mdSlots := computeMdSlots w1 pm.fnSrcs }
   let tables := buildSrcTables w pm fns
-  let d : DState := { tables, dl, modName, verbose := opts.verbose,
-                      maxSteps := opts.maxSteps }
+  let d : DState := { tables, dl, modName, verbose := opts.verbose }
   let initCfg := initCallConfig cfg dl mem fns decls defn entryArgs
   -- Function entry for the entry point
   if opts.verbose then
     match initCfg with
     | .running st =>
       match st.frames with
-      | fr :: _ => printEntry d st.memory fr o1.tags
+      | fr :: _ => printEntry TraceOut.toIO d st.memory fr o1.tags
       | [] => pure ()
     | _ => pure ()
-  let outcome ← traceLoop d o1 initCfg 0 []
-  match outcome with
+  -- `--max-steps=0` means unbounded; `2^62` steps is unbounded in practice and stays a scalar
+  let fuel := if opts.maxSteps == 0 then 2 ^ 62 else opts.maxSteps
+  let (cFinal, _) ← traceLoop TraceOut.toIO fuel d o1 initCfg [] []
+  match Outcome.ofConfig cFinal with
   | .failed =>
     errLine s!"error: Execution of function '{opts.entry}' failed."
     return 1
