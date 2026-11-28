@@ -54,6 +54,12 @@ Known limits (not bugs): our 79-bit `x86_fp80` format does not keep the integer 
 llubi's raw bits for a non-canonical NaN are printed as a canonical NaN; `undef`/`freeze` values
 of `x86_fp80` are drawn from the 79 semantic bits (both choices are allowed).
 
+B8 follow-up: `ppc_fp128` division is computed in LLVM's legacy 106-bit format, whose normal range
+ends at 2^-969 (`minExponent = -1022 + 53`); a quotient below 2^-968 is rounded to a multiple of
+2^-1074 (`ppcLegacyDiv`; our 11-bit-exponent stand-in rounded it more finely), and llubi's decimal
+rendering of such a value round-trips through that format too (`ppcDecimal?`). Randomized check
+against llubi: 1,400 `fdiv`/`frem` over the whole exponent range, 0 differences (38 before).
+
 ## Output-only differences (P)
 
 Same execution, different text in our llubi-compatible `--verbose` output. Each has a

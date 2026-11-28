@@ -142,6 +142,24 @@ def parseBack (fmt : FloatFormat) (str : String) : Option (IEEEFloat fmt) :=
       | none => none
     | _ => none
 
+/-- `(negative, mantissa, exponent)` of a decimal `d.ddddde±x` string: its value is
+`±mantissa * 10^exponent`. -/
+def decimalParts? (str : String) : Option (Bool × Nat × Int) :=
+  let (neg, body) := if str.startsWith "-" then (true, (str.drop 1).toString) else (false, str)
+  match body.splitOn "e" with
+  | [mantStr, expStr] =>
+    let digits := mantStr.toList.filter Char.isDigit
+    let fracLen := match mantStr.splitOn "." with
+      | [_, f] => f.length
+      | _ => 0
+    let mant := digits.foldl (fun acc c => acc * 10 + (c.toNat - '0'.toNat)) 0
+    let (eneg, eStr) :=
+      if expStr.startsWith "-" then (true, (expStr.drop 1).toString)
+      else if expStr.startsWith "+" then (false, (expStr.drop 1).toString)
+      else (false, expStr)
+    eStr.toNat?.map fun ev => (neg, mant, (if eneg then -(ev : Int) else ev) - fracLen)
+  | _ => none
+
 /-- `APFloat::toStringRoundTrip(Str, 6, 0, false)`: the decimal string if it round-trips. -/
 def apToStringRoundTrip? {fmt : FloatFormat} (x : IEEEFloat fmt) : Option String :=
   let s := apToString x
@@ -168,6 +186,21 @@ def ppcDecimal? (bits : Nat) : Option String :=
   else
     let str := apToString hiD
     if hiD.isNaN || hiD.isInf then some str
+    else if hiD.isZero then some str
+    else if hiD.rawExp < 55 then
+      -- |hi| < 2^-968: LLVM parses the decimal into `semPPCDoubleDoubleLegacy`, whose values
+      -- there are the multiples of 2^-1074 (its subnormals and lowest binade), so it round-trips
+      -- iff the decimal rounds (to nearest, ties to even) to hi's multiple of 2^-1074
+      match decimalParts? str with
+      | some (_, mant, e10) =>
+        let (num, den) := if e10 ≥ 0 then (mant * 10 ^ e10.toNat <<< 1074, 1)
+          else (mant <<< 1074, 10 ^ (-e10).toNat)
+        let q := num / den
+        let r := num % den
+        let k := if 2 * r > den || (2 * r == den && q % 2 == 1) then q + 1 else q
+        let (_, m, e) := hiD.toDyadic
+        if k == m <<< (e + 1074).toNat then some str else none
+      | none => none
     else
       match parseBack .fp128 str with
       | some y =>

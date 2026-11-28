@@ -109,9 +109,40 @@ private def ppcMul (rm : RoundingMode) (a aa c cc : IEEEFloat .double) :
 
 /-- LLVM's `semPPCDoubleDoubleLegacy`: an IEEE-style format with a 106-bit significand and
 double's exponent field, in which `APFloat` divides and takes remainders of `ppc_fp128` values
-(`DoubleAPFloat::divide`/`mod` convert to it and back). Its normal range in LLVM ends at 2^-969,
-not 2^-1022, so results that underflow there may differ. -/
+(`DoubleAPFloat::divide`/`mod` convert to it and back). Its normal range in LLVM ends at
+2^-969 (`minExponent = -1022 + 53`), not 2^-1022 as in this format; see `ppcLegacyDiv`. -/
 def ppcLegacyFormat : FloatFormat := { expBits := 11, sigBits := 105 }
+
+/-- Division in LLVM's `semPPCDoubleDoubleLegacy`. That format's normal range ends at 2^-969, below
+which its values are subnormal: multiples of 2^-1074. At exponent -969 its 106-bit precision has
+the same quantum, so any quotient of magnitude below 2^-968 is rounded to a multiple of 2^-1074,
+which `ppcLegacyFormat` (normal down to 2^-1022) would round more finely. Every multiple of
+2^-1074 below 2^-968 is exact in `ppcLegacyFormat`, so the result is computed exactly there.
+(Inputs need no such care: a double pair is a multiple of 2^-1074, and so is a remainder.) -/
+def ppcLegacyDiv (rm : RoundingMode) (x y : IEEEFloat ppcLegacyFormat) : IEEEFloat ppcLegacyFormat :=
+  let r := IEEEFloat.div rm x y
+  -- special operands (NaN, infinity, zero) and overflow are as in `IEEEFloat.div`
+  if !(x.isFinite && !x.isZero && y.isFinite && !y.isZero) || !r.isFinite then r
+  -- |r| < 2^-968 ⇔ r's unbiased exponent < -968 (raw exponent < 1023 - 968 = 55, or subnormal)
+  else if r.rawExp ≥ 55 then r
+  else
+    let (_, mx, ex) := x.toDyadic
+    let (_, my, ey) := y.toDyadic
+    let sign := x.sign != y.sign
+    -- k = round(|x/y| / 2^-1074) = round(mx * 2^(ex - ey + 1074) / my)
+    let sh : Int := ex - ey + 1074
+    let (n, d) := if sh ≥ 0 then (mx <<< sh.toNat, my) else (mx, my <<< (-sh).toNat)
+    let q := n / d
+    let rem := n % d
+    let up := if rem == 0 then false else match rm with
+      | .RTZ => false
+      | .RTP => !sign
+      | .RTN => sign
+      | .RNA => 2 * rem ≥ d
+      | .RNE => 2 * rem > d || (2 * rem == d && q % 2 == 1)
+    let k := if up then q + 1 else q
+    -- k * 2^-1074, exact in `ppcLegacyFormat`
+    IEEEFloat.roundExact ppcLegacyFormat rm sign k 1 (-1074)
 
 /-- A `ppc_fp128` operation as `APFloat` performs it in `ppcLegacyFormat`: both pairs rounded to
 106 bits, the operation, then the result split back into a double pair (high double rounded to
@@ -328,7 +359,7 @@ def evalFloatBinaryOp {ft : FloatType} (cfg : SemanticsConfig) (op : FloatBinary
                 let (h, l) := ppcAdd cfg.roundingMode a aa c.neg cc.neg
                 (h, if l.isZero && !l.sign && aa.isZero && cc.isZero && !a.isZero && !c.isZero then l.neg else l)
               | .fmul _ => ppcMul cfg.roundingMode a aa c cc
-              | .fdiv _ => ppcViaLegacy (IEEEFloat.div cfg.roundingMode) a aa c cc
+              | .fdiv _ => ppcViaLegacy (ppcLegacyDiv cfg.roundingMode) a aa c cc
               | .frem _ => ppcViaLegacy IEEEFloat.rem a aa c cc
             match handleFMF fmf false false rHi with
             | .poison => (.poison, o2)
