@@ -760,7 +760,7 @@ def verifyMemAccess (mem : MemoryState) (ptr : Pointer) (accessSize alignment : 
     else
       let effAlign := max 1 alignment
       let addr := ptr.addr.toNat
-      let oob := s!"Memory access is out of bounds. Accessed size: {accessSize}, Address: 0x{Hex.upper addr}, Object base: 0x{Hex.upper mo.baseAddr}, Object size: {mo.size}."
+      let oob := s!"Memory access is out of bounds. Accessed size: {accessSize}, Address: 0x{Hex.upper addr}, Object base: 0x{Hex.lower mo.baseAddr}, Object size: {mo.size}."
       if addr % effAlign != 0 then
         .error (.immediateUB s!"Misaligned memory access. Address: 0x{Hex.upper addr}, Required alignment: {effAlign}.")
       else if accessSize > mo.size || addr < mo.baseAddr then

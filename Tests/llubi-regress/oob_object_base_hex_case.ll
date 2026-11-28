@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P9 (llubi output differs: `Object base:` of out-of-bounds reports is lowercase hex)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `oob_object_base_hex_case.expected`): `Object base:` of out-of-bounds reports is lowercase hex (llubi Twine::utohexstr).

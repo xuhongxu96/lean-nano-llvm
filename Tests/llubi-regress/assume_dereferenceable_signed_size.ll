@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P11 (llubi output differs: the size of a `dereferenceable` assume bundle is printed signed)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `assume_dereferenceable_signed_size.expected`): the size of a `dereferenceable` assume bundle is printed signed.

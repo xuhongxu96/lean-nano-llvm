@@ -229,7 +229,7 @@ def evalAssumeBundlePure (dl : DataLayout) (mem : MemoryState)
       if sz.toNat == 0 then .ok () else
       match applySingleAttrPure dl mem (.ptr 0) pVal (.dereferenceable sz.toNat) with
       | .ok _ => .ok ()
-      | .error _ => .error (.immediateUB s!"The pointer {pVal.llubiString mem dl} violates dereferenceable({sz.toNat}) assumption.")
+      | .error _ => .error (.immediateUB s!"The pointer {pVal.llubiString mem dl} violates dereferenceable({sz.toInt}) assumption.")
     | [_, .bv _ .poison] => .error (.immediateUB "llvm.assume dereferenceable size is poison")
     | _ => .ok ()
   | "dereferenceable_or_null" =>
@@ -239,7 +239,7 @@ def evalAssumeBundlePure (dl : DataLayout) (mem : MemoryState)
       if sz.toNat == 0 then .ok () else
       match applySingleAttrPure dl mem (.ptr 0) pVal (.dereferenceableOrNull sz.toNat) with
       | .ok _ => .ok ()
-      | .error _ => .error (.immediateUB s!"The pointer {pVal.llubiString mem dl} violates dereferenceable_or_null({sz.toNat}) assumption.")
+      | .error _ => .error (.immediateUB s!"The pointer {pVal.llubiString mem dl} violates dereferenceable_or_null({sz.toInt}) assumption.")
     | [_, .bv _ .poison] => .error (.immediateUB "llvm.assume dereferenceable_or_null size is poison")
     | _ => .ok ()
   | "align" =>

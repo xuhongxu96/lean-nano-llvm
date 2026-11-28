@@ -271,7 +271,9 @@ def evalDivRemUB {w : Nat} (isSigned isRem exact : Bool) (lhs rhs : IntW w) :
         .ok .poison
     | .value x =>
       if isSigned && x == BitVec.intMin w && y == BitVec.allOnes w then
-        .error (.immediateUB "Signed division overflow.")
+        -- llubi names the operands for `srem` only (`Signed division overflow. LHS: a, RHS: b`)
+        .error (.immediateUB (if isRem then s!"Signed division overflow. LHS: {x.toInt}, RHS: {y.toInt}"
+                              else "Signed division overflow."))
       else if isRem then
         .ok (.value (if isSigned then BitVec.srem x y else x % y))
       else

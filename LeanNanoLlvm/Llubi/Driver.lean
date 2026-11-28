@@ -408,8 +408,14 @@ private def dumpStackTrace {m : Type → Type} [Monad m] (emit : Emit m) (d : DS
     errLn emit s!"#{idx} {textOf d fn iid} at {printRawId "@" fn}{loc}"
     idx := idx + 1
 
+/-- llubi's UB messages end with a period, except those that end with a value: the
+signature-mismatch, alloca-size and `srem`-overflow reports. -/
 private def withPeriod (msg : String) : String :=
-  if msg.endsWith "." then msg else msg ++ "."
+  if msg.endsWith "." then msg
+  else if (msg.splitOn "mismatched signature. Expected: ").length > 1 ||
+      msg.startsWith "Alloca with allocation size that " ||
+      msg.startsWith "Signed division overflow. LHS: " then msg
+  else msg ++ "."
 
 /-- Library calls whose output must appear before the call's trace line. -/
 private def libOutput? (st : MachineState) (fr : CallFrame) (ins : Instruction) (o : OracleState) :

@@ -4,6 +4,6 @@ exit: 1
 Entering function: main
   %a = alloca i32, align 4 => ptr 0x8 [a]
 Stacktrace:
-#0   call void @llvm.assume(i1 true) [ "dereferenceable"(ptr %a, i64 -1) ] at @main <stdin>:8
+#0   call void @llvm.assume(i1 true) [ "dereferenceable"(ptr %a, i64 -1) ] at @main <stdin>:7
 Immediate UB detected: The pointer ptr 0x8 [a] violates dereferenceable(-1) assumption.
 error: Execution of function 'main' failed.
