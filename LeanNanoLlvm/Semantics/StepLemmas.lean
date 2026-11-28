@@ -475,7 +475,7 @@ theorem Step.conversionOp_leaf_iff {st frame callers iid op fromTy e toTy rest v
     (hf : st.frames = frame :: callers)
     (hc : frame.remainingCode = (iid, .conversionOp op fromTy e toTy) :: rest)
     (h1 : evalPureLeafExp? st.dataLayout st.config frame.registers st.memory fromTy e = some (.ok v))
-    (hconv : ∀ o, evalConversionExec st.dataLayout st.config st.memory op fromTy v toTy o =
+    (hconv : ∀ o, evalConversionExec st.dataLayout (frameDenormalCfg st frame) st.memory op fromTy v toTy o =
       .ok (res, st.memory, o))
     (ev : Option TraceEvent) (c' : Config) :
     Step (.running st) ev c' ↔

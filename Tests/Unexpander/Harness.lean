@@ -128,7 +128,9 @@ private def canonicalizeInstruction : Instruction → Instruction
       (args.map fun (t, e, a) => (t, canonicalizeExp e, a))
       retAttrs
       (bundles.map fun (tag, tes) => (tag, tes.map fun (t, e) => (t, canonicalizeExp e)))
-      nr site
+      -- the call's function type (`CallSiteInfo.fnTy?`) is recorded by the IR parser only; the
+      -- `[llvm-definition| ...]` syntax has no explicit function types
+      nr { site with fnTy? := none }
   | .freeze (t, v) => .freeze (t, canonicalizeExp v)
   | .bitinsert bTy b vTy v oTy o =>
     .bitinsert bTy (canonicalizeExp b) vTy (canonicalizeExp v) oTy (canonicalizeExp o)

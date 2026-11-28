@@ -1,6 +1,7 @@
 import Std.Data.HashMap
 import LeanNanoLlvm.Semantics.Module
 import LeanNanoLlvm.Llubi.AsmWriter
+import LeanNanoLlvm.Llubi.IntrinsicAttrs
 
 /-!
 # `llubi`-compatible frontend
@@ -217,49 +218,59 @@ private def computeMdSlots (w : WCtx) (_fnSrcs : Array FnSrc) : List (String × 
   let mut defined : List String := []
   let mut temped : List String := []
   let mut next := 0
-  -- open metadata braces: (position of `!` or `{`, kind) with kind
+  -- open metadata brackets: (start position, kind, closed by `}` (true) or `)` (false)); kind is
   -- `inline` | `def N` | `distinct N` | `named` | `plain`
-  let mut stack : List (Nat × String) := []
+  let mut stack : List (Nat × String × Bool) := []
+  -- the kind of a node whose first token (`!` of `!{`, or `!Name` of `!Name(`) is at `k`
+  let kindAt (k : Nat) : String :=
+    if k ≥ 1 && w.tok (k - 1) == .eq then
+      match w.tok (k - 2) with
+      | .metaId nm => if isNum nm then "def " ++ nm else "named"
+      | _ => "inline"
+    else if k ≥ 2 && w.tok (k - 1) == .ident "distinct" && w.tok (k - 2) == .eq then
+      match w.tok (k - 3) with
+      | .metaId nm => "distinct " ++ nm
+      | _ => "inline"
+    else "inline"
   for i in [0:w.toks.size] do
     match w.tok i with
     | .metaId m =>
-      if isNum m && w.tok (i + 1) != .eq && !defined.contains m && !temped.contains m then
-        temped := m :: temped
-        next := next + 1
+      if isNum m then
+        if w.tok (i + 1) != .eq && !defined.contains m && !temped.contains m then
+          temped := m :: temped
+          next := next + 1
+      else if w.tok (i + 1) == .lparen then
+        -- a specialized node `!DIFile(...)` (its `(` is the next token)
+        stack := (i, kindAt i, false) :: stack
     | .lbrace =>
       if i > 0 && w.tok (i - 1) == .bang then
-        let kind :=
-          if i ≥ 2 && w.tok (i - 2) == .eq then
-            match w.tok (i - 3) with
-            | .metaId nm => if isNum nm then "def " ++ nm else "named"
-            | _ => "inline"
-          else if i ≥ 3 && w.tok (i - 2) == .ident "distinct" && w.tok (i - 3) == .eq then
-            match w.tok (i - 4) with
-            | .metaId nm => "distinct " ++ nm
-            | _ => "inline"
-          else "inline"
-        stack := (i - 1, kind) :: stack
+        stack := (i - 1, kindAt (i - 1), true) :: stack
       else if !stack.isEmpty then
-        stack := (i, "plain") :: stack
-    | .rbrace =>
+        stack := (i, "plain", true) :: stack
+    | .lparen =>
+      let isNodeParen := i > 0 && (match w.tok (i - 1) with
+        | .metaId m => !isNum m
+        | _ => false)
+      if !isNodeParen && !stack.isEmpty then
+        stack := (i, "plain", false) :: stack
+    | .rbrace | .rparen =>
+      let isBrace := w.tok i == .rbrace
       match stack with
-      | (start, kind) :: rest =>
-        stack := rest
-        if kind == "inline" then
-          let key := (mdRefAt w start).1
-          if !slots.any (·.1 == key) then
+      | (start, kind, closer) :: rest =>
+        if closer == isBrace then
+          stack := rest
+          let key := if kind.startsWith "def " then
+              ((w.mdDefs.find? (·.1 == (kind.drop 4).toString)).map (·.2)).getD ("!" ++ (kind.drop 4).toString)
+            else if kind.startsWith "distinct " then
+              ((w.mdDefs.find? (·.1 == (kind.drop 9).toString)).map (·.2)).getD ("!" ++ (kind.drop 9).toString)
+            else (mdRefAt w start).1
+          if kind == "inline" || kind.startsWith "def " then
+            if !slots.any (·.1 == key) then
+              slots := slots ++ [(key, next)]; next := next + 1
+          else if kind.startsWith "distinct " then
             slots := slots ++ [(key, next)]; next := next + 1
-        else if kind.startsWith "def " then
-          let nm := (kind.drop 4).toString
-          let key := ((w.mdDefs.find? (·.1 == nm)).map (·.2)).getD ("!" ++ nm)
-          if !slots.any (·.1 == key) then
-            slots := slots ++ [(key, next)]; next := next + 1
-          defined := nm :: defined
-        else if kind.startsWith "distinct " then
-          let nm := (kind.drop 9).toString
-          let key := ((w.mdDefs.find? (·.1 == nm)).map (·.2)).getD ("!" ++ nm)
-          slots := slots ++ [(key, next)]; next := next + 1
-          defined := nm :: defined
+          if kind.startsWith "def " then defined := (kind.drop 4).toString :: defined
+          if kind.startsWith "distinct " then defined := (kind.drop 9).toString :: defined
       | [] => pure ()
     | _ => pure ()
   return slots
@@ -275,7 +286,30 @@ def collectAttrGroups (w : WCtx) : List (Nat × List String) := Id.run do
     | _, _, _, _ => pure ()
   return acc
 
-/-- Function-attribute keys of all function headers (`define`/`declare`), in module order. -/
+/-- `intrinsicAttrIndexText` as a list. -/
+private def intrinsicAttrIndex : List (String × Nat) :=
+  (intrinsicAttrIndexText.splitOn "\n").filterMap fun l =>
+    match l.splitOn "=" with
+    | [n, i] => i.toNat?.map (n, ·)
+    | _ => none
+
+/-- The attribute set LLVM attaches to the declaration of intrinsic `name` (overloads not in the
+table use an entry with the same base name, e.g. `llvm.smax.i16` that of `llvm.smax.i32`). -/
+def intrinsicAttrsOf? (name : String) : Option String :=
+  let idx? := match intrinsicAttrIndex.find? (·.1 == name) with
+    | some (_, i) => some i
+    | none =>
+      let parts := name.splitOn "."
+      (List.range (parts.length - 1)).reverse.findSome? fun k =>
+        if k < 2 then none
+        else
+          let pre := ".".intercalate (parts.take k) ++ "."
+          (intrinsicAttrIndex.find? (fun (p : String × Nat) => p.1.startsWith pre)).map (fun (p : String × Nat) => p.2)
+  idx?.bind (intrinsicAttrSets[·]?)
+
+/-- Function-attribute keys of all function headers (`define`/`declare`), in module order.
+Intrinsic declarations carry the attributes LLVM gives them (`intrinsicAttrsOf?`), which the
+slot tracker counts even when the source writes none. -/
 def functionAttrKeys (w : WCtx) : List String := Id.run do
   let mut acc : List String := []
   for i in [0:w.toks.size] do
@@ -285,6 +319,7 @@ def functionAttrKeys (w : WCtx) : List String := Id.run do
       let mut j := i + 1
       while j < w.toks.size && !(match w.tok j with | .globalId _ => w.tok (j + 1) == .lparen | _ => false) do
         j := j + 1
+      let fname := match w.tok j with | .globalId (.name n) => n | _ => ""
       j := j + 2
       let mut depth := 1
       while j < w.toks.size && depth > 0 do
@@ -294,6 +329,9 @@ def functionAttrKeys (w : WCtx) : List String := Id.run do
         | _ => pure ()
         j := j + 1
       let (attrs, _) := collectAttrs w j
+      let attrs := match (if fname.startsWith "llvm." then intrinsicAttrsOf? fname else none) with
+        | some text => (collectAttrs { w with toks := (AST.Parser.tokenizeWithLines text).1 } 0).1
+        | none => attrs
       if !attrs.isEmpty then
         let key := attrSetKey w attrs
         if !acc.contains key then acc := acc ++ [key]
@@ -580,7 +618,7 @@ private def printPhis {m : Type → Type} [Monad m] (emit : Emit m) (d : DState)
 
 /-- Print `Entering function:` and its argument lines for a freshly pushed frame. -/
 def printEntry {m : Type → Type} [Monad m] (emit : Emit m) (d : DState) (mem : MemoryState)
-    (fr : CallFrame) (tags : List (Nat × Nat)) : m Unit := do
+    (fr : CallFrame) (tags : List (Nat × Nat)) (varArgs : List RegisterValue := []) : m Unit := do
   let fn := fr.defn.prototype.name
   errLn emit s!"Entering function: {fn.toString}"
   let params := d.tables.params.getD fn.toString []
@@ -588,6 +626,9 @@ def printEntry {m : Type → Type} [Monad m] (emit : Emit m) (d : DState) (mem :
     match fr.registers.get? (.local_id arg) with
     | some v => errLn emit s!"  {ptxt} = {v.llubiString mem d.dl tags}"
     | none => pure ()
+  -- the variadic arguments, as llubi prints them on entry (`vaarg[i] = <typed value>`)
+  for (v, i) in varArgs.zip (List.range varArgs.length) do
+    errLn emit s!"  vaarg[{i}] = {v.llubiString mem d.dl tags}"
 
 /-- Report a failure (`Stacktrace:` + message). -/
 private def reportFailure {m : Type → Type} [Monad m] (emit : Emit m) (d : DState)
@@ -626,7 +667,20 @@ private def emitRunning {m : Type → Type} [Monad m] (emit : Emit m) (d : DStat
       if n' == n + 1 then
         if d.verbose then
           match st'.frames with
-          | callee :: _ => printEntry emit d st'.memory callee o'.tags
+          | callee :: _ =>
+            -- values of the arguments past the callee's fixed parameters (evaluated in the caller)
+            let isVarArgFn := match callee.defn.prototype.type with
+              | .function _ _ va => va
+              | _ => false
+            let varArgs : List RegisterValue := match pend with
+              | .inl (.call _ _ _ args ..) =>
+                if !isVarArgFn then [] else
+                (args.drop callee.defn.args.length).filterMap fun (ty, e, _) =>
+                  match execExp st.dataLayout st.config fr.registers st.memory ty e o with
+                  | .ok (v, _, _) => some v
+                  | .error _ => none
+              | _ => []
+            printEntry emit d st'.memory callee o'.tags varArgs
           | [] => pure ()
         -- objects created while entering the callee are its byval copies
         let copies := (List.range (st'.memory.nextAllocId - st.memory.nextAllocId)).map

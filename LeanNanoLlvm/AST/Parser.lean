@@ -1363,9 +1363,22 @@ private def parseOtherInstruction (fuel : Nat) (isTail : Bool) (opTok : Tok) : P
     let cc ← parseCallingConv
     let retAttrs ← parseValueAttrs fuel
     let retTy ← parseRetType fuel
-    -- Skip optional explicit function pointer signature `(argTys)` before `@callee`
-    if (← peek) == .lparen then
-      skipParenGroup fuel
+    -- Optional explicit function type `(argTys[, ...])` before `@callee` (the call's type must
+    -- equal the callee's, LangRef `call`)
+    let explicitTy? : Option (List LlvmType × Bool) ← do
+      if ← tryEat .lparen then
+        let mut tys : List LlvmType := []
+        let mut va := false
+        let mut g := fuel
+        while !(← tryEat .rparen) && g > 0 do
+          g := g - 1
+          if ← tryEat .ellipsis then va := true
+          else
+            let t ← parseType fuel
+            tys := t :: tys
+          let _ ← tryEat .comma
+        pure (some (tys.reverse, va))
+      else pure none
     let callee ← parseExp fuel
     expect .lparen "call args"
     let mut args : List (LlvmType × Exp × List ValueAttr) := []
@@ -1425,7 +1438,10 @@ private def parseOtherInstruction (fuel : Nat) (isTail : Bool) (opTok : Tok) : P
       | _ => g2 := 0
     let callMd ← parseTrailingValueAttrs fuel
     return .call retTy fmf callee args.reverse (retAttrs ++ callMd) bundles.reverse isNoRet
-      { isTail := isTail, callingConv := cc }
+      { isTail := isTail, callingConv := cc,
+        fnTy? := some (match explicitTy? with
+          | some (tys, va) => .function retTy tys va
+          | none => .function retTy (args.reverse.map (·.1)) false) }
   | tok => throw s!"parse error: unsupported instruction opcode {repr tok}"
 
 /-- Parse a single non-terminator LLVM instruction. -/

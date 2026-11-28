@@ -259,6 +259,11 @@ private def unexpandCallSiteInfo (stx : Syntax) : UnexpandM (Bool × String) := 
     match id.getId.eraseMacroScopes with
     | ``CallSiteInfo.default | `CallSiteInfo.default => return (false, "")
     | _ => throw ()
+  | `($f:ident $tl $ccVal $va) =>
+    match f.getId.eraseMacroScopes, asBool? tl, asStr? ccVal, (some va : Option _) with
+    | ``CallSiteInfo.mk, some tl, some ccStr, _
+    | `CallSiteInfo.mk, some tl, some ccStr, _ => return (tl, ccStr)  -- `fnTy?` is not shown
+    | _, _, _, _ => throw ()
   | `($f:ident $tl $ccVal) =>
     match f.getId.eraseMacroScopes, asBool? tl, asStr? ccVal with
     | ``CallSiteInfo.mk, some tl, some ccStr
@@ -279,6 +284,7 @@ private def unexpandCallSiteInfo (stx : Syntax) : UnexpandM (Bool × String) := 
           match asStr? val with
           | some str => ccStr := str
           | none => throw ()
+        | `fnTy? => pure ()  -- the call's function type is not shown (see `CallSiteInfo.fnTy?`)
         | _ => throw ()
       pure (isTail, ccStr)
     | none => throw ()

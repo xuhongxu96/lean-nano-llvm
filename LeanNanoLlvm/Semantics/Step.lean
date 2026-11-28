@@ -779,7 +779,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
   /- ConversionOp -/
   | conversionOp_ok {op fromTy e toTy v m1 res m2} :
       EvalExp st.dataLayout st.config frame.registers st.memory fromTy e (.ok (v, m1)) →
-      (∃ o o', evalConversionExec st.dataLayout st.config m1 op fromTy v toTy o = .ok (res, m2, o')) →
+      (∃ o o', evalConversionExec st.dataLayout (frameDenormalCfg st frame) m1 op fromTy v toTy o = .ok (res, m2, o')) →
       StepInstr st frame callers iid rest (.conversionOp op fromTy e toTy) none
         (finishRegInstr st frame callers rest iid res m2)
   | conversionOp_e_err {op fromTy e toTy err} :
@@ -787,7 +787,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       StepInstr st frame callers iid rest (.conversionOp op fromTy e toTy) none (Config.ofError err)
   | conversionOp_eval_err {op fromTy e toTy v m1 err} :
       EvalExp st.dataLayout st.config frame.registers st.memory fromTy e (.ok (v, m1)) →
-      (∃ o, evalConversionExec st.dataLayout st.config m1 op fromTy v toTy o = .error err) →
+      (∃ o, evalConversionExec st.dataLayout (frameDenormalCfg st frame) m1 op fromTy v toTy o = .error err) →
       StepInstr st frame callers iid rest (.conversionOp op fromTy e toTy) none (Config.ofError err)
 
   /- Select -/
@@ -1192,7 +1192,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.toString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) = .ok (calleeFrame, m3) →
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) site.fnTy? = .ok (calleeFrame, m3) →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none
         (.running (st.withFramesAndMemory
           (calleeFrame ::
@@ -1207,7 +1207,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.toString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = some calleeDef →
       (st.config.maxStackDepth == 0 ∨ st.frames.length < st.config.maxStackDepth) →
-      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) = .error err →
+      mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) site.fnTy? = .error err →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (Config.ofError err)
   | call_user_overflow {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 calleeDef} :
       EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
@@ -1254,7 +1254,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       (st.allowLibcallsFor fid && isAllocLibcall fid.toString) = false →
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.toString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = none →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (externalCallConfig st fid retTy argVals)
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (externalCallConfig st fid retTy argVals site.fnTy? m2 (args.map (fun a => a.2.2)))
 
 /-- Relational small-step execution of a block terminator (indexed by `Terminator`). -/
 inductive StepTerm (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
@@ -1478,7 +1478,7 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
     exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) ha) hc) hmk
   | call_spec_oracle_ok ha hc _ _ _ hmk =>
     exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) ha) hc) hmk
-  | call_external_err _ _ _ _ _ => unfold externalCallConfig; split <;> trivial
+  | call_external_err _ _ _ _ _ => unfold externalCallConfig; (repeat' split) <;> trivial
   | _ => first | exact configOfError_wf _ | trivial
 
 theorem StepTerm.preserves_wf {st frame callers tid term c'}

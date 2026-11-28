@@ -63,7 +63,11 @@ remainder rounded to double (LLVM `APFloat` double-double layout). -/
 def quadToPPC (rm : RoundingMode) (q : IEEEFloat .fp128) : IEEEFloat .fp128 :=
   let hi := q.convert .double rm
   if !hi.isFinite then packPPC128 hi (IEEEFloat.zero .double false)
-  else packPPC128 hi ((IEEEFloat.sub .RNE q (hi.convert .fp128 .RNE)).convert .double .RNE)
+  else
+    let lo := (IEEEFloat.sub .RNE q (hi.convert .fp128 .RNE)).convert .double .RNE
+    -- an exact conversion leaves a zero low part, which carries the sign of the high part
+    -- (APFloat double-double: -1.0 is (-1.0, -0.0))
+    packPPC128 hi (if lo.isZero then IEEEFloat.zero .double hi.sign else lo)
 
 /-- The IEEE value a stored float of type `ft` denotes (`ppc_fp128` is stored as its double pair). -/
 def toSemantic {ft : FloatType} (x : IEEEFloat ft.format) : IEEEFloat ft.format :=

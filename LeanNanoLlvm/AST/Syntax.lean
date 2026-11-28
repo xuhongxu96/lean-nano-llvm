@@ -21,7 +21,6 @@ deriving instance Lean.ToExpr for IntBinaryOp
 deriving instance Lean.ToExpr for FloatUnaryOp
 deriving instance Lean.ToExpr for FloatBinaryOp
 deriving instance Lean.ToExpr for ConversionOp
-deriving instance Lean.ToExpr for CallSiteInfo
 
 mutual
   private def llvmRetTypeToExpr : LlvmRetType → Expr
@@ -55,6 +54,7 @@ instance : ToExpr LlvmType where
   toTypeExpr := mkConst ``LlvmType
 
 deriving instance Lean.ToExpr for ValueAttr
+deriving instance Lean.ToExpr for CallSiteInfo
 
 private def mkPairExpr (α β : Expr) (a b : Expr) : Expr :=
   mkApp4 (mkConst ``Prod.mk [levelZero, levelZero]) α β a b

@@ -453,6 +453,10 @@ convention (`""` is the default `ccc`). -/
 structure CallSiteInfo where
   isTail      : Bool := false
   callingConv : String := ""
+  /-- The call's function type: the explicit one (`call void (i32, ...) @f(...)`), or the
+  non-variadic type of the arguments when none is written. The IR parser always sets it; calls
+  built with the `[llvm-definition| ...]` syntax leave it `none` (no explicit types there). -/
+  fnTy?       : Option LlvmType := none
 deriving Repr, DecidableEq, Inhabited
 
 /-- The default call site (no tail marker, `ccc`). -/

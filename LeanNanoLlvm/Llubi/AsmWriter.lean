@@ -1397,11 +1397,9 @@ def printCall (c : WCtx) (i stop : Nat) : String :=
     let tyStr := match fnTy? with
       | some ft@(.fn _ _ true) => ft.print
       | some ft@(.fn _ _ _) => if calleeStr.startsWith "asm" then ft.print else retTy.print
-      | _ => if declVarArg then
-               match c.fnTypes.find? (fun (n, _) => printLLVMName "@" n == calleeStr) with
-               | some (_, t) => (PTy.ofLlvmType t).print
-               | none => retTy.print
-             else retTy.print
+      -- without an explicit type the call's type is the non-variadic type of its arguments,
+      -- whatever the callee's; LLVM prints only `ret` then
+      | _ => let _ := declVarArg; retTy.print
     let (argStr, argTys, j5) :=
       if c.tok j4 == .lparen then printCallArgs c (j4 + 1) calleeStr else ("", [], j4)
     let calleeStr := remangleIntrinsic c calleeStr retTy argTys

@@ -493,9 +493,13 @@ callee's function type `calleeTy`: immediate UB (LangRef `call`: "If the functio
 not match the function type of the call, the behavior is undefined"), reported with llubi's
 message (the call's function type, then the callee's). -/
 def callSignatureMismatch? (retTy : LlvmRetType) (calleeTy : LlvmType)
-    (argVals : List RegisterValue) : Option String :=
-  match calleeTy with
-  | .function cRet ps va =>
+    (argVals : List RegisterValue) (callTy? : Option LlvmType := none) : Option String :=
+  match callTy?, calleeTy with
+  | some ct, .function _ _ _ =>
+    -- the call's function type is known (parsed IR): it must equal the callee's, as in llubi
+    if ct.beq calleeTy then none
+    else some s!"Indirect call through a function pointer with mismatched signature. Expected: {ct.print}, Actual: {calleeTy.print}"
+  | none, .function cRet ps va =>
     let argsOk := callArgsFit ps va argVals
     if cRet != retTy || !argsOk then
       let callTy : LlvmType :=
@@ -505,24 +509,48 @@ def callSignatureMismatch? (retTy : LlvmRetType) (calleeTy : LlvmType)
           | none => .function retTy ps va
       some s!"Indirect call through a function pointer with mismatched signature. Expected: {callTy.print}, Actual: {calleeTy.print}"
     else none
-  | _ => none
+  | _, _ => none
+
+/-- The parameter attributes of a declared callee, merged with the call site's, applied to the
+arguments (llubi `handleAttributes`, before it finds that the function has no body). -/
+def checkDeclArgAttrs (dl : DataLayout) (mem : MemoryState) (d : Declaration)
+    (siteAttrs : List (List ValueAttr)) (argVals : List RegisterValue) : Except ExecError Unit :=
+  match d.type with
+  | .function _ ps _ =>
+    let rec go (i : Nat) : List LlvmType → List RegisterValue → Except ExecError Unit
+      | ty :: ts, v :: vs =>
+        match applyValueAttrsPure dl mem ty v
+            (byvalDeferredAttrs (withSiteAttrs (d.argAttrs.getD i []) (siteAttrs.getD i []))) with
+        | .error e => .error e
+        | .ok _ => go (i + 1) ts vs
+      | _, _ => .ok ()
+    go 0 ps argVals
+  | _ => .ok ()
 
 /-- A call to a function the module does not define: UB if its declaration's type does not
-match the call, otherwise outside what we execute. -/
+match the call or an argument violates the declaration's parameter attributes, otherwise outside
+what we execute. -/
 def externalCallConfig (st : MachineState) (fid : FunctionId) (retTy : LlvmRetType)
-    (argVals : List RegisterValue) : Config :=
-  match (st.declarations.get? fid).bind (fun d => callSignatureMismatch? retTy d.type argVals) with
-  | some msg => .ub msg
+    (argVals : List RegisterValue) (callTy? : Option LlvmType := none) (mem : MemoryState := {})
+    (siteAttrs : List (List ValueAttr) := []) : Config :=
+  match st.declarations.get? fid with
+  | some d =>
+    match callSignatureMismatch? retTy d.type argVals callTy? with
+    | some msg => .ub msg
+    | none =>
+      match checkDeclArgAttrs st.dataLayout mem d siteAttrs argVals with
+      | .error (.immediateUB msg) => .ub msg
+      | _ => .staticError s!"Call to undefined external function @{fid}"
   | none => .staticError s!"Call to undefined external function @{fid}"
 
 /-- Check that a callsite's return type and `byval` attributes match the callee prototype. -/
 def checkCallSignatureAndByVal (_dl : DataLayout) (retTy : LlvmRetType)
     (callArgAttrs : List (List ValueAttr)) (defn : Definition) (siteCC : String := "")
-    (argVals : List RegisterValue := []) :
+    (argVals : List RegisterValue := []) (callTy? : Option LlvmType := none) :
     Except ExecError Unit :=
   match defn.prototype.type with
   | .function _ _ _ =>
-    match callSignatureMismatch? retTy defn.prototype.type argVals with
+    match callSignatureMismatch? retTy defn.prototype.type argVals callTy? with
     | some msg => .error (.immediateUB msg)
     | none =>
     if defn.prototype.callingConv != siteCC then
@@ -552,17 +580,17 @@ def checkCallSignatureAndByVal (_dl : DataLayout) (retTy : LlvmRetType)
 def mkCallEntryFrameWithMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryState)
     (retTy : LlvmRetType) (callArgAttrs : List (List ValueAttr))
     (defn : Definition) (argVals : List RegisterValue) (siteCC : String := "")
-    (visible : List AllocId := []) : Except ExecError (CallFrame × MemoryState) :=
-  match checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC argVals with
+    (visible : List AllocId := []) (siteFnTy? : Option LlvmType := none) : Except ExecError (CallFrame × MemoryState) :=
+  match checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC argVals siteFnTy? with
   | .error e => .error e
   | .ok () => mkEntryFrameWithMem dl cfg mem defn argVals callArgAttrs visible
 
-theorem mkCallEntryFrameWithMem_preserves_wf {dl cfg mem retTy callArgAttrs defn argVals siteCC visible frame' mem'}
+theorem mkCallEntryFrameWithMem_preserves_wf {dl cfg mem retTy callArgAttrs defn argVals siteCC visible siteFnTy? frame' mem'}
     (hwf : MemoryState.WellFormed mem)
-    (h : mkCallEntryFrameWithMem dl cfg mem retTy callArgAttrs defn argVals siteCC visible = .ok (frame', mem')) :
+    (h : mkCallEntryFrameWithMem dl cfg mem retTy callArgAttrs defn argVals siteCC visible siteFnTy? = .ok (frame', mem')) :
     MemoryState.WellFormed mem' := by
   unfold mkCallEntryFrameWithMem at h
-  cases hc : checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC argVals with
+  cases hc : checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC argVals siteFnTy? with
   | error e => rw [hc] at h; cases h
   | ok u => rw [hc] at h; exact mkEntryFrameWithMem_preserves_wf hwf h
 

@@ -322,6 +322,32 @@ def unsupported_key(msg: str) -> str:
 
 # Refinement disagreements, by pair id: root cause established by hand.
 REFINEMENT_RULES: dict[str, dict[str, str]] = {
+    "43005c4d95941233": {
+        "id": "B1-refinement", "class": "ours-semantic-bug", "bug": "B1",
+        "root_cause": "opt pair (InstCombine fold_select_trunc_nsw_and), correct. Parameter `i8 noundef "
+                      "range(i8 0, 2) %y`: our witness put %y out of range, which is UB, but our semantics "
+                      "checked noundef before range and made %y poison. No longer refuted after the B1 fix.",
+    },
+    "5ec489e906cc6d5a": {
+        "id": "B1-refinement", "class": "ours-semantic-bug", "bug": "B1",
+        "root_cause": "opt pair (InstCombine fold_select_trunc_and), correct; same root cause as "
+                      "43005c4d95941233. No longer refuted after the B1 fix.",
+    },
+    "34374bb544b3d783": {
+        "id": "H-alive2-multi-pair", "class": "harness-bug", "bug": "H1",
+        "root_cause": "Mutant of an Alive2 test file with four function pairs (src, src3, src9, src4). "
+                      "alive-tv checks all of them; the harness took 'correct' from the src9 section while "
+                      "src -> tgt (`x - (-1)` vs `-1`) is refuted, so our (right) refutation looked like a "
+                      "disagreement. Fixed in the harness (per-pair section, oracle_alive2.select_section); "
+                      "the pair's Alive2 verdict is re-run.",
+    },
+    "34e5e97f58b8f2f3": {
+        "id": "alive2-fn-attr-refinement", "class": "out-of-scope", "bug": None,
+        "root_cause": "Alive2 test: src has `denormal_fpenv(positivezero)`, tgt has no attributes, both "
+                      "return %x. Alive2 refutes with 'Function attributes not refined' (it also requires "
+                      "function attributes to be refined); the bodies behave identically in every "
+                      "floating-point environment, which is what our function-level refinement states.",
+    },
     "ef0c2671893037dc": {
         "id": "B1-refinement", "class": "ours-semantic-bug", "bug": "B1",
         "root_cause": "Alive2 test (correct). Our witness %1 = 0 violates `range(i8 -32, -16)` of a "

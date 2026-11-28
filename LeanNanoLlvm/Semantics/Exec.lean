@@ -942,7 +942,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     match execExp dl cfg regs st.memory fromTy e o with
     | .error err => (none, Config.ofError err, o)
     | .ok (v, m1, o1) =>
-      match evalConversionExec dl cfg m1 op fromTy v toTy o1 with
+      match evalConversionExec dl (frameDenormalCfg st frame) m1 op fromTy v toTy o1 with
       | .ok (res, m2, o2) => (none, finishRegInstr st frame callers rest iid res m2, o2)
       | .error err => (none, Config.ofError err, o1)
   | .select fmf condTy cond valTy tv fv =>
@@ -1162,12 +1162,12 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           | some (.error err) => (none, Config.ofError err, o2)
           | none =>
             match st.functions.get? fid with
-            | none => (none, externalCallConfig st fid retTy argVals, o2)
+            | none => (none, externalCallConfig st fid retTy argVals site.fnTy? m2 (args.map (fun a => a.2.2)), o2)
             | some calleeDef =>
               if cfg.maxStackDepth != 0 && st.frames.length ≥ cfg.maxStackDepth then
                 (none, .resourceError .stackOverflow, o2)
               else
-                match mkCallEntryFrameWithMem dl cfg m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) with
+                match mkCallEntryFrameWithMem dl cfg m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) site.fnTy? with
                 | .error err => (none, Config.ofError err, o2)
                 | .ok (calleeFrame, m3) =>
                   let caller' := (frame.advance rest frame.registers frame.frameAllocas).withReturnDest
@@ -1350,7 +1350,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
     | error err => rw [h1] at ih1 h; cases h; exact StepInstr.conversionOp_e_err ih1
     | ok p1 =>
       rw [h1] at ih1 h; obtain ⟨v, m1, o1⟩ := p1; dsimp only at ih1 h
-      cases hc : evalConversionExec st.dataLayout st.config m1 op fromTy v toTy o1 with
+      cases hc : evalConversionExec st.dataLayout (frameDenormalCfg st frame) m1 op fromTy v toTy o1 with
       | ok p2 => rw [hc] at h; obtain ⟨res, m2, o2⟩ := p2; cases h; exact StepInstr.conversionOp_ok ih1 ⟨_, _, hc⟩
       | error err => rw [hc] at h; cases h; exact StepInstr.conversionOp_eval_err ih1 ⟨_, hc⟩
   | select fmf condTy cond valTy tv fv =>
@@ -1732,7 +1732,7 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
                   · simp only [Bool.and_eq_true, bne_iff_ne, ne_eq, decide_eq_true_eq, not_and] at hov
                     have := hov hz
                     exact Or.inr (by omega)
-                cases hentry : mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) with
+                cases hentry : mkCallEntryFrameWithMem st.dataLayout st.config m2 retTy (args.map (fun a => a.2.2)) calleeDef argVals site.callingConv (tailHidden site frame) site.fnTy? with
                 | error err =>
                   rw [hentry] at h; cases h
                   exact StepInstr.call_user_entry_err iha ihc hallocF hnoneAll hfn hdepth hentry

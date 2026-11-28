@@ -24,6 +24,9 @@ Classes (`CLASSES`):
 * ``oracle-bug``: the oracle differs from LangRef.
 * ``spec-gap``: LangRef leaves the behaviour open (e.g. a nondeterministic choice), so both
   sides are allowed.
+* ``out-of-scope``: the oracle checks something our statement does not express (e.g. Alive2 also
+  requires function attributes to be refined).
+* ``harness-bug``: a bug in the campaign harness (ids `H*` in `difftest/BUGS.md`), fixed.
 * ``timeout``, ``invalid``, ``crash``: from the harness verdicts.
 * ``untriaged``: no rule; needs a root cause.
 """
@@ -36,7 +39,8 @@ from typing import Any, Callable
 from . import triage_rules as R
 
 CLASSES = ["ours-semantic-bug", "ours-trace-format", "ours-unsupported", "oracle-unsupported",
-           "oracle-bug", "spec-gap", "timeout", "invalid", "crash", "untriaged"]
+           "oracle-bug", "spec-gap", "out-of-scope", "harness-bug", "timeout", "invalid", "crash",
+           "untriaged"]
 
 
 def _norm_all(text: str, side: str, norms: list[R.Normalizer]) -> str:
