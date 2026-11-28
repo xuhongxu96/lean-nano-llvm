@@ -1,7 +1,0 @@
-exit: 0
---- stdout
---- stderr
-Entering function: main
-  %a = alloca i32, align 4, addrspace(1) => ptr 0x8 [a]
-  ret i32 0
-Exiting function: main

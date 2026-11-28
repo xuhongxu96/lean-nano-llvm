@@ -1,9 +1,0 @@
-exit: 0
---- stdout
---- stderr
-Entering function: main
-  %p = alloca i32, align 4 => ptr 0x8 [p]
-  store i32 1, ptr %p, align 4
-  %a = load i32, ptr %p, align 4, !range !3, !noundef !2 => i32 1
-  ret i32 0
-Exiting function: main

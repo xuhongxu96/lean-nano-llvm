@@ -16,3 +16,17 @@ define i32 @main() {
   %t = trunc i64 %b to i32
   ret i32 %t
 }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 1
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR: Entering function: f
+; LLUBI-ERR:   double %x = double 4.940660e-324
+; LLUBI-ERR:   %r = fadd double %x, 0.000000e+00 => double 4.940660e-324
+; LLUBI-ERR:   ret double %r
+; LLUBI-ERR: Exiting function: f
+; LLUBI-ERR:   %r = call double @f(double 4.940660e-324) => double 4.940660e-324
+; LLUBI-ERR:   %b = bitcast double %r to i64 => i64 1
+; LLUBI-ERR:   %t = trunc i64 %b to i32 => i32 1
+; LLUBI-ERR:   ret i32 %t
+; LLUBI-ERR: Exiting function: main

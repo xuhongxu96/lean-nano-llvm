@@ -1,8 +1,0 @@
-exit: 1
---- stdout
---- stderr
-Entering function: main
-Stacktrace:
-#0   %a = alloca i8, i64 -3, align 1 at @main <stdin>:6
-Immediate UB detected: Alloca with allocation size that exceeds the maximum object size. Size: 18446744073709551613
-error: Execution of function 'main' failed.

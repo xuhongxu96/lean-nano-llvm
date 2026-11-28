@@ -10,3 +10,11 @@ define i32 @main() {
   %r = call ptr @ext(ptr poison)
   ret i32 0
 }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 1
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR: Stacktrace:
+; LLUBI-ERR: #0   %r = call ptr @ext(ptr poison) at @main <stdin>:10
+; LLUBI-ERR: Immediate UB detected: The value poison violates noundef attribute.
+; LLUBI-ERR: error: Execution of function 'main' failed.

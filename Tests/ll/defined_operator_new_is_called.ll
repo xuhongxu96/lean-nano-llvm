@@ -14,3 +14,16 @@ define i32 @main() {
   %t = trunc i64 %i to i32
   ret i32 %t
 }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 42
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR: Entering function: _Znwj
+; LLUBI-ERR:   i32 %n = i32 4
+; LLUBI-ERR:   ret ptr inttoptr (i64 42 to ptr)
+; LLUBI-ERR: Exiting function: _Znwj
+; LLUBI-ERR:   %p = call ptr @_Znwj(i32 4) => ptr 0x2A [nullary]
+; LLUBI-ERR:   %i = ptrtoint ptr %p to i64 => i64 42
+; LLUBI-ERR:   %t = trunc i64 %i to i32 => i32 42
+; LLUBI-ERR:   ret i32 %t
+; LLUBI-ERR: Exiting function: main

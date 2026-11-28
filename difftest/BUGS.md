@@ -2,9 +2,11 @@
 
 Every entry was confirmed by hand: a minimized reproducer, the pinned oracle's behaviour on it,
 and the LangRef text (llvm-project `a58c4ab`, `llvm/docs/LangRef.md`) that decides who is right.
-Reproducers live in `Tests/ll/` (semantics, `scripts/run_ll_tests.sh`), `Tests/llubi-regress/`
-(byte-exact llubi output, goldens from the pinned llubi, `scripts/run_llubi_regress.sh`) and
-`Tests/Refinement/Difftest.lean` (refinement and tactics). Triage rules (`dt/triage_rules.py`)
+Reproducers live in `Tests/ll/` and run in CI with `scripts/run_ll_tests.sh`: `; EXPECT_*`
+comments check `lean-nano-llvm run` (semantics), and `; LLUBI-*` comments, generated from the
+pinned llubi by `scripts/gen_llubi_expect.sh`, check the `llubi --verbose` output byte for byte
+(the `llubi_*.ll` files and every difftest reproducer). Bugs in the refinement relation and the
+tactics are covered by `Tests/Refinement/Difftest.lean`. Triage rules (`dt/triage_rules.py`)
 attribute campaign runs to these ids; the per-bug counts are table `triage_bugs` of `dt report`.
 
 **Status.** All B, P and T bugs are fixed: B1-B9 and T1 in `451acab`, P7-P9 and P11-P12 in
@@ -44,7 +46,7 @@ leaves a zero low double with the sign of the high double (`ppc_fp128_sitofp_neg
 ## Output-only differences (P)
 
 Same execution, different text in our llubi-compatible `--verbose` output. Each has a
-normalizer in `triage_rules.NORMALIZERS`.
+normalizer in `triage_rules.NORMALIZERS` and a `Tests/ll/llubi_*.ll` reproducer.
 
 | Id | Difference |
 |---|---|

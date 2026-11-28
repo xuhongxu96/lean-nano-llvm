@@ -19,3 +19,16 @@ define i32 @main() {
 }
 
 attributes #0 = { denormal_fpenv(preservesign) }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 0
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR: Entering function: f
+; LLUBI-ERR:   float %x = float 1.401300e-45
+; LLUBI-ERR:   %r = fadd float %x, 0.000000e+00 => float 0.000000e+00
+; LLUBI-ERR:   ret float %r
+; LLUBI-ERR: Exiting function: f
+; LLUBI-ERR:   %r = call float @f(float 1.401300e-45) => float 0.000000e+00
+; LLUBI-ERR:   %b = bitcast float %r to i32 => i32 0
+; LLUBI-ERR:   ret i32 %b
+; LLUBI-ERR: Exiting function: main

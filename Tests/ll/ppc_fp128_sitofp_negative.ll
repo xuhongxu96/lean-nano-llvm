@@ -11,3 +11,13 @@ define i32 @main() {
   %t = trunc i128 %h to i32
   ret i32 %t
 }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 128
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR:   %p = sitofp i32 -5 to ppc_fp128 => ppc_fp128 0x8000000000000000C014000000000000
+; LLUBI-ERR:   %b = bitcast ppc_fp128 %p to i128 => i128 -170141183460469231717846616161067728896
+; LLUBI-ERR:   %h = lshr i128 %b, 120 => i128 128
+; LLUBI-ERR:   %t = trunc i128 %h to i32 => i32 128
+; LLUBI-ERR:   ret i32 %t
+; LLUBI-ERR: Exiting function: main

@@ -1,8 +1,0 @@
-exit: 1
---- stdout
---- stderr
-Entering function: main
-Stacktrace:
-#0   call void @use(i32 1, i32 2) at @main <stdin>:5
-Immediate UB detected: Indirect call through a function pointer with mismatched signature. Expected: void (i32, i32), Actual: void (i32, ...)
-error: Execution of function 'main' failed.

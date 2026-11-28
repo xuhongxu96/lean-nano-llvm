@@ -1,8 +1,0 @@
-exit: 1
---- stdout
---- stderr
-Entering function: main
-Stacktrace:
-#0   %r = srem i32 -2147483648, -1 at @main <stdin>:6
-Immediate UB detected: Signed division overflow. LHS: -2147483648, RHS: -1
-error: Execution of function 'main' failed.

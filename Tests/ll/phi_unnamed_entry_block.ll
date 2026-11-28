@@ -20,3 +20,16 @@ define i32 @main() {
   %r = call i32 @f(i1 false)
   ret i32 %r
 }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 1
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR: Entering function: f
+; LLUBI-ERR:   i1 %c = F
+; LLUBI-ERR:   br i1 %c, label %a, label %join jump to %join
+; LLUBI-ERR:   %r = phi i32 [ 1, %0 ], [ 2, %a ] => i32 1
+; LLUBI-ERR:   ret i32 %r
+; LLUBI-ERR: Exiting function: f
+; LLUBI-ERR:   %r = call i32 @f(i1 false) => i32 1
+; LLUBI-ERR:   ret i32 %r
+; LLUBI-ERR: Exiting function: main

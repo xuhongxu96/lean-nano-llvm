@@ -14,3 +14,13 @@ define i32 @main() {
   %x = load i32, ptr %p, !range !0, !noundef !{}
   ret i32 %x
 }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 1
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR:   %p = alloca i32, align 4 => ptr 0x8 [p]
+; LLUBI-ERR:   store i32 7, ptr %p, align 4
+; LLUBI-ERR: Stacktrace:
+; LLUBI-ERR: #0   %x = load i32, ptr %p, align 4, !range !0, !noundef !1 at @main <stdin>:14
+; LLUBI-ERR: Immediate UB detected: The value poison violates !noundef metadata.
+; LLUBI-ERR: error: Execution of function 'main' failed.

@@ -17,3 +17,14 @@ define i32 @main() {
   %t = trunc i64 %s to i32
   ret i32 %t
 }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 1
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR:   %a = alloca i8, align 1 => ptr 0x8 [a]
+; LLUBI-ERR:   %g = getelementptr i8, ptr %a, i64 4294967296 => ptr 0x100000008 [a + 4294967296]
+; LLUBI-ERR:   %d = ptrtoaddr ptr %g to i64 => i64 4294967304
+; LLUBI-ERR:   %s = lshr i64 %d, 32 => i64 1
+; LLUBI-ERR:   %t = trunc i64 %s to i32 => i32 1
+; LLUBI-ERR:   ret i32 %t
+; LLUBI-ERR: Exiting function: main

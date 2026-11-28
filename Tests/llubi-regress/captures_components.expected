@@ -1,7 +1,0 @@
-exit: 1
---- stdout
---- stderr
-Entering function: main
-  %a = alloca i32, align 4 => ptr 0x8 [a]
-Unrecognized instruction:   call void @ext(ptr captures(address) %a)
-error: Execution of function 'main' failed.

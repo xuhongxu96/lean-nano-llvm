@@ -16,3 +16,17 @@ define i32 @main() {
   ret i32 %t
 }
 attributes #0 = { denormal_fpenv(ieee|preservesign) }
+
+; llubi expectations (scripts/gen_llubi_expect.sh, pinned llubi; do not edit by hand)
+; LLUBI-EXIT: 0
+; LLUBI-ERR: Entering function: main
+; LLUBI-ERR: Entering function: f
+; LLUBI-ERR:   bfloat %x = bfloat 9.183550e-41
+; LLUBI-ERR:   %r = fpext bfloat %x to float => float 0.000000e+00
+; LLUBI-ERR:   ret float %r
+; LLUBI-ERR: Exiting function: f
+; LLUBI-ERR:   %r = call float @f(bfloat 9.183550e-41) => float 0.000000e+00
+; LLUBI-ERR:   %b = bitcast float %r to i32 => i32 0
+; LLUBI-ERR:   %t = lshr i32 %b, 16 => i32 0
+; LLUBI-ERR:   ret i32 %t
+; LLUBI-ERR: Exiting function: main
