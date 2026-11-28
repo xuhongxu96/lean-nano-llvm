@@ -41,7 +41,9 @@ Follow-up instances (same ids): **B1** a declared callee's parameter attributes 
 the arguments (`decl_param_noundef_ub.ll`); **B3** a call without an explicit type has the
 non-variadic type of its arguments, so calling a variadic function that way is UB
 (`call_signature_mismatch_vararg_ub.ll`; the IR parser now records each call's function type,
-`CallSiteInfo.fnTy?`); **B4** conversions (`fpext`, `fptrunc`) used the module's configuration
+`CallSiteInfo.fnTy?`; its first version compared named struct types unresolved, a regression
+found by campaign run 2 and fixed with `call_named_struct_type.ll`; the affected run-2 cases are
+re-run); **B4** conversions (`fpext`, `fptrunc`) used the module's configuration
 instead of the function's denormal mode (`denormal_fpenv_fpext.ll`); **B8** an exact conversion
 leaves a zero low double with the sign of the high double (`ppc_fp128_sitofp_negative.ll`), for
 integer conversions only (`llubi_ppc_fp128_zero_low_sign.ll`); decimal and special `ppc_fp128`
@@ -77,6 +79,8 @@ normalizer in `triage_rules.NORMALIZERS` and a `Tests/ll/llubi_*.ll` reproducer.
 | P13 | Variadic arguments are not printed on function entry (llubi: `vaarg[i] = <value>`), and a call's function type was printed from the callee instead of the call. |
 
 Follow-ups: **P1** specialized nodes (`!DIFile(...)`) are MDNodes too; **P2** intrinsic
+metadata nodes are keyed by all their tokens (float operands made distinct nodes collide);
+**P2** a function's trailing `align N` is its alignment, not an attribute; intrinsic
 declarations carry LLVM's implicit attribute sets (table generated from the pinned `opt` by
 `difftest/tools/gen_intrinsic_attrs.py`).
 

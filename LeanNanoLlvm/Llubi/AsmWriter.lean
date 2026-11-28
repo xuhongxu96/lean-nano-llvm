@@ -539,12 +539,22 @@ def mdRefAt (c : WCtx) (i : Nat) : String × Nat :=
     | none => (key, j)
   | _ => ("", i + 1)
 where
+  -- the node's content, as the key that uniques it (every token kind kept: `!{float 5.0}` and
+  -- `!{float 2.5}` are different nodes)
   reprStr : Tok → String
     | .intLit n => s!" {n}"
     | .ident s => s!" {s}"
     | .comma => ","
     | .strLit s => s!" \"{s}\""
     | .metaId m => s!" !{m}"
+    | .fltLit neg m e => s!" {if neg then "-" else ""}{m}e{e}"
+    | .hexLit tag v => s!" 0x{tag}{v}"
+    | .localId id => s!" %{id.toString}"
+    | .globalId id => s!" @{id.toString}"
+    | .attrGrp n => s!" #{n}"
+    | .lbrack => " [" | .rbrack => " ]" | .langle => " <" | .rangle => " >"
+    | .lparen => " (" | .rparen => " )" | .bang => " !" | .colon => ":"
+    | .eq => " =" | .star => " *" | .ellipsis => " ..." | .lpacked => " <{" | .rpacked => " }>"
     | _ => " ?"
 
 /-- Decode the raw (escape-preserving) contents of a `c"..."` literal into bytes. -/

@@ -139,7 +139,9 @@ private def resolveInstr (defs : List (LocalId × LlvmType)) (fuel : Nat) :
     let bundles' ← bundles.mapM fun (tag, bargs) => do
       let bargs' ← bargs.mapM fun (t, e) => do .ok (← resolveType defs fuel t, ← resolveExp defs fuel e)
       .ok (tag, bargs')
-    .ok (.call rTy' fmf callee' args' retAttrs' bundles' isNoRet site)
+    -- the call's function type is compared with the callee's (resolved) prototype type
+    let fnTy' ← site.fnTy?.mapM (resolveType defs fuel)
+    .ok (.call rTy' fmf callee' args' retAttrs' bundles' isNoRet { site with fnTy? := fnTy' })
   | .freeze (t, e) => do .ok (.freeze (← resolveType defs fuel t, ← resolveExp defs fuel e))
   | .bitinsert bTy b vTy v oTy o => do
     .ok (.bitinsert (← resolveType defs fuel bTy) (← resolveExp defs fuel b)

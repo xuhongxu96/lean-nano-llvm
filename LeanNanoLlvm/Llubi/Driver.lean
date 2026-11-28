@@ -329,6 +329,11 @@ def functionAttrKeys (w : WCtx) : List String := Id.run do
         | _ => pure ()
         j := j + 1
       let (attrs, _) := collectAttrs w j
+      -- trailing header properties are not attributes: `align N` is the function's alignment
+      let notAttr (a : String) : Bool :=
+        ["align", "section", "comdat", "gc", "prefix", "prologue", "personality", "partition"].any
+          fun k => a == k || a.startsWith (k ++ " ") || a.startsWith (k ++ "(")
+      let attrs := attrs.filter (fun a => !notAttr a)
       let attrs := match (if fname.startsWith "llvm." then intrinsicAttrsOf? fname else none) with
         | some text => (collectAttrs { w with toks := (AST.Parser.tokenizeWithLines text).1 } 0).1
         | none => attrs
