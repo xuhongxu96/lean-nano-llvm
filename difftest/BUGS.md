@@ -80,8 +80,10 @@ normalizer in `triage_rules.NORMALIZERS` and a `Tests/ll/llubi_*.ll` reproducer.
 
 Follow-ups: **P1** specialized nodes (`!DIFile(...)`) are MDNodes too; metadata nodes are keyed by all their tokens (nodes differing only in float operands were
 uniqued into one); **P2** a function's trailing `align N` is its alignment, not an attribute;
-intrinsic declarations carry LLVM's implicit attribute sets (table generated from the pinned `opt` by
-`difftest/tools/gen_intrinsic_attrs.py`).
+intrinsic declarations carry LLVM's implicit attribute sets, for all 17,094 intrinsics of the pinned
+LLVM (`Intrinsic::getFnAttributes`, dumped by `difftest/tools/gen_intrinsic_attrs.py`), found by
+base name as `Intrinsic::lookupIntrinsicID` does (the first table covered only the corpus's
+intrinsics and guessed others from a neighbour with the same prefix).
 
 ## Tactic bugs (T)
 

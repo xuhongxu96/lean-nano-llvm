@@ -286,25 +286,20 @@ def collectAttrGroups (w : WCtx) : List (Nat × List String) := Id.run do
     | _, _, _, _ => pure ()
   return acc
 
-/-- `intrinsicAttrIndexText` as a list. -/
-private def intrinsicAttrIndex : List (String × Nat) :=
-  (intrinsicAttrIndexText.splitOn "\n").filterMap fun l =>
+/-- `intrinsicAttrIndexText` as a map from base name to attribute-set index (built once). -/
+private def intrinsicAttrIndex : Std.HashMap String Nat :=
+  (intrinsicAttrIndexText.splitOn "\n").foldl (init := {}) fun m l =>
     match l.splitOn "=" with
-    | [n, i] => i.toNat?.map (n, ·)
-    | _ => none
+    | [n, i] => match i.toNat? with | some k => m.insert n k | none => m
+    | _ => m
 
-/-- The attribute set LLVM attaches to the declaration of intrinsic `name` (overloads not in the
-table use an entry with the same base name, e.g. `llvm.smax.i16` that of `llvm.smax.i32`). -/
+/-- The attribute set LLVM attaches to the declaration of intrinsic `name`. The intrinsic is
+found as `Intrinsic::lookupIntrinsicID` finds it: the longest prefix of `name`, ending at a `.`
+or at the end, that is an intrinsic's base name (`llvm.umin.i32` is `llvm.umin`). -/
 def intrinsicAttrsOf? (name : String) : Option String :=
-  let idx? := match intrinsicAttrIndex.find? (·.1 == name) with
-    | some (_, i) => some i
-    | none =>
-      let parts := name.splitOn "."
-      (List.range (parts.length - 1)).reverse.findSome? fun k =>
-        if k < 2 then none
-        else
-          let pre := ".".intercalate (parts.take k) ++ "."
-          (intrinsicAttrIndex.find? (fun (p : String × Nat) => p.1.startsWith pre)).map (fun (p : String × Nat) => p.2)
+  let parts := name.splitOn "."
+  let idx? := (List.range (parts.length + 1)).reverse.findSome? fun k =>
+    if k < 2 then none else intrinsicAttrIndex.get? (".".intercalate (parts.take k))
   idx?.bind (intrinsicAttrSets[·]?)
 
 /-- Function-attribute keys of all function headers (`define`/`declare`), in module order.
