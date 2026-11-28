@@ -348,13 +348,16 @@ def cmd_run_alive2(args) -> int:
 
 def cmd_run_lean(args) -> int:
     w = _work(args)
-    out = w / "results" / "lean.jsonl"
+    out = w / "results" / f"{args.results_name}.jsonl"
+    only = None
+    if args.pairs_file:
+        only = {l.strip() for l in open(args.pairs_file) if l.strip()}
     done = _resume(out, "run_id")
     alive = {r["pair"]: r for r in read_results(w / "results" / f"alive2-{args.config}.jsonl", "pair")}
     kinds = args.obligations.split(",")
     todo = []
     for p in read_jsonl(w / "pairs" / "pairs.jsonl"):
-        if not _shard_ok(p["id"], args.shard):
+        if not _shard_ok(p["id"], args.shard) or (only is not None and p["id"] not in only):
             continue
         for k in kinds:
             rid = f"{p['id']}:{k}"
@@ -534,6 +537,9 @@ def main(argv: list[str]) -> int:
             s.add_argument("--timeout", type=float, default=300, help="s, per obligation checked alone")
             s.add_argument("--batch", type=int, default=16,
                            help="obligations per Lean process (1: one process per obligation)")
+            s.add_argument("--pairs-file", help="only the pairs listed (one id per line)")
+            s.add_argument("--results-name", default="lean",
+                           help="results/<name>.jsonl (a separate set, e.g. a re-run on newer code)")
             s.add_argument("--batch-timeout", type=float, default=900,
                            help="s, per batch; on timeout the batch is re-checked one obligation per process")
 
