@@ -33,6 +33,6 @@ theorem issue_244708 :
   llvm_refine <;> (
     ext i hi
     have hcomp : (112#8)[i]'hi = !((143#8)[i]'hi) := by revert i hi; decide
-    simp [hcomp]; grind)
+    grind)
 
 end LeanNanoLlvm.Tests.Alive2
