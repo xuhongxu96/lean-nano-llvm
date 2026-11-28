@@ -22,6 +22,10 @@ open AST
 def blockAddrKey (fn : FunctionId) (blk : BlockId) : RawId :=
   .name s!"__bb__{fn.toString}__{blk.toString}"
 
+/-- Name of the memory object behind `blockaddress(@fn, %blk)`: llubi prints such pointers with
+the block's label (`ptr 0x8 [L1]`), see `MemoryState.objectDisplayName`. -/
+def blockAddrObjName (blk : BlockId) : String := "__bb__" ++ blk.toString
+
 /--
 Deterministic pure leaf expression evaluator (shared by `Step.EvalExp` and `Exec.execExp`).
 Returns `none` only for compound expressions and `.undef`.

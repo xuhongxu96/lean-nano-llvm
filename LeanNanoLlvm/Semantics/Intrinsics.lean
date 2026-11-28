@@ -210,7 +210,8 @@ theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals
 /-- Check whether an `llvm.assume` operand bundle tag requires evaluating its operand arguments. -/
 def assumeBundleShouldEval (tag : String) : Bool :=
   tag == "nonnull" || tag == "noundef" || tag == "align" ||
-  tag == "dereferenceable" || tag == "dereferenceable_or_null" || tag == "range"
+  tag == "dereferenceable" || tag == "dereferenceable_or_null" || tag == "range" ||
+  tag == "separate_storage"
 
 /-- Evaluate a single `llvm.assume` operand bundle on already-evaluated operand values. -/
 def evalAssumeBundlePure (dl : DataLayout) (mem : MemoryState)
@@ -293,6 +294,10 @@ def evalAssumeBundlePure (dl : DataLayout) (mem : MemoryState)
     | [_, .bv _ .poison, _] | [_, _, .bv _ .poison] =>
       .error (.immediateUB "llvm.assume range bound is poison")
     | _ => .ok ()
-  | _ => .ok ()
+  -- other bundles on pointers (`separate_storage`, ...): llubi only rejects a poison pointer
+  | _ =>
+    match vals with
+    | .ptr _ .poison :: _ => .error (.immediateUB "Assume on poison pointer.")
+    | _ => .ok ()
 
 end LeanNanoLlvm.Semantics

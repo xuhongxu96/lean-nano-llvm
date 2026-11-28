@@ -119,7 +119,7 @@ private def registerBlockAddrs (dl : DataLayout) (cfg : SemanticsConfig)
   | blk :: rest, mem =>
     let key := blockAddrKey fnName blk.id
     if takenBlks.contains key then
-      match mem.allocate dl cfg 0 1 key.toString dl.programAddrSpace .zeroed .func true with
+      match mem.allocate dl cfg 0 1 (blockAddrObjName blk.id) dl.programAddrSpace .zeroed .func false with
       | .error e => .error e
       | .ok (obj, mem') =>
         let ptr := MemoryState.derivePointer dl obj
@@ -137,7 +137,7 @@ private theorem registerBlockAddrs_wf {dl cfg takenBlks fnName blks mem mem'}
     unfold registerBlockAddrs at h
     dsimp only at h
     split at h
-    · cases ha : mem.allocate dl cfg 0 1 (blockAddrKey fnName blk.id).toString dl.programAddrSpace .zeroed .func true with
+    · cases ha : mem.allocate dl cfg 0 1 (blockAddrObjName blk.id) dl.programAddrSpace .zeroed .func false with
       | error e => rw [ha] at h; cases h
       | ok p =>
         rw [ha] at h; obtain ⟨obj, m1⟩ := p
@@ -158,7 +158,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
     match ent with
     | .declaration decl =>
       if takenFns.contains decl.name then
-        match mem.allocate dl cfg 0 1 decl.name.toString dl.programAddrSpace .zeroed .func true with
+        match mem.allocate dl cfg 0 1 decl.name.toString dl.programAddrSpace .zeroed .func false with
         | .error e => .error e
         | .ok (obj, mem') =>
           let ptr := MemoryState.derivePointer dl obj
@@ -169,7 +169,7 @@ private def initModulePass1 (dl : DataLayout) (cfg : SemanticsConfig)
     | .definition defn =>
       let afterFn : Except ExecError MemoryState :=
         if takenFns.contains defn.prototype.name then
-          match mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func true with
+          match mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func false with
           | .error e => .error e
           | .ok (obj, mem') =>
             let ptr := MemoryState.derivePointer dl obj
@@ -243,7 +243,7 @@ private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls
     | declaration decl =>
       dsimp only at h
       split at h
-      · cases ha : mem.allocate dl cfg 0 1 decl.name.toString dl.programAddrSpace .zeroed .func true with
+      · cases ha : mem.allocate dl cfg 0 1 decl.name.toString dl.programAddrSpace .zeroed .func false with
         | error e => rw [ha] at h; cases h
         | ok p =>
           rw [ha] at h; obtain ⟨obj, m1⟩ := p
@@ -252,13 +252,13 @@ private theorem initModulePass1_wf {dl cfg takenFns takenBlks ents mem fns decls
     | definition defn =>
       dsimp only at h
       have hwfAfter : ∀ m2, ((if takenFns.contains defn.prototype.name then
-            match mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func true with
+            match mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func false with
             | .error e => .error e
             | .ok (obj, mem') => .ok (mem'.insertFuncAddr defn.prototype.name obj.baseAddr (MemoryState.derivePointer dl obj))
           else .ok mem) : Except ExecError MemoryState) = .ok m2 → MemoryState.WellFormed m2 := by
         intro m2 hm2
         split at hm2
-        · cases ha : mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func true with
+        · cases ha : mem.allocate dl cfg 0 1 defn.prototype.name.toString dl.programAddrSpace .zeroed .func false with
           | error e => rw [ha] at hm2; cases hm2
           | ok p =>
             rw [ha] at hm2; obtain ⟨obj, m1⟩ := p; cases hm2

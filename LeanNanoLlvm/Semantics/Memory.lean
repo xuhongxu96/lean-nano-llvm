@@ -704,7 +704,11 @@ def isIRGlobalObject (mem : MemoryState) (allocId : AllocId) : Bool :=
 /-- Display name of a memory object as `llubi` prints it (`@g` for IR globals; unnamed stack
 objects print an empty name). -/
 def objectDisplayName (mem : MemoryState) (obj : MemoryObject) : String :=
-  if mem.isIRGlobalObject obj.allocId then "@" ++ obj.name
+  -- a `blockaddress` object prints as its block's label
+  if obj.allocKind == .func && obj.name.startsWith "__bb__" then (obj.name.drop 6).toString
+  -- unnamed (numbered) globals have an empty name in LLVM: `[@]`
+  else if mem.isIRGlobalObject obj.allocId then
+    "@" ++ (if !obj.name.isEmpty && obj.name.all Char.isDigit then "" else obj.name)
   else if obj.allocKind == .stack && !obj.name.isEmpty && obj.name.all Char.isDigit then ""
   else if obj.allocKind == .stack && obj.name.startsWith "alloca." then ""
   else obj.name

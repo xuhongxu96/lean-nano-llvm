@@ -34,6 +34,7 @@ Ids: `B` semantic bugs in lean-nano-llvm, `P` differences in our llubi-compatibl
 | B7 | `!range` metadata with more than one range is ignored. | `range` metadata | `load_range_list_ub.ll` |
 | B8 | Conversions into `ppc_fp128` (`fpext`, `sitofp`, `uitofp`) produce an encoding other than LLVM's double-double layout (our `ppc_fp128` arithmetic itself uses the right one). | Floating-Point Types | `ppc_fp128_fpext_layout.ll`, `ppc_fp128_sitofp_layout.ll` |
 | B10 | `x86_fp80` (the x87 extended format, not an IEEE interchange format) was 79 bits wide in memory and for `bitcast`, without its explicit integer bit: stores and loads of its bits were wrong and `bitcast` from/to `i80` was rejected. Non-canonical x87 encodings are now decoded as `APFloat` does (unnormals and pseudo-infinities/NaNs are NaN, pseudo-denormals have exponent 1). | Data Layout, Floating-Point Types | `x86_fp80_memory_layout.ll`, `x86_fp80_bitcast.ll`, `x86_fp80_noncanonical_encodings.ll` |
+| B11 | An `llvm.assume` operand bundle on a pointer other than the modelled ones (`separate_storage`) ignored a poison pointer, which llubi reports as immediate UB ("Assume on poison pointer."). | `llvm.assume` operand bundles | `llubi_assume_separate_storage_poison.ll` |
 | B9 | A call to a module-defined `@malloc`/`@calloc` (and `operator new`) is replaced by the builtin allocator instead of executing the definition. | (a defined function is executed as defined) | `defined_allocator_is_called.ll` |
 
 Follow-up instances (same ids): **B1** a declared callee's parameter attributes also apply to
@@ -71,6 +72,8 @@ normalizer in `triage_rules.NORMALIZERS` and a `Tests/ll/llubi_*.ll` reproducer.
 | P11 | `dereferenceable` assume-bundle size printed unsigned (llubi: signed). |
 | P12 | Alloca-size UB messages end with an extra `.`. |
 | P14 | A direct call whose type differs from the callee's takes the callee's address (LLVM calls through it as a pointer) and llubi allocates a function object for it, which shifts later stack addresses. Not modelled: function objects llubi allocates for personality functions in some exception-handling code. |
+| P15 | Known, not fixed: a load that violates both `!noundef` and `!dereferenceable` reports the `!dereferenceable` violation (llubi checks `!noundef` first); both are UB at the same load. |
+| P16 | A `blockaddress` pointer printed its object's internal name instead of the block label (`[L1]`); a pointer to an unnamed global printed `[@0]` instead of `[@]`; a store to a function object was reported as a write to constant memory instead of an out-of-bounds access (function objects are not constant in llubi). |
 | P13 | Variadic arguments are not printed on function entry (llubi: `vaarg[i] = <value>`), and a call's function type was printed from the callee instead of the call. |
 
 Follow-ups: **P1** specialized nodes (`!DIFile(...)`) are MDNodes too; **P2** intrinsic

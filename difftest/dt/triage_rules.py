@@ -270,6 +270,10 @@ LLUBI_RULES: list[Rule] = [
          "llubi aborts (assertion failure or fatal error) on a module the LLVM verifier accepts",
          verdicts=("llubi-crash",)),
     # --- oracle does not implement a feature we execute ---------------------------------------
+    Rule("llubi-unsupported-constant", "oracle-unsupported", None,
+         "llubi does not evaluate some constant expressions (e.g. `addrspacecast`) and stops with "
+         "'Unsupported constant'; we evaluate them",
+         llubi_re=r"^Error: Unsupported constant: "),
     Rule("llubi-unrecognized-instruction", "oracle-unsupported", None,
          "llubi stops at an instruction or intrinsic it does not implement; we execute it",
          ldiff_re=r"^Unrecognized instruction:", odiff_re=r"^(?!Unrecognized instruction:)"),
