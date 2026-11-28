@@ -19,8 +19,10 @@ printing back performs:
   callee is variadic;
 * `switch` is laid out over multiple lines.
 
-Everything here is executable-only (`partial`) code used by the `llubi` frontend; it has no role in
-the formal semantics.
+Everything here is executable code used by the `llubi` frontend; it has no role in the formal
+semantics. It is nevertheless total: recursion over types and constants is structural (or
+well-founded on `sizeOf`), and the token-level printers are structural on a fuel budget
+(`WCtx.fuel`), following the convention of `AST.Parser`.
 -/
 
 namespace LeanNanoLlvm.Llubi
@@ -66,7 +68,7 @@ inductive PTy where
   | other (s : String)
 deriving Inhabited, BEq, Repr
 
-partial def PTy.print : PTy → String
+def PTy.print : PTy → String
   | .int w => s!"i{w}"
   | .byte w => s!"b{w}"
   | .float ft => ft.print
@@ -89,7 +91,7 @@ partial def PTy.print : PTy → String
     s!"{r.print} ({", ".intercalate args})"
   | .other s => s
 
-partial def PTy.ofLlvmType : LlvmType → PTy
+def PTy.ofLlvmType : LlvmType → PTy
   | .int w => .int w
   | .byte w => .byte w
   | .float ft => .float ft
@@ -131,15 +133,20 @@ def WCtx.loc (c : WCtx) : RawId → String
   | .anonymous n => "%" ++ toString ((c.localSlots.find? (·.1 == n)).map (·.2) |>.getD n)
   | id => printRawId "%" id
 
+/-- Recursion budget of the token-level printers below. Each recursive call spends one unit, and
+every chain of calls consumes a source token at least every few calls, so the budget is never the
+limiting factor on real input; it only makes termination structural (no `partial`). -/
+def WCtx.fuel (c : WCtx) : Nat := 4 * (c.toks.size + 1)
+
 /-- Resolve named types to their structural definition (bounded depth). -/
-partial def WCtx.resolve (c : WCtx) (t : PTy) (depth : Nat := 16) : PTy :=
-  match t with
-  | .named nm =>
-    if depth == 0 then t else
+def WCtx.resolve (c : WCtx) (t : PTy) (depth : Nat := 16) : PTy :=
+  match t, depth with
+  | .named _, 0 => t
+  | .named nm, depth + 1 =>
     match c.typeDefs.find? (·.1 == nm) with
-    | some (_, d) => c.resolve d (depth - 1)
+    | some (_, d) => c.resolve d depth
     | none => t
-  | _ => t
+  | _, _ => t
 
 /-! ### Constant values -/
 
@@ -190,10 +197,17 @@ def decodeHexFloat (ft : FloatType) (tag : Char) (val : Nat) : Nat :=
     (lo <<< 64) ||| hi
   | _, _ => val
 
+/-- An element of an aggregate constant is smaller than the aggregate (termination measure for the
+structural recursions below, which recurse through `List.map`/`List.all`). -/
+theorem CVal.sizeOf_lt_agg {p : PTy × CVal} {es : List (PTy × CVal)} (h : p ∈ es) :
+    sizeOf p.2 < sizeOf (CVal.agg es) := by
+  have := List.sizeOf_lt_of_mem h
+  cases p; simp_all; omega
+
 namespace CVal
 
 /-- `Constant::isNullValue` for a value of type `t`. -/
-partial def isNull (c : WCtx) (t : PTy) : CVal → Bool
+def isNull (c : WCtx) (t : PTy) : CVal → Bool
   | .zero | .null => true
   | .bool b => !b
   | .int v =>
@@ -206,9 +220,13 @@ partial def isNull (c : WCtx) (t : PTy) : CVal → Bool
     | .float ft => match fpOf ft v with | some f => f.bits.toNat == 0 | _ => false
     | _ => false
   | .str bs => bs.all (· == 0)
-  | .agg es => es.all fun (et, ev) => ev.isNull c et
+  | .agg es => es.attach.all fun ⟨p, _⟩ => p.2.isNull c p.1
   | .splat et v => v.isNull c et
   | _ => false
+termination_by v => v
+decreasing_by
+  · exact CVal.sizeOf_lt_agg ‹_›
+  · simp_wf; omega
 
 def isPoison : CVal → Bool
   | .poison => true
@@ -228,10 +246,10 @@ private def elemOf (c : WCtx) (t : PTy) (i : Nat) : PTy :=
   | _ => .void
 
 /-- Canonicalize a constant the way `llvm::Constant` uniquing does. -/
-partial def canon (c : WCtx) (t : PTy) (v : CVal) : CVal :=
+def canon (c : WCtx) (t : PTy) (v : CVal) : CVal :=
   match v with
   | .agg es0 =>
-    let es := es0.map fun (et, ev) => (et, canon c et ev)
+    let es := es0.attach.map fun ⟨p, _⟩ => (p.1, canon c p.1 p.2)
     let rt := c.resolve t
     match rt with
     | .struct _ _ =>
@@ -280,6 +298,8 @@ partial def canon (c : WCtx) (t : PTy) (v : CVal) : CVal :=
       | .vec false n _ => .agg (List.replicate n (et, ev'))
       | _ => .splat et ev'
   | other => other
+termination_by v
+decreasing_by all_goals first | exact CVal.sizeOf_lt_agg ‹_› | (simp_wf; omega)
 
 /-- `printEscapedString`. -/
 def escapeCString (bytes : List Nat) : String :=
@@ -298,7 +318,7 @@ def signedOfWidth (w : Nat) (v : Int) : Int :=
   if u ≥ 2 ^ (w - 1) then u - 2 ^ w else u
 
 /-- Print a (canonicalized) constant value of type `t` (without the type). -/
-partial def printConst (c : WCtx) (t : PTy) (v : CVal) : String :=
+def printConst (c : WCtx) (t : PTy) (v : CVal) : String :=
   match v with
   | .raw s => s
   | .expr s => s
@@ -330,20 +350,23 @@ partial def printConst (c : WCtx) (t : PTy) (v : CVal) : String :=
     | _ => "<float>"
   | .str bs => "c\"" ++ escapeCString bs ++ "\""
   | .splat et ev =>
+    let evStr := printConst c et ev
     match c.resolve t, ev with
     | .vec true n _, .raw _ | .vec true n _, .expr _ =>
       -- LLVM prints a scalable splat of a non-arithmetic constant as a `shufflevector` expression
       let vt := PTy.vec true n et
       let mt := PTy.vec true n (.int 32)
-      s!"shufflevector ({vt.print} insertelement ({vt.print} poison, {et.print} {printConst c et ev}, i64 0), {vt.print} poison, {mt.print} zeroinitializer)"
-    | _, _ => s!"splat ({et.print} {printConst c et ev})"
+      s!"shufflevector ({vt.print} insertelement ({vt.print} poison, {et.print} {evStr}, i64 0), {vt.print} poison, {mt.print} zeroinitializer)"
+    | _, _ => s!"splat ({et.print} {evStr})"
   | .agg es =>
-    let items := es.map fun (et, ev) => s!"{et.print} {printConst c et ev}"
+    let items := es.attach.map fun ⟨p, _⟩ => s!"{p.1.print} {printConst c p.1 p.2}"
     match c.resolve t with
     | .vec .. => "<" ++ ", ".intercalate items ++ ">"
     | .arr .. => "[" ++ ", ".intercalate items ++ "]"
     | .struct true _ => "<{ " ++ ", ".intercalate items ++ " }>"
     | _ => "{ " ++ ", ".intercalate items ++ " }"
+termination_by v
+decreasing_by all_goals first | exact CVal.sizeOf_lt_agg ‹_› | (simp_wf; omega)
 
 /-! ### Token-level parsing for printing -/
 
@@ -363,68 +386,80 @@ private def widthOf? (pfx : Char) (s : String) : Option Nat :=
 mutual
 
 /-- Parse a type starting at token `i` (no function-type suffix). -/
-partial def parseTyAt (c : WCtx) (i : Nat) : Option (PTy × Nat) :=
-  match c.tok i with
-  | .ident s =>
-    if let some ft := isFloatName s then some (.float ft, i + 1)
-    else if let some w := widthOf? 'i' s then some (.int w, i + 1)
-    else if let some w := widthOf? 'b' s then some (.byte w, i + 1)
-    else match s with
-      | "ptr" =>
-        if c.tok (i + 1) == .ident "addrspace" && c.tok (i + 2) == .lparen then
-          match c.tok (i + 3) with
-          | .intLit n => some (.ptr n.toNat, i + 5)
-          | _ => some (.ptr 0, i + 1)
-        else some (.ptr 0, i + 1)
-      | "void" => some (.void, i + 1)
-      | "label" => some (.label, i + 1)
-      | "metadata" => some (.metadata, i + 1)
-      | "token" => some (.token, i + 1)
-      | "opaque" => some (.opaque, i + 1)
-      | "x86_amx" => some (.other "x86_amx", i + 1)
-      | _ => none
-  | .localId nm =>
-    if c.typeDefs.any (·.1 == nm) then some (.named nm, i + 1) else none
-  | .langle =>
-    match c.tok (i + 1), c.tok (i + 2) with
-    | .ident "vscale", .ident "x" =>
-      match c.tok (i + 3), c.tok (i + 4) with
+def parseTyAtF (fuel : Nat) (c : WCtx) (i : Nat) : Option (PTy × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+    match c.tok i with
+    | .ident s =>
+      if let some ft := isFloatName s then some (.float ft, i + 1)
+      else if let some w := widthOf? 'i' s then some (.int w, i + 1)
+      else if let some w := widthOf? 'b' s then some (.byte w, i + 1)
+      else match s with
+        | "ptr" =>
+          if c.tok (i + 1) == .ident "addrspace" && c.tok (i + 2) == .lparen then
+            match c.tok (i + 3) with
+            | .intLit n => some (.ptr n.toNat, i + 5)
+            | _ => some (.ptr 0, i + 1)
+          else some (.ptr 0, i + 1)
+        | "void" => some (.void, i + 1)
+        | "label" => some (.label, i + 1)
+        | "metadata" => some (.metadata, i + 1)
+        | "token" => some (.token, i + 1)
+        | "opaque" => some (.opaque, i + 1)
+        | "x86_amx" => some (.other "x86_amx", i + 1)
+        | _ => none
+    | .localId nm =>
+      if c.typeDefs.any (·.1 == nm) then some (.named nm, i + 1) else none
+    | .langle =>
+      match c.tok (i + 1), c.tok (i + 2) with
+      | .ident "vscale", .ident "x" =>
+        match c.tok (i + 3), c.tok (i + 4) with
+        | .intLit n, .ident "x" =>
+          match parseTyAtF fuel c (i + 5) with
+          | some (e, j) => if c.tok j == .rangle then some (.vec true n.toNat e, j + 1) else none
+          | none => none
+        | _, _ => none
       | .intLit n, .ident "x" =>
-        match parseTyAt c (i + 5) with
-        | some (e, j) => if c.tok j == .rangle then some (.vec true n.toNat e, j + 1) else none
+        match parseTyAtF fuel c (i + 3) with
+        | some (e, j) => if c.tok j == .rangle then some (.vec false n.toNat e, j + 1) else none
         | none => none
       | _, _ => none
-    | .intLit n, .ident "x" =>
-      match parseTyAt c (i + 3) with
-      | some (e, j) => if c.tok j == .rangle then some (.vec false n.toNat e, j + 1) else none
-      | none => none
-    | _, _ => none
-  | .lbrack =>
-    match c.tok (i + 1), c.tok (i + 2) with
-    | .intLit n, .ident "x" =>
-      match parseTyAt c (i + 3) with
-      | some (e, j) => if c.tok j == .rbrack then some (.arr n.toNat e, j + 1) else none
-      | none => none
-    | _, _ => none
-  | .lbrace => parseStructTy c (i + 1) false
-  | .lpacked => parseStructTy c (i + 1) true
-  | _ => none
+    | .lbrack =>
+      match c.tok (i + 1), c.tok (i + 2) with
+      | .intLit n, .ident "x" =>
+        match parseTyAtF fuel c (i + 3) with
+        | some (e, j) => if c.tok j == .rbrack then some (.arr n.toNat e, j + 1) else none
+        | none => none
+      | _, _ => none
+    | .lbrace => parseStructTyF fuel c (i + 1) false
+    | .lpacked => parseStructTyF fuel c (i + 1) true
+    | _ => none
 
 /-- Parse `T, T, ... }` (or `}>` when packed); fails if a value follows a field type. -/
-partial def parseStructTy (c : WCtx) (i : Nat) (packed : Bool) : Option (PTy × Nat) :=
-  let close := if packed then Tok.rpacked else Tok.rbrace
-  if c.tok i == close then some (.struct packed [], i + 1)
-  else
-    let rec go (j : Nat) (acc : List PTy) : Option (PTy × Nat) :=
-      match parseTyAt c j with
-      | some (t, k) =>
-        if c.tok k == .comma then go (k + 1) (t :: acc)
-        else if c.tok k == close then some (.struct packed (t :: acc).reverse, k + 1)
-        else none
-      | none => none
-    go i []
+def parseStructTyF (fuel : Nat) (c : WCtx) (i : Nat) (packed : Bool) : Option (PTy × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+    let close := if packed then Tok.rpacked else Tok.rbrace
+    if c.tok i == close then some (.struct packed [], i + 1)
+    else
+      let rec go (fuel : Nat) (j : Nat) (acc : List PTy) : Option (PTy × Nat) :=
+        match fuel with
+        | 0 => none
+        | fuel + 1 =>
+          match parseTyAtF fuel c j with
+          | some (t, k) =>
+            if c.tok k == .comma then go fuel (k + 1) (t :: acc)
+            else if c.tok k == close then some (.struct packed (t :: acc).reverse, k + 1)
+            else none
+          | none => none
+      go fuel i []
 
 end
+
+/-- Parse a type starting at token `i` (no function-type suffix). -/
+def parseTyAt (c : WCtx) (i : Nat) : Option (PTy × Nat) := parseTyAtF c.fuel c i
 
 /-- Does token `i` start a value (operand / constant)? -/
 def startsValue (c : WCtx) (i : Nat) : Bool :=
@@ -464,13 +499,20 @@ def canonFlags (fs : List String) : List String :=
   wrap ++ fmf
 
 /-- Collect flag words starting at `i`. -/
-partial def collectFlags (c : WCtx) (i : Nat) (acc : List String := []) : List String × Nat :=
-  match c.tok i with
-  | .ident s => if flagWords.contains s then collectFlags c (i + 1) (acc ++ [s]) else (acc, i)
-  | _ => (acc, i)
+def collectFlagsF (fuel : Nat) (c : WCtx) (i : Nat) (acc : List String := []) : List String × Nat :=
+  match fuel with
+  | 0 => (acc, i)
+  | fuel + 1 =>
+    match c.tok i with
+    | .ident s => if flagWords.contains s then collectFlagsF fuel c (i + 1) (acc ++ [s]) else (acc, i)
+    | _ => (acc, i)
+
+/-- `collectFlagsF` with the full recursion budget `c.fuel`. -/
+def collectFlags (c : WCtx) (i : Nat) (acc : List String := []) : List String × Nat :=
+  collectFlagsF c.fuel c i (acc := acc)
 
 /-- Canonical metadata reference text for `!name` / inline `!{...}` at token `i`. -/
-partial def mdRefAt (c : WCtx) (i : Nat) : String × Nat :=
+def mdRefAt (c : WCtx) (i : Nat) : String × Nat :=
   match c.tok i with
   | .metaId nm =>
     let key := (c.mdDefs.find? (·.1 == nm)).map (·.2) |>.getD ("!" ++ nm)
@@ -479,13 +521,16 @@ partial def mdRefAt (c : WCtx) (i : Nat) : String × Nat :=
     | none => ("!" ++ nm, i + 1)
   | .bang =>
     -- inline node `!{ ... }`
-    let rec skip (j : Nat) (depth : Nat) (acc : String) : String × Nat :=
-      match c.tok j with
-      | .lbrace => skip (j + 1) (depth + 1) (acc ++ "{")
-      | .rbrace => if depth ≤ 1 then (acc ++ "}", j + 1) else skip (j + 1) (depth - 1) (acc ++ "}")
-      | .eof => (acc, j)
-      | t => skip (j + 1) depth (acc ++ reprStr t)
-    let (key, j) := skip (i + 1) 0 "!"
+    let rec skip (fuel : Nat) (j : Nat) (depth : Nat) (acc : String) : String × Nat :=
+      match fuel with
+      | 0 => (acc, j)
+      | fuel + 1 =>
+        match c.tok j with
+        | .lbrace => skip fuel (j + 1) (depth + 1) (acc ++ "{")
+        | .rbrace => if depth ≤ 1 then (acc ++ "}", j + 1) else skip fuel (j + 1) (depth - 1) (acc ++ "}")
+        | .eof => (acc, j)
+        | t => skip fuel (j + 1) depth (acc ++ reprStr t)
+    let (key, j) := skip c.fuel (i + 1) 0 "!"
     match c.mdSlots.find? (·.1 == key) with
     | some (_, n) => (s!"!{n}", j)
     | none => (key, j)
@@ -499,311 +544,8 @@ where
     | .metaId m => s!" !{m}"
     | _ => " ?"
 
-mutual
-
-/-- Parse a value of type `t` at token `i`. -/
-partial def parseValAt (c : WCtx) (t : PTy) (i : Nat) : Option (CVal × Nat) :=
-  let rt := c.resolve t
-  match c.tok i with
-  | .intLit n =>
-    match rt with
-    | .float _ => some (.int n, i + 1)
-    | _ => some (.int n, i + 1)
-  | .fltLit neg m e => some (.fpDec neg m e, i + 1)
-  | .hexLit tag v =>
-    match rt with
-    | .float ft => some (.fpBits (decodeHexFloat ft tag v), i + 1)
-    | _ => some (.int v, i + 1)
-  | .localId id => some (.raw (c.loc id), i + 1)
-  | .globalId id => some (.raw (printRawId "@" id), i + 1)
-  | .metaId _ | .bang =>
-    let (s, j) := mdRefAt c i
-    some (.raw s, j)
-  | .ident s =>
-    match s with
-    | "true" => some (.bool true, i + 1)
-    | "false" => some (.bool false, i + 1)
-    | "null" => some (.null, i + 1)
-    | "undef" => some (.undef, i + 1)
-    | "poison" => some (.poison, i + 1)
-    | "zeroinitializer" => some (.zero, i + 1)
-    | "none" => some (.none, i + 1)
-    | "c" =>
-      match c.tok (i + 1) with
-      | .strLit str => some (.str (decodeCStr str), i + 2)
-      | _ => none
-    | "splat" =>
-      if c.tok (i + 1) == .lparen then
-        match parseTyAt c (i + 2) with
-        | some (et, j) =>
-          match parseValAt c et j with
-          | some (ev, k) => if c.tok k == .rparen then some (.splat et ev, k + 1) else none
-          | none => none
-        | none => none
-      else none
-    | "blockaddress" =>
-      match c.tok (i + 1), c.tok (i + 2), c.tok (i + 3), c.tok (i + 4), c.tok (i + 5) with
-      | .lparen, .globalId f, .comma, .localId b, .rparen =>
-        some (.raw s!"blockaddress({printRawId "@" f}, {c.loc b})", i + 6)
-      | _, _, _, _, _ => none
-    | "dso_local_equivalent" | "no_cfi" =>
-      match c.tok (i + 1) with
-      | .globalId f => some (.raw s!"{s} {printRawId "@" f}", i + 2)
-      | _ => none
-    | "+inf" | "inf" => some (.fpSpec false true false 0, i + 1)
-    | "-inf" => some (.fpSpec true true false 0, i + 1)
-    | "+qnan" | "qnan" => some (.fpSpec false false true 0, i + 1)
-    | "-qnan" => some (.fpSpec true false true 0, i + 1)
-    | "+nan" | "nan" | "-nan" | "+snan" | "snan" | "-snan" =>
-      let neg := s.startsWith "-"
-      let quiet := !(s.endsWith "snan")
-      match c.tok (i + 1), c.tok (i + 2), c.tok (i + 3) with
-      | .lparen, .hexLit _ p, .rparen => some (.fpSpec neg false quiet p, i + 4)
-      | .lparen, .intLit p, .rparen => some (.fpSpec neg false quiet p.toNat, i + 4)
-      | _, _, _ => some (.fpSpec neg false quiet 0, i + 1)
-    | _ =>
-      if (s.startsWith "u0x" || s.startsWith "s0x") && s.length > 3 then
-        let hex := (s.drop 3).toString
-        let v := hex.foldl (fun acc ch =>
-          let d := if ch.isDigit then ch.toNat - '0'.toNat
-            else if 'a' ≤ ch && ch ≤ 'f' then ch.toNat - 'a'.toNat + 10
-            else if 'A' ≤ ch && ch ≤ 'F' then ch.toNat - 'A'.toNat + 10 else 0
-          acc * 16 + d) 0
-        some (.int v, i + 1)
-      else if s == "insertelement" && (foldInsertElement c (i + 1)).isSome then
-        foldInsertElement c (i + 1)
-      else if s == "shufflevector" && (foldShuffleVector c (i + 1)).isSome then
-        foldShuffleVector c (i + 1)
-      else if constExprOps.contains s then
-        match printConstExpr c s (i + 1) with
-        | some (str, j) => some (.expr str, j)
-        | none => none
-      else none
-  | .langle =>
-    match parseTypedList c (i + 1) .rangle with
-    | some (es, j) => some (.agg es, j)
-    | none => none
-  | .lbrack =>
-    match parseTypedList c (i + 1) .rbrack with
-    | some (es, j) => some (.agg es, j)
-    | none => none
-  | .lbrace =>
-    match parseTypedList c (i + 1) .rbrace with
-    | some (es, j) => some (.agg es, j)
-    | none => none
-  | .lpacked =>
-    match parseTypedList c (i + 1) .rpacked with
-    | some (es, j) => some (.agg es, j)
-    | none => none
-  | _ => none
-
-/-- `insertelement (<N x T> vec, T elt, Ti k)` of a constant vector at a constant index folds to a
-vector constant (LLVM's constant folder); `none` if not foldable. -/
-partial def foldInsertElement (c : WCtx) (i : Nat) : Option (CVal × Nat) :=
-  if c.tok i != .lparen then none else
-  match parseTyAt c (i + 1) with
-  | some (vt@(.vec false n et), j) =>
-    match parseValAt c vt j with
-    | some (vv, j2) =>
-      if c.tok j2 != .comma then none else
-      match parseTyAt c (j2 + 1) with
-      | some (et', j3) =>
-        match parseValAt c et' j3 with
-        | some (ev, j4) =>
-          if c.tok j4 != .comma then none else
-          match parseTyAt c (j4 + 1) with
-          | some (it, j5) =>
-            match parseValAt c it j5 with
-            | some (CVal.int k, j6) =>
-              if c.tok j6 != .rparen then none else
-              let nullOf : CVal := match c.resolve et with
-                | .int _ | .byte _ => .int 0
-                | .float _ => .fpBits 0
-                | .ptr _ => .null
-                | _ => .zero
-              let elems? : Option (List (PTy × CVal)) := match canon c vt vv with
-                | .agg es => some es
-                | .zero => some (List.replicate n (et, nullOf))
-                | .poison => some (List.replicate n (et, .poison))
-                | .undef => some (List.replicate n (et, .undef))
-                | .splat t v => some (List.replicate n (t, v))
-                | _ => none
-              match elems? with
-              | some es =>
-                if k < 0 || k.toNat ≥ n then some (.poison, j6 + 1)
-                else some (.agg (es.set k.toNat (et, ev)), j6 + 1)
-              | none => none
-            | _ => none
-          | none => none
-        | none => none
-      | none => none
-    | none => none
-  | _ => none
-
-/-- The elements of a fixed vector constant `v : <n x et>`, if it is in a foldable form. -/
-partial def vecElems (c : WCtx) (vt : PTy) (n : Nat) (et : PTy) (v : CVal) :
-    Option (List (PTy × CVal)) :=
-  let nullOf : CVal := match c.resolve et with
-    | .int _ | .byte _ => .int 0
-    | .float _ => .fpBits 0
-    | .ptr _ => .null
-    | _ => .zero
-  match canon c vt v with
-  | .agg es => some es
-  | .zero => some (List.replicate n (et, nullOf))
-  | .poison => some (List.replicate n (et, .poison))
-  | .undef => some (List.replicate n (et, .undef))
-  | .splat t v => some (List.replicate n (t, v))
-  | _ => none
-
-/-- `shufflevector (<N x T> v1, <N x T> v2, <M x i32> mask)` of fixed vectors folds to a vector
-of per-element `extractelement`s (LLVM's constant folder); `none` if not foldable. -/
-partial def foldShuffleVector (c : WCtx) (i : Nat) : Option (CVal × Nat) :=
-  if c.tok i != .lparen then none else
-  match parseTyAt c (i + 1) with
-  | some (vt@(.vec false n et), j) =>
-    match parseValAt c vt j with
-    | some (v1, j2) =>
-      if c.tok j2 != .comma then none else
-      match parseTyAt c (j2 + 1) with
-      | some (vt2, j3) =>
-        match parseValAt c vt2 j3 with
-        | some (v2, j4) =>
-          if c.tok j4 != .comma then none else
-          match parseTyAt c (j4 + 1) with
-          | some (mt@(.vec false m mEt), j5) =>
-            match parseValAt c mt j5 with
-            | some (mv, j6) =>
-              if c.tok j6 != .rparen then none else
-              match vecElems c mt m mEt mv with
-              | some mask =>
-                let pick (src : CVal) (k : Nat) : CVal :=
-                  match vecElems c vt n et src with
-                  | some es => (es.getD k (et, .poison)).2
-                  | none => .expr s!"extractelement ({vt.print} {printConst c vt (canon c vt src)}, i32 {k})"
-                let elems := mask.map fun (_, mk) =>
-                  match mk with
-                  | .int k =>
-                    if k < 0 then (et, CVal.poison)
-                    else if k.toNat < n then (et, pick v1 k.toNat)
-                    else if k.toNat < 2 * n then (et, pick v2 (k.toNat - n))
-                    else (et, .poison)
-                  | _ => (et, .poison)
-                some (.agg elems, j6 + 1)
-              | none => none
-            | none => none
-          | _ => none
-        | none => none
-      | none => none
-    | none => none
-  | _ => none
-
-/-- Parse `T v, T v, ... <close>`. -/
-partial def parseTypedList (c : WCtx) (i : Nat) (close : Tok) : Option (List (PTy × CVal) × Nat) :=
-  if c.tok i == close then some ([], i + 1)
-  else
-    let rec go (j : Nat) (acc : List (PTy × CVal)) : Option (List (PTy × CVal) × Nat) :=
-      match parseTyAt c j with
-      | some (t, k) =>
-        match parseValAt c t k with
-        | some (v, l) =>
-          if c.tok l == .comma then go (l + 1) ((t, v) :: acc)
-          else if c.tok l == close then some (((t, v) :: acc).reverse, l + 1)
-          else none
-        | none => none
-      | none => none
-    go i []
-
-/-- Print a constant expression `op [flags] (operands [to T])` starting after the opcode. -/
-partial def printConstExpr (c : WCtx) (op : String) (i : Nat) : Option (String × Nat) :=
-  let (flags, j0) := collectFlags c i
-  let flagStr := String.join ((canonFlags flags).map (" " ++ ·))
-  if c.tok j0 != .lparen then none
-  else
-    -- GEP source element type
-    let (pre, j1) : String × Nat :=
-      if op == "getelementptr" then
-        match parseTyAt c (j0 + 1) with
-        | some (st, k) => (st.print ++ ", ", if c.tok k == .comma then k + 1 else k)
-        | none => ("", j0 + 1)
-      else ("", j0 + 1)
-    let rec go (j : Nat) (acc : List (PTy × CVal)) : Option (List (PTy × CVal) × Nat) :=
-      match parseTyAt c j with
-      | some (t, k) =>
-        match parseValAt c t k with
-        | some (v, l) =>
-          if c.tok l == .comma then go (l + 1) ((t, canon c t v) :: acc)
-          else some (((t, canon c t v) :: acc).reverse, l)
-        | none => none
-      | none => none
-    match go j1 [] with
-    | some (ops0, k) =>
-      -- A vector GEP splats its scalar indices (LLParser).
-      let vecLen? : Option Nat := ops0.findSome? fun (t, _) =>
-        match c.resolve t with | .vec false n _ => some n | _ => none
-      let ops := match op, vecLen?, ops0 with
-        | "getelementptr", some n, base :: idxs =>
-          base :: idxs.map fun (t, v) => match c.resolve t with
-            | it@(.int _) => (PTy.vec false n it, canon c (.vec false n it) (.splat it v))
-            | _ => (t, v)
-        | _, _, _ => ops0
-      let items := ops.map fun (t, v) => s!"{t.print} {printConst c t v}"
-      let (toTy?, k2) : Option PTy × Nat :=
-        if c.tok k == .ident "to" then
-          match parseTyAt c (k + 1) with
-          | some (tt, k3) => (some tt, k3)
-          | none => (none, k + 1)
-        else (none, k)
-      let toStr := match toTy? with | some tt => s!" to {tt.print}" | none => ""
-      if c.tok k2 != .rparen then none
-      else
-        -- LLVM folds a binary operator on fixed vectors into a vector of element operations.
-        let binOps := ["add", "sub", "mul", "xor", "shl"]
-        let foldBin? : Option (List (PTy × CVal)) :=
-          match ops with
-          | [(vt@(.vec false n et), a), (_, b)] =>
-            if !binOps.contains op || toTy?.isSome then none else
-            match vecElems c vt n et a, vecElems c vt n et b with
-            | some as, some bs =>
-              some ((as.zip bs).map fun ((_, x), (_, y)) =>
-                match x, y, c.resolve et with
-                | .int xi, .int yi, .int w =>
-                  if !flags.isEmpty && !(op == "xor") then
-                    (et, .expr s!"{op}{flagStr} ({et.print} {printConst c et x}, {et.print} {printConst c et y})")
-                  else
-                    let m : Int := 2 ^ w
-                    let r : Int := match op with
-                      | "add" => xi + yi | "sub" => xi - yi | "mul" => xi * yi
-                      | "xor" => Int.ofNat ((xi % m).toNat ^^^ (yi % m).toNat)
-                      | _ => if yi.toNat < w then xi * 2 ^ yi.toNat else 0
-                    let u := r % m
-                    (et, .int (if u ≥ m / 2 then u - m else u))
-                | .poison, _, _ | _, .poison, _ => (et, .poison)
-                | _, _, _ =>
-                  (et, .expr s!"{op}{flagStr} ({et.print} {printConst c et x}, {et.print} {printConst c et y})"))
-            | _, _ => none
-          | _ => none
-        match foldBin? with
-        | some es => some (printConst c (ops.head!.1) (canon c (ops.head!.1) (.agg es)), k2 + 1)
-        | none =>
-        -- LLVM folds a (non-bitcast) cast of a fixed vector into a vector of element casts
-        match toTy?, ops with
-        | some (.vec false n dstElem), [(srcTy@(.vec false _ srcElem), v)] =>
-          if op == "bitcast" then some (s!"{op}{flagStr} ({pre}{", ".intercalate items}{toStr})", k2 + 1)
-          else
-            let elems := (List.range n).map fun idx =>
-              let srcElemStr := match v with
-                | .agg es => match es[idx]? with
-                  | some (et, ev) => s!"{et.print} {printConst c et ev}"
-                  | none => s!"{srcElem.print} poison"
-                | _ => s!"{srcElem.print} extractelement ({srcTy.print} {printConst c srcTy v}, i32 {idx})"
-              s!"{dstElem.print} {op}{flagStr} ({srcElemStr} to {dstElem.print})"
-            some ("<" ++ ", ".intercalate elems ++ ">", k2 + 1)
-        | _, _ => some (s!"{op}{flagStr} ({pre}{", ".intercalate items}{toStr})", k2 + 1)
-    | none => none
-
 /-- Decode the raw (escape-preserving) contents of a `c"..."` literal into bytes. -/
-partial def decodeCStr (s : String) : List Nat :=
+def decodeCStr (s : String) : List Nat :=
   let rec go : List Char → List Nat
     | [] => []
     | '\\' :: a :: b :: rest =>
@@ -826,9 +568,337 @@ partial def decodeCStr (s : String) : List Nat :=
       else
         (0xF0 ||| (n >>> 18)) :: (0x80 ||| ((n >>> 12) &&& 0x3F)) ::
           (0x80 ||| ((n >>> 6) &&& 0x3F)) :: (0x80 ||| (n &&& 0x3F)) :: go rest
+  termination_by l => l.length
   go s.toList
 
+/-- The elements of a fixed vector constant `v : <n x et>`, if it is in a foldable form. -/
+def vecElems (c : WCtx) (vt : PTy) (n : Nat) (et : PTy) (v : CVal) :
+    Option (List (PTy × CVal)) :=
+  let nullOf : CVal := match c.resolve et with
+    | .int _ | .byte _ => .int 0
+    | .float _ => .fpBits 0
+    | .ptr _ => .null
+    | _ => .zero
+  match canon c vt v with
+  | .agg es => some es
+  | .zero => some (List.replicate n (et, nullOf))
+  | .poison => some (List.replicate n (et, .poison))
+  | .undef => some (List.replicate n (et, .undef))
+  | .splat t v => some (List.replicate n (t, v))
+  | _ => none
+
+mutual
+
+/-- Parse a value of type `t` at token `i`. -/
+def parseValAtF (fuel : Nat) (c : WCtx) (t : PTy) (i : Nat) : Option (CVal × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+    let rt := c.resolve t
+    match c.tok i with
+    | .intLit n =>
+      match rt with
+      | .float _ => some (.int n, i + 1)
+      | _ => some (.int n, i + 1)
+    | .fltLit neg m e => some (.fpDec neg m e, i + 1)
+    | .hexLit tag v =>
+      match rt with
+      | .float ft => some (.fpBits (decodeHexFloat ft tag v), i + 1)
+      | _ => some (.int v, i + 1)
+    | .localId id => some (.raw (c.loc id), i + 1)
+    | .globalId id => some (.raw (printRawId "@" id), i + 1)
+    | .metaId _ | .bang =>
+      let (s, j) := mdRefAt c i
+      some (.raw s, j)
+    | .ident s =>
+      match s with
+      | "true" => some (.bool true, i + 1)
+      | "false" => some (.bool false, i + 1)
+      | "null" => some (.null, i + 1)
+      | "undef" => some (.undef, i + 1)
+      | "poison" => some (.poison, i + 1)
+      | "zeroinitializer" => some (.zero, i + 1)
+      | "none" => some (.none, i + 1)
+      | "c" =>
+        match c.tok (i + 1) with
+        | .strLit str => some (.str (decodeCStr str), i + 2)
+        | _ => none
+      | "splat" =>
+        if c.tok (i + 1) == .lparen then
+          match parseTyAt c (i + 2) with
+          | some (et, j) =>
+            match parseValAtF fuel c et j with
+            | some (ev, k) => if c.tok k == .rparen then some (.splat et ev, k + 1) else none
+            | none => none
+          | none => none
+        else none
+      | "blockaddress" =>
+        match c.tok (i + 1), c.tok (i + 2), c.tok (i + 3), c.tok (i + 4), c.tok (i + 5) with
+        | .lparen, .globalId f, .comma, .localId b, .rparen =>
+          some (.raw s!"blockaddress({printRawId "@" f}, {c.loc b})", i + 6)
+        | _, _, _, _, _ => none
+      | "dso_local_equivalent" | "no_cfi" =>
+        match c.tok (i + 1) with
+        | .globalId f => some (.raw s!"{s} {printRawId "@" f}", i + 2)
+        | _ => none
+      | "+inf" | "inf" => some (.fpSpec false true false 0, i + 1)
+      | "-inf" => some (.fpSpec true true false 0, i + 1)
+      | "+qnan" | "qnan" => some (.fpSpec false false true 0, i + 1)
+      | "-qnan" => some (.fpSpec true false true 0, i + 1)
+      | "+nan" | "nan" | "-nan" | "+snan" | "snan" | "-snan" =>
+        let neg := s.startsWith "-"
+        let quiet := !(s.endsWith "snan")
+        match c.tok (i + 1), c.tok (i + 2), c.tok (i + 3) with
+        | .lparen, .hexLit _ p, .rparen => some (.fpSpec neg false quiet p, i + 4)
+        | .lparen, .intLit p, .rparen => some (.fpSpec neg false quiet p.toNat, i + 4)
+        | _, _, _ => some (.fpSpec neg false quiet 0, i + 1)
+      | _ =>
+        if (s.startsWith "u0x" || s.startsWith "s0x") && s.length > 3 then
+          let hex := (s.drop 3).toString
+          let v := hex.foldl (fun acc ch =>
+            let d := if ch.isDigit then ch.toNat - '0'.toNat
+              else if 'a' ≤ ch && ch ≤ 'f' then ch.toNat - 'a'.toNat + 10
+              else if 'A' ≤ ch && ch ≤ 'F' then ch.toNat - 'A'.toNat + 10 else 0
+            acc * 16 + d) 0
+          some (.int v, i + 1)
+        else if s == "insertelement" && (foldInsertElementF fuel c (i + 1)).isSome then
+          foldInsertElementF fuel c (i + 1)
+        else if s == "shufflevector" && (foldShuffleVectorF fuel c (i + 1)).isSome then
+          foldShuffleVectorF fuel c (i + 1)
+        else if constExprOps.contains s then
+          match printConstExprF fuel c s (i + 1) with
+          | some (str, j) => some (.expr str, j)
+          | none => none
+        else none
+    | .langle =>
+      match parseTypedListF fuel c (i + 1) .rangle with
+      | some (es, j) => some (.agg es, j)
+      | none => none
+    | .lbrack =>
+      match parseTypedListF fuel c (i + 1) .rbrack with
+      | some (es, j) => some (.agg es, j)
+      | none => none
+    | .lbrace =>
+      match parseTypedListF fuel c (i + 1) .rbrace with
+      | some (es, j) => some (.agg es, j)
+      | none => none
+    | .lpacked =>
+      match parseTypedListF fuel c (i + 1) .rpacked with
+      | some (es, j) => some (.agg es, j)
+      | none => none
+    | _ => none
+
+/-- `insertelement (<N x T> vec, T elt, Ti k)` of a constant vector at a constant index folds to a
+vector constant (LLVM's constant folder); `none` if not foldable. -/
+def foldInsertElementF (fuel : Nat) (c : WCtx) (i : Nat) : Option (CVal × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+    if c.tok i != .lparen then none else
+    match parseTyAt c (i + 1) with
+    | some (vt@(.vec false n et), j) =>
+      match parseValAtF fuel c vt j with
+      | some (vv, j2) =>
+        if c.tok j2 != .comma then none else
+        match parseTyAt c (j2 + 1) with
+        | some (et', j3) =>
+          match parseValAtF fuel c et' j3 with
+          | some (ev, j4) =>
+            if c.tok j4 != .comma then none else
+            match parseTyAt c (j4 + 1) with
+            | some (it, j5) =>
+              match parseValAtF fuel c it j5 with
+              | some (CVal.int k, j6) =>
+                if c.tok j6 != .rparen then none else
+                let nullOf : CVal := match c.resolve et with
+                  | .int _ | .byte _ => .int 0
+                  | .float _ => .fpBits 0
+                  | .ptr _ => .null
+                  | _ => .zero
+                let elems? : Option (List (PTy × CVal)) := match canon c vt vv with
+                  | .agg es => some es
+                  | .zero => some (List.replicate n (et, nullOf))
+                  | .poison => some (List.replicate n (et, .poison))
+                  | .undef => some (List.replicate n (et, .undef))
+                  | .splat t v => some (List.replicate n (t, v))
+                  | _ => none
+                match elems? with
+                | some es =>
+                  if k < 0 || k.toNat ≥ n then some (.poison, j6 + 1)
+                  else some (.agg (es.set k.toNat (et, ev)), j6 + 1)
+                | none => none
+              | _ => none
+            | none => none
+          | none => none
+        | none => none
+      | none => none
+    | _ => none
+
+/-- `shufflevector (<N x T> v1, <N x T> v2, <M x i32> mask)` of fixed vectors folds to a vector
+of per-element `extractelement`s (LLVM's constant folder); `none` if not foldable. -/
+def foldShuffleVectorF (fuel : Nat) (c : WCtx) (i : Nat) : Option (CVal × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+    if c.tok i != .lparen then none else
+    match parseTyAt c (i + 1) with
+    | some (vt@(.vec false n et), j) =>
+      match parseValAtF fuel c vt j with
+      | some (v1, j2) =>
+        if c.tok j2 != .comma then none else
+        match parseTyAt c (j2 + 1) with
+        | some (vt2, j3) =>
+          match parseValAtF fuel c vt2 j3 with
+          | some (v2, j4) =>
+            if c.tok j4 != .comma then none else
+            match parseTyAt c (j4 + 1) with
+            | some (mt@(.vec false m mEt), j5) =>
+              match parseValAtF fuel c mt j5 with
+              | some (mv, j6) =>
+                if c.tok j6 != .rparen then none else
+                match vecElems c mt m mEt mv with
+                | some mask =>
+                  let pick (src : CVal) (k : Nat) : CVal :=
+                    match vecElems c vt n et src with
+                    | some es => (es.getD k (et, .poison)).2
+                    | none => .expr s!"extractelement ({vt.print} {printConst c vt (canon c vt src)}, i32 {k})"
+                  let elems := mask.map fun (_, mk) =>
+                    match mk with
+                    | .int k =>
+                      if k < 0 then (et, CVal.poison)
+                      else if k.toNat < n then (et, pick v1 k.toNat)
+                      else if k.toNat < 2 * n then (et, pick v2 (k.toNat - n))
+                      else (et, .poison)
+                    | _ => (et, .poison)
+                  some (.agg elems, j6 + 1)
+                | none => none
+              | none => none
+            | _ => none
+          | none => none
+        | none => none
+      | none => none
+    | _ => none
+
+/-- Parse `T v, T v, ... <close>`. -/
+def parseTypedListF (fuel : Nat) (c : WCtx) (i : Nat) (close : Tok) : Option (List (PTy × CVal) × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+    if c.tok i == close then some ([], i + 1)
+    else
+      let rec go (fuel : Nat) (j : Nat) (acc : List (PTy × CVal)) : Option (List (PTy × CVal) × Nat) :=
+        match fuel with
+        | 0 => none
+        | fuel + 1 =>
+          match parseTyAt c j with
+          | some (t, k) =>
+            match parseValAtF fuel c t k with
+            | some (v, l) =>
+              if c.tok l == .comma then go fuel (l + 1) ((t, v) :: acc)
+              else if c.tok l == close then some (((t, v) :: acc).reverse, l + 1)
+              else none
+            | none => none
+          | none => none
+      go fuel i []
+
+/-- Print a constant expression `op [flags] (operands [to T])` starting after the opcode. -/
+def printConstExprF (fuel : Nat) (c : WCtx) (op : String) (i : Nat) : Option (String × Nat) :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+    let (flags, j0) := collectFlags c i
+    let flagStr := String.join ((canonFlags flags).map (" " ++ ·))
+    if c.tok j0 != .lparen then none
+    else
+      -- GEP source element type
+      let (pre, j1) : String × Nat :=
+        if op == "getelementptr" then
+          match parseTyAt c (j0 + 1) with
+          | some (st, k) => (st.print ++ ", ", if c.tok k == .comma then k + 1 else k)
+          | none => ("", j0 + 1)
+        else ("", j0 + 1)
+      let rec go (fuel : Nat) (j : Nat) (acc : List (PTy × CVal)) : Option (List (PTy × CVal) × Nat) :=
+        match fuel with
+        | 0 => none
+        | fuel + 1 =>
+          match parseTyAt c j with
+          | some (t, k) =>
+            match parseValAtF fuel c t k with
+            | some (v, l) =>
+              if c.tok l == .comma then go fuel (l + 1) ((t, canon c t v) :: acc)
+              else some (((t, canon c t v) :: acc).reverse, l)
+            | none => none
+          | none => none
+      match go fuel j1 [] with
+      | some (ops0, k) =>
+        -- A vector GEP splats its scalar indices (LLParser).
+        let vecLen? : Option Nat := ops0.findSome? fun (t, _) =>
+          match c.resolve t with | .vec false n _ => some n | _ => none
+        let ops := match op, vecLen?, ops0 with
+          | "getelementptr", some n, base :: idxs =>
+            base :: idxs.map fun (t, v) => match c.resolve t with
+              | it@(.int _) => (PTy.vec false n it, canon c (.vec false n it) (.splat it v))
+              | _ => (t, v)
+          | _, _, _ => ops0
+        let items := ops.map fun (t, v) => s!"{t.print} {printConst c t v}"
+        let (toTy?, k2) : Option PTy × Nat :=
+          if c.tok k == .ident "to" then
+            match parseTyAt c (k + 1) with
+            | some (tt, k3) => (some tt, k3)
+            | none => (none, k + 1)
+          else (none, k)
+        let toStr := match toTy? with | some tt => s!" to {tt.print}" | none => ""
+        if c.tok k2 != .rparen then none
+        else
+          -- LLVM folds a binary operator on fixed vectors into a vector of element operations.
+          let binOps := ["add", "sub", "mul", "xor", "shl"]
+          let foldBin? : Option (List (PTy × CVal)) :=
+            match ops with
+            | [(vt@(.vec false n et), a), (_, b)] =>
+              if !binOps.contains op || toTy?.isSome then none else
+              match vecElems c vt n et a, vecElems c vt n et b with
+              | some as, some bs =>
+                some ((as.zip bs).map fun ((_, x), (_, y)) =>
+                  match x, y, c.resolve et with
+                  | .int xi, .int yi, .int w =>
+                    if !flags.isEmpty && !(op == "xor") then
+                      (et, .expr s!"{op}{flagStr} ({et.print} {printConst c et x}, {et.print} {printConst c et y})")
+                    else
+                      let m : Int := 2 ^ w
+                      let r : Int := match op with
+                        | "add" => xi + yi | "sub" => xi - yi | "mul" => xi * yi
+                        | "xor" => Int.ofNat ((xi % m).toNat ^^^ (yi % m).toNat)
+                        | _ => if yi.toNat < w then xi * 2 ^ yi.toNat else 0
+                      let u := r % m
+                      (et, .int (if u ≥ m / 2 then u - m else u))
+                  | .poison, _, _ | _, .poison, _ => (et, .poison)
+                  | _, _, _ =>
+                    (et, .expr s!"{op}{flagStr} ({et.print} {printConst c et x}, {et.print} {printConst c et y})"))
+              | _, _ => none
+            | _ => none
+          match foldBin? with
+          | some es => some (printConst c (ops.head!.1) (canon c (ops.head!.1) (.agg es)), k2 + 1)
+          | none =>
+          -- LLVM folds a (non-bitcast) cast of a fixed vector into a vector of element casts
+          match toTy?, ops with
+          | some (.vec false n dstElem), [(srcTy@(.vec false _ srcElem), v)] =>
+            if op == "bitcast" then some (s!"{op}{flagStr} ({pre}{", ".intercalate items}{toStr})", k2 + 1)
+            else
+              let elems := (List.range n).map fun idx =>
+                let srcElemStr := match v with
+                  | .agg es => match es[idx]? with
+                    | some (et, ev) => s!"{et.print} {printConst c et ev}"
+                    | none => s!"{srcElem.print} poison"
+                  | _ => s!"{srcElem.print} extractelement ({srcTy.print} {printConst c srcTy v}, i32 {idx})"
+                s!"{dstElem.print} {op}{flagStr} ({srcElemStr} to {dstElem.print})"
+              some ("<" ++ ", ".intercalate elems ++ ">", k2 + 1)
+          | _, _ => some (s!"{op}{flagStr} ({pre}{", ".intercalate items}{toStr})", k2 + 1)
+      | none => none
+
 end
+
+/-- Parse a value of type `t` at token `i`. -/
+def parseValAt (c : WCtx) (t : PTy) (i : Nat) : Option (CVal × Nat) := parseValAtF c.fuel c t i
 
 /-- Print `T v` canonically. -/
 def printTypedOperand (c : WCtx) (t : PTy) (v : CVal) : String :=
@@ -849,7 +919,7 @@ def fpClassTestString (mask : Nat) : String :=
 /-! ### Parameter attributes -/
 
 /-- Print one parameter/return attribute starting at token `i`; `none` if `i` is not an attribute. -/
-partial def parseAttrAt (c : WCtx) (i : Nat) : Option (String × Nat) :=
+def parseAttrAt (c : WCtx) (i : Nat) : Option (String × Nat) :=
   match c.tok i with
   | .ident s =>
     if startsValue c i then none
@@ -872,41 +942,50 @@ partial def parseAttrAt (c : WCtx) (i : Nat) : Option (String × Nat) :=
       | "range" =>
         match parseTyAt c (i + 2) with
         | some (t, j) =>
-          let rec goRange (k : Nat) (acc : List String) : List String × Nat :=
-            match c.tok k with
-            | .intLit n =>
-              let acc' := acc ++ [toString (match t with | .int w => signedOfWidth w n | _ => n)]
-              if c.tok (k + 1) == .comma then goRange (k + 2) acc' else (acc', k + 1)
-            | _ => (acc, k)
-          let (vals, k) := goRange j []
+          let rec goRange (fuel : Nat) (k : Nat) (acc : List String) : List String × Nat :=
+            match fuel with
+            | 0 => (acc, k)
+            | fuel + 1 =>
+              match c.tok k with
+              | .intLit n =>
+                let acc' := acc ++ [toString (match t with | .int w => signedOfWidth w n | _ => n)]
+                if c.tok (k + 1) == .comma then goRange fuel (k + 2) acc' else (acc', k + 1)
+              | _ => (acc, k)
+          let (vals, k) := goRange c.fuel j []
           some (s!"range({t.print} {", ".intercalate vals})", k + 1)
         | none => some (s, i + 1)
       | "nofpclass" =>
         -- argument is a list of class names; re-encode canonically
-        let rec goFpc (k : Nat) (mask : Nat) : Nat × Nat :=
-          match c.tok k with
-          | .ident nm =>
-            let bit := match nm with
-              | "all" => 1023 | "nan" => 3 | "snan" => 1 | "qnan" => 2 | "inf" => 516
-              | "ninf" => 4 | "pinf" => 512 | "zero" => 96 | "nzero" => 32 | "pzero" => 64
-              | "sub" => 144 | "nsub" => 16 | "psub" => 128 | "norm" => 264 | "nnorm" => 8
-              | "pnorm" => 256 | _ => 0
-            goFpc (k + 1) (mask ||| bit)
-          | .intLit n => goFpc (k + 1) (mask ||| n.toNat)
-          | .rparen => (mask, k + 1)
-          | .eof => (mask, k)
-          | _ => goFpc (k + 1) mask
-        let (mask, k) := goFpc (i + 2) 0
+        let rec goFpc (fuel : Nat) (k : Nat) (mask : Nat) : Nat × Nat :=
+          match fuel with
+          | 0 => (mask, k)
+          | fuel + 1 =>
+            match c.tok k with
+            | .ident nm =>
+              let bit := match nm with
+                | "all" => 1023 | "nan" => 3 | "snan" => 1 | "qnan" => 2 | "inf" => 516
+                | "ninf" => 4 | "pinf" => 512 | "zero" => 96 | "nzero" => 32 | "pzero" => 64
+                | "sub" => 144 | "nsub" => 16 | "psub" => 128 | "norm" => 264 | "nnorm" => 8
+                | "pnorm" => 256 | _ => 0
+              goFpc fuel (k + 1) (mask ||| bit)
+            | .intLit n => goFpc fuel (k + 1) (mask ||| n.toNat)
+            | .rparen => (mask, k + 1)
+            | .eof => (mask, k)
+            | _ => goFpc fuel (k + 1) mask
+        let (mask, k) := goFpc c.fuel (i + 2) 0
         some (s!"nofpclass{fpClassTestString mask}", k)
       | _ =>
-        let rec goOther (k : Nat) (depth : Nat) (acc : String) : String × Nat :=
-          match c.tok k with
-          | .lparen => goOther (k + 1) (depth + 1) acc
-          | .rparen => if depth ≤ 1 then (acc, k + 1) else goOther (k + 1) (depth - 1) acc
-          | .intLit n => goOther (k + 1) depth (if acc.isEmpty then toString n else acc ++ ", " ++ toString n)
-          | .eof => (acc, k)
-          | _ => goOther (k + 1) depth acc
-        let (inner, k) := goOther (i + 1) 0 ""
+        let rec goOther (fuel : Nat) (k : Nat) (depth : Nat) (acc : String) : String × Nat :=
+          match fuel with
+          | 0 => (acc, k)
+          | fuel + 1 =>
+            match c.tok k with
+            | .lparen => goOther fuel (k + 1) (depth + 1) acc
+            | .rparen => if depth ≤ 1 then (acc, k + 1) else goOther fuel (k + 1) (depth - 1) acc
+            | .intLit n => goOther fuel (k + 1) depth (if acc.isEmpty then toString n else acc ++ ", " ++ toString n)
+            | .eof => (acc, k)
+            | _ => goOther fuel (k + 1) depth acc
+        let (inner, k) := goOther c.fuel (i + 1) 0 ""
         some (s!"{s}({inner})", k)
     else some (s, i + 1)
   | .attrGrp n => some (s!"#{n}", i + 1)
@@ -942,14 +1021,21 @@ def attrSortKey (a : String) : Nat × String :=
   (cls, rec')
 
 /-- Collect attributes starting at `i` (returned in LLVM's canonical order). -/
-partial def collectAttrs (c : WCtx) (i : Nat) (acc : List String := []) : List String × Nat :=
-  match parseAttrAt c i with
-  | some (a, j) => collectAttrs c j (acc ++ [a])
-  | none =>
-    (acc.mergeSort (fun a b =>
-      let ka := attrSortKey a
-      let kb := attrSortKey b
-      ka.1 < kb.1 || (ka.1 == kb.1 && ka.2 ≤ kb.2)), i)
+def collectAttrsF (fuel : Nat) (c : WCtx) (i : Nat) (acc : List String := []) : List String × Nat :=
+  match fuel with
+  | 0 => (acc, i)
+  | fuel + 1 =>
+    match parseAttrAt c i with
+    | some (a, j) => collectAttrsF fuel c j (acc ++ [a])
+    | none =>
+      (acc.mergeSort (fun a b =>
+        let ka := attrSortKey a
+        let kb := attrSortKey b
+        ka.1 < kb.1 || (ka.1 == kb.1 && ka.2 ≤ kb.2)), i)
+
+/-- `collectAttrsF` with the full recursion budget `c.fuel`. -/
+def collectAttrs (c : WCtx) (i : Nat) (acc : List String := []) : List String × Nat :=
+  collectAttrsF c.fuel c i (acc := acc)
 
 /-- Canonical key of an attribute set (attribute-group references expanded). -/
 def attrSetKey (c : WCtx) (attrs : List String) : String :=
@@ -977,14 +1063,21 @@ structure InstrHints where
 private def joinSp (xs : List String) : String := " ".intercalate (xs.filter (!·.isEmpty))
 
 /-- Find the next top-level comma (or `stop`) from `i`. -/
-private partial def skipToComma (c : WCtx) (i stop : Nat) (depth : Nat := 0) : Nat :=
-  if i ≥ stop then stop
-  else match c.tok i with
-    | .comma => if depth == 0 then i else skipToComma c (i + 1) stop depth
-    | .lparen | .lbrack | .lbrace | .lpacked | .langle => skipToComma c (i + 1) stop (depth + 1)
-    | .rparen | .rbrack | .rbrace | .rpacked | .rangle =>
-      skipToComma c (i + 1) stop (if depth == 0 then 0 else depth - 1)
-    | _ => skipToComma c (i + 1) stop depth
+private def skipToCommaF (fuel : Nat) (c : WCtx) (i stop : Nat) (depth : Nat := 0) : Nat :=
+  match fuel with
+  | 0 => stop
+  | fuel + 1 =>
+    if i ≥ stop then stop
+    else match c.tok i with
+      | .comma => if depth == 0 then i else skipToCommaF fuel c (i + 1) stop depth
+      | .lparen | .lbrack | .lbrace | .lpacked | .langle => skipToCommaF fuel c (i + 1) stop (depth + 1)
+      | .rparen | .rbrack | .rbrace | .rpacked | .rangle =>
+        skipToCommaF fuel c (i + 1) stop (if depth == 0 then 0 else depth - 1)
+      | _ => skipToCommaF fuel c (i + 1) stop depth
+
+/-- `skipToCommaF` with the full recursion budget `c.fuel`. -/
+private def skipToComma (c : WCtx) (i stop : Nat) (depth : Nat := 0) : Nat :=
+  skipToCommaF c.fuel c i stop (depth := depth)
 
 /-- Metadata kind ordering (`LLVMContext` fixed kind IDs) used to sort attachments. -/
 def mdKindOrder (nm : String) : Nat :=
@@ -1001,15 +1094,21 @@ def mdKindOrder (nm : String) : Nat :=
   | none => 1000
 
 /-- Parse trailing `, !kind !N` attachments from `i` (up to `stop`). -/
-partial def parseAttachments (c : WCtx) (i stop : Nat) (acc : List (String × String) := []) :
-    List (String × String) × Nat :=
-  if i + 1 < stop && c.tok i == .comma then
-    match c.tok (i + 1) with
-    | .metaId kind =>
-      let (r, j) := mdRefAt c (i + 2)
-      parseAttachments c j stop (acc ++ [(kind, r)])
-    | _ => (acc, i)
-  else (acc, i)
+def parseAttachmentsF (fuel : Nat) (c : WCtx) (i stop : Nat) (acc : List (String × String) := []) : List (String × String) × Nat :=
+  match fuel with
+  | 0 => (acc, i)
+  | fuel + 1 =>
+    if i + 1 < stop && c.tok i == .comma then
+      match c.tok (i + 1) with
+      | .metaId kind =>
+        let (r, j) := mdRefAt c (i + 2)
+        parseAttachmentsF fuel c j stop (acc ++ [(kind, r)])
+      | _ => (acc, i)
+    else (acc, i)
+
+/-- `parseAttachmentsF` with the full recursion budget `c.fuel`. -/
+def parseAttachments (c : WCtx) (i stop : Nat) (acc : List (String × String) := []) : List (String × String) × Nat :=
+  parseAttachmentsF c.fuel c i stop (acc := acc)
 
 /-- Print sorted metadata attachments (excluding `!dbg`, which LLVM prints last anyway). -/
 def printAttachments (atts : List (String × String)) : String :=
@@ -1019,78 +1118,87 @@ def printAttachments (atts : List (String × String)) : String :=
 mutual
 /-- Generic operand-list printer: prints `T v` pairs, untyped values (using the last type),
 labels, keywords and punctuation until `stop`. -/
-partial def printGeneric (c : WCtx) (i stop : Nat) (cur : PTy) (rawInts : Bool) (acc : String) :
-    String × Nat :=
-  if i ≥ stop then (acc, i) else
-  match c.tok i with
-  | .comma =>
-    match c.tok (i + 1) with
-    | .metaId _ => (acc, i) -- metadata attachments
-    | _ => printGeneric c (i + 1) stop cur rawInts (acc ++ ",")
-  | .ident "to" =>
-    match parseTyAt c (i + 1) with
-    | some (t, j) => printGeneric c j stop t rawInts (acc ++ " to " ++ t.print)
-    | none => printGeneric c (i + 1) stop cur rawInts (acc ++ " to")
-  | .ident "align" =>
-    match c.tok (i + 1) with
-    | .intLit n => printGeneric c (i + 2) stop cur rawInts (acc ++ s!" align {n}")
-    | _ => printGeneric c (i + 1) stop cur rawInts (acc ++ " align")
-  | .ident "label" =>
-    match c.tok (i + 1) with
-    | .localId b => printGeneric c (i + 2) stop cur rawInts (acc ++ " label " ++ c.loc b)
-    | _ => printGeneric c (i + 1) stop cur rawInts (acc ++ " label")
-  | .lbrack =>
-    if (parseTyAt c i).isSome then printTyped c i stop cur rawInts acc else
-    -- phi incoming `[ v, %bb ]`
-    match parseValAt c cur (i + 1) with
-    | some (v, j) =>
-      if c.tok j == .comma then
-        match c.tok (j + 1), c.tok (j + 2) with
-        | .localId b, .rbrack =>
-          printGeneric c (j + 3) stop cur rawInts
-            (acc ++ s!" [ {printConst c cur (canon c cur v)}, {c.loc b} ]")
-        | _, _ => printGeneric c (i + 1) stop cur rawInts (acc ++ " [")
-      else printGeneric c (i + 1) stop cur rawInts (acc ++ " [")
-    | none => printGeneric c (i + 1) stop cur rawInts (acc ++ " [")
-  | _ => printTyped c i stop cur rawInts acc
+def printGenericF (fuel : Nat) (c : WCtx) (i stop : Nat) (cur : PTy) (rawInts : Bool) (acc : String) : String × Nat :=
+  match fuel with
+  | 0 => (acc, i)
+  | fuel + 1 =>
+    if i ≥ stop then (acc, i) else
+    match c.tok i with
+    | .comma =>
+      match c.tok (i + 1) with
+      | .metaId _ => (acc, i) -- metadata attachments
+      | _ => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ ",")
+    | .ident "to" =>
+      match parseTyAt c (i + 1) with
+      | some (t, j) => printGenericF fuel c j stop t rawInts (acc ++ " to " ++ t.print)
+      | none => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " to")
+    | .ident "align" =>
+      match c.tok (i + 1) with
+      | .intLit n => printGenericF fuel c (i + 2) stop cur rawInts (acc ++ s!" align {n}")
+      | _ => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " align")
+    | .ident "label" =>
+      match c.tok (i + 1) with
+      | .localId b => printGenericF fuel c (i + 2) stop cur rawInts (acc ++ " label " ++ c.loc b)
+      | _ => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " label")
+    | .lbrack =>
+      if (parseTyAt c i).isSome then printTypedF fuel c i stop cur rawInts acc else
+      -- phi incoming `[ v, %bb ]`
+      match parseValAt c cur (i + 1) with
+      | some (v, j) =>
+        if c.tok j == .comma then
+          match c.tok (j + 1), c.tok (j + 2) with
+          | .localId b, .rbrack =>
+            printGenericF fuel c (j + 3) stop cur rawInts
+              (acc ++ s!" [ {printConst c cur (canon c cur v)}, {c.loc b} ]")
+          | _, _ => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " [")
+        else printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " [")
+      | none => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " [")
+    | _ => printTypedF fuel c i stop cur rawInts acc
 
 /-- Helper of `printGeneric`: a `T v` pair, a bare type, or an untyped value. -/
-partial def printTyped (c : WCtx) (i stop : Nat) (cur : PTy) (rawInts : Bool) (acc : String) :
-    String × Nat :=
-    match parseTyAt c i with
-    | some (t, j) =>
-      -- `T v` (or a bare type such as `alloca T`)
-      let (attrs, j2) := collectAttrs c j
-      if startsValue c j2 then
-        match parseValAt c t j2 with
-        | some (v, k) =>
-          printGeneric c k stop t rawInts
-            (acc ++ " " ++ joinSp ([t.print] ++ attrs ++ [printConst c t (canon c t v)]))
-        | none => printGeneric c j stop t rawInts (acc ++ " " ++ t.print)
-      else printGeneric c j2 stop t rawInts (acc ++ " " ++ joinSp ([t.print] ++ attrs))
-    | none =>
-      if rawInts then
-        match c.tok i with
-        | .intLit n => printGeneric c (i + 1) stop cur rawInts (acc ++ s!" {n}")
-        | _ =>
-          match parseValAt c cur i with
-          | some (v, k) => printGeneric c k stop cur rawInts (acc ++ " " ++ printConst c cur (canon c cur v))
-          | none => printGeneric c (i + 1) stop cur rawInts acc
-      else
-        match parseValAt c cur i with
-        | some (v, k) => printGeneric c k stop cur rawInts (acc ++ " " ++ printConst c cur (canon c cur v))
-        | none =>
+def printTypedF (fuel : Nat) (c : WCtx) (i stop : Nat) (cur : PTy) (rawInts : Bool) (acc : String) : String × Nat :=
+  match fuel with
+  | 0 => (acc, i)
+  | fuel + 1 =>
+      match parseTyAt c i with
+      | some (t, j) =>
+        -- `T v` (or a bare type such as `alloca T`)
+        let (attrs, j2) := collectAttrs c j
+        if startsValue c j2 then
+          match parseValAt c t j2 with
+          | some (v, k) =>
+            printGenericF fuel c k stop t rawInts
+              (acc ++ " " ++ joinSp ([t.print] ++ attrs ++ [printConst c t (canon c t v)]))
+          | none => printGenericF fuel c j stop t rawInts (acc ++ " " ++ t.print)
+        else printGenericF fuel c j2 stop t rawInts (acc ++ " " ++ joinSp ([t.print] ++ attrs))
+      | none =>
+        if rawInts then
           match c.tok i with
-          | .ident s => printGeneric c (i + 1) stop cur rawInts (acc ++ " " ++ s)
-          | .intLit n => printGeneric c (i + 1) stop cur rawInts (acc ++ s!" {n}")
-          | .lparen => printGeneric c (i + 1) stop cur rawInts (acc ++ " (")
-          | .rparen => printGeneric c (i + 1) stop cur rawInts (acc ++ ")")
-          | .rbrack => printGeneric c (i + 1) stop cur rawInts (acc ++ " ]")
-          | _ => printGeneric c (i + 1) stop cur rawInts acc
+          | .intLit n => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ s!" {n}")
+          | _ =>
+            match parseValAt c cur i with
+            | some (v, k) => printGenericF fuel c k stop cur rawInts (acc ++ " " ++ printConst c cur (canon c cur v))
+            | none => printGenericF fuel c (i + 1) stop cur rawInts acc
+        else
+          match parseValAt c cur i with
+          | some (v, k) => printGenericF fuel c k stop cur rawInts (acc ++ " " ++ printConst c cur (canon c cur v))
+          | none =>
+            match c.tok i with
+            | .ident s => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " " ++ s)
+            | .intLit n => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ s!" {n}")
+            | .lparen => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " (")
+            | .rparen => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ ")")
+            | .rbrack => printGenericF fuel c (i + 1) stop cur rawInts (acc ++ " ]")
+            | _ => printGenericF fuel c (i + 1) stop cur rawInts acc
 end
 
+/-- Generic operand-list printer (see `printGenericF`). -/
+def printGeneric (c : WCtx) (i stop : Nat) (cur : PTy) (rawInts : Bool) (acc : String) :
+    String × Nat :=
+  printGenericF c.fuel c i stop cur rawInts acc
+
 /-- `Intrinsic::getMangledTypeStr`. -/
-partial def mangleTy (c : WCtx) : PTy → String
+def mangleTy (c : WCtx) : PTy → String
   | .int w => s!"i{w}"
   | .byte w => s!"b{w}"
   | .float .half => "f16"
@@ -1152,76 +1260,88 @@ def remangleIntrinsic (c : WCtx) (callee : String) (ret : PTy) (args : List PTy)
     "@" ++ base ++ String.join (tys.map fun t => "." ++ mangleTy c t)
 
 /-- Print the arguments of a call `(...)` starting after `(`; returns text and position after `)`. -/
-partial def printCallArgs (c : WCtx) (i : Nat) (callee : String) : String × List PTy × Nat :=
+def printCallArgs (c : WCtx) (i : Nat) (callee : String) : String × List PTy × Nat :=
   let isFPClass := callee.startsWith "@llvm.is.fpclass"
-  let rec go (j : Nat) (idx : Nat) (acc : List String) (tys : List PTy) : List String × List PTy × Nat :=
-    if c.tok j == .rparen then (acc, tys, j + 1)
-    else if c.tok j == .eof then (acc, tys, j)
-    else
-      match parseTyAt c j with
-      | some (t, k) =>
-        let (attrs, k2) := collectAttrs c k
-        match parseValAt c t k2 with
-        | some (v, l) =>
-          let cv := canon c t v
-          let comment :=
-            if isFPClass && idx == 1 then
-              match cv with
-              | CVal.int m => s!"/* {fpClassTestString m.toNat} */ "
-              | _ => ""
-            else ""
-          let item := comment ++ joinSp ([t.print] ++ attrs ++ [printConst c t cv])
-          let next := if c.tok l == .comma then l + 1 else l
-          go next (idx + 1) (acc ++ [item]) (tys ++ [t])
-        | none => (acc, tys, k2)
-      | none => (acc, tys, j + 1)
-  let (items, tys, j) := go i 0 [] []
+  let rec go (fuel : Nat) (j : Nat) (idx : Nat) (acc : List String) (tys : List PTy) : List String × List PTy × Nat :=
+    match fuel with
+    | 0 => (acc, tys, j)
+    | fuel + 1 =>
+      if c.tok j == .rparen then (acc, tys, j + 1)
+      else if c.tok j == .eof then (acc, tys, j)
+      else
+        match parseTyAt c j with
+        | some (t, k) =>
+          let (attrs, k2) := collectAttrs c k
+          match parseValAt c t k2 with
+          | some (v, l) =>
+            let cv := canon c t v
+            let comment :=
+              if isFPClass && idx == 1 then
+                match cv with
+                | CVal.int m => s!"/* {fpClassTestString m.toNat} */ "
+                | _ => ""
+              else ""
+            let item := comment ++ joinSp ([t.print] ++ attrs ++ [printConst c t cv])
+            let next := if c.tok l == .comma then l + 1 else l
+            go fuel next (idx + 1) (acc ++ [item]) (tys ++ [t])
+          | none => (acc, tys, k2)
+        | none => (acc, tys, j + 1)
+  let (items, tys, j) := go c.fuel i 0 [] []
   (", ".intercalate items, tys, j)
 
 /-- Print operand bundles `[ "tag"(T v, ...), ... ]` starting at `[`. -/
-partial def printBundles (c : WCtx) (i : Nat) : String × Nat :=
-  let rec goBundle (j : Nat) (acc : List String) : List String × Nat :=
-    match c.tok j with
-    | .strLit tag =>
-      if c.tok (j + 1) == .lparen then
-        let rec goOps (k : Nat) (ops : List String) : List String × Nat :=
-          if c.tok k == .rparen then (ops, k + 1)
-          else
-            match parseTyAt c k with
-            | some (t, l) =>
-              match parseValAt c t l with
-              | some (v, m) =>
-                let next := if c.tok m == .comma then m + 1 else m
-                goOps next (ops ++ [printTypedOperand c t v])
-              | none => (ops, l)
-            | none => (ops, k + 1)
-        let (ops, k) := goOps (j + 2) []
-        let b := s!"\"{tag}\"({", ".intercalate ops})"
-        if c.tok k == .comma then goBundle (k + 1) (acc ++ [b]) else (acc ++ [b], k)
-      else (acc, j + 1)
-    | _ => (acc, j)
-  let (bs, j) := goBundle (i + 1) []
+def printBundles (c : WCtx) (i : Nat) : String × Nat :=
+  let rec goBundle (fuel : Nat) (j : Nat) (acc : List String) : List String × Nat :=
+    match fuel with
+    | 0 => (acc, j)
+    | fuel + 1 =>
+      match c.tok j with
+      | .strLit tag =>
+        if c.tok (j + 1) == .lparen then
+          let rec goOps (fuel : Nat) (k : Nat) (ops : List String) : List String × Nat :=
+            match fuel with
+            | 0 => (ops, k)
+            | fuel + 1 =>
+              if c.tok k == .rparen then (ops, k + 1)
+              else
+                match parseTyAt c k with
+                | some (t, l) =>
+                  match parseValAt c t l with
+                  | some (v, m) =>
+                    let next := if c.tok m == .comma then m + 1 else m
+                    goOps fuel next (ops ++ [printTypedOperand c t v])
+                  | none => (ops, l)
+                | none => (ops, k + 1)
+          let (ops, k) := goOps c.fuel (j + 2) []
+          let b := s!"\"{tag}\"({", ".intercalate ops})"
+          if c.tok k == .comma then goBundle fuel (k + 1) (acc ++ [b]) else (acc ++ [b], k)
+        else (acc, j + 1)
+      | _ => (acc, j)
+  let (bs, j) := goBundle c.fuel (i + 1) []
   let j' := if c.tok j == .rbrack then j + 1 else j
   (s!"[ {", ".intercalate bs} ]", j')
 
 /-- Print a `call` (after an optional `%x = ` prefix) from token `i`. -/
-partial def printCall (c : WCtx) (i stop : Nat) : String :=
+def printCall (c : WCtx) (i stop : Nat) : String :=
   -- prefix keywords: tail markers, `call`, FMF, calling convention, return attributes
-  let rec pre (j : Nat) (acc : List String) : List String × Nat :=
-    match c.tok j with
-    | .ident s =>
-      if s ∈ ["tail", "musttail", "notail", "call", "invoke", "callbr"] then pre (j + 1) (acc ++ [s])
-      else if flagWords.contains s then
-        let (fs, k) := collectFlags c j
-        pre k (acc ++ canonFlags fs)
-      else if s.endsWith "cc" && !(parseTyAt c j).isSome then pre (j + 1) (acc ++ [s])
-      else if s == "cc" then
-        match c.tok (j + 1) with
-        | .intLit n => pre (j + 2) (acc ++ [s!"cc {n}"])
-        | _ => pre (j + 1) (acc ++ [s])
-      else (acc, j)
-    | _ => (acc, j)
-  let (preWords, j0) := pre i []
+  let rec pre (fuel : Nat) (j : Nat) (acc : List String) : List String × Nat :=
+    match fuel with
+    | 0 => (acc, j)
+    | fuel + 1 =>
+      match c.tok j with
+      | .ident s =>
+        if s ∈ ["tail", "musttail", "notail", "call", "invoke", "callbr"] then pre fuel (j + 1) (acc ++ [s])
+        else if flagWords.contains s then
+          let (fs, k) := collectFlags c j
+          pre fuel k (acc ++ canonFlags fs)
+        else if s.endsWith "cc" && !(parseTyAt c j).isSome then pre fuel (j + 1) (acc ++ [s])
+        else if s == "cc" then
+          match c.tok (j + 1) with
+          | .intLit n => pre fuel (j + 2) (acc ++ [s!"cc {n}"])
+          | _ => pre fuel (j + 1) (acc ++ [s])
+        else (acc, j)
+      | _ => (acc, j)
+  let (preWords, j0) := pre c.fuel i []
   let (retAttrs, j1) := collectAttrs c j0
   match parseTyAt c j1 with
   | none => joinSp preWords
@@ -1229,26 +1349,32 @@ partial def printCall (c : WCtx) (i stop : Nat) : String :=
     -- optional explicit function type
     let (fnTy?, j3) : Option PTy × Nat :=
       if c.tok j2 == .lparen then
-        let rec goP (k : Nat) (ps : List PTy) : List PTy × Bool × Nat :=
-          match c.tok k with
-          | .rparen => (ps, false, k + 1)
-          | .ellipsis => (ps, true, if c.tok (k + 1) == .rparen then k + 2 else k + 1)
-          | .comma => goP (k + 1) ps
-          | _ =>
-            match parseTyAt c k with
-            | some (t, l) => goP l (ps ++ [t])
-            | none => (ps, false, k + 1)
-        let (ps, va, k) := goP (j2 + 1) []
+        let rec goP (fuel : Nat) (k : Nat) (ps : List PTy) : List PTy × Bool × Nat :=
+          match fuel with
+          | 0 => (ps, false, k)
+          | fuel + 1 =>
+            match c.tok k with
+            | .rparen => (ps, false, k + 1)
+            | .ellipsis => (ps, true, if c.tok (k + 1) == .rparen then k + 2 else k + 1)
+            | .comma => goP fuel (k + 1) ps
+            | _ =>
+              match parseTyAt c k with
+              | some (t, l) => goP fuel l (ps ++ [t])
+              | none => (ps, false, k + 1)
+        let (ps, va, k) := goP c.fuel (j2 + 1) []
         (some (.fn retTy ps va), k)
       else (none, j2)
     let (calleeStr, j4) :=
       if c.tok j3 == .ident "asm" then
         -- inline asm: `asm [sideeffect] [alignstack] [inteldialect] [unwind] "code", "constraints"`
-        let rec goAsm (k : Nat) (acc : List String) : List String × Nat :=
-          match c.tok k with
-          | .ident w => if w ∈ ["sideeffect", "alignstack", "inteldialect", "unwind"] then goAsm (k + 1) (acc ++ [w]) else (acc, k)
-          | _ => (acc, k)
-        let (flags, k1) := goAsm (j3 + 1) []
+        let rec goAsm (fuel : Nat) (k : Nat) (acc : List String) : List String × Nat :=
+          match fuel with
+          | 0 => (acc, k)
+          | fuel + 1 =>
+            match c.tok k with
+            | .ident w => if w ∈ ["sideeffect", "alignstack", "inteldialect", "unwind"] then goAsm fuel (k + 1) (acc ++ [w]) else (acc, k)
+            | _ => (acc, k)
+        let (flags, k1) := goAsm c.fuel (j3 + 1) []
         match c.tok k1, c.tok (k1 + 1), c.tok (k1 + 2) with
         | .strLit code, .comma, .strLit cons =>
           (joinSp (["asm"] ++ flags ++ [s!"\"{code}\", \"{cons}\""]), k1 + 3)
@@ -1283,7 +1409,7 @@ partial def printCall (c : WCtx) (i stop : Nat) : String :=
 
 /-- Print the instruction whose tokens are `[start, stop)` (LLVM `Instruction::print` text,
 including the two-space indentation). -/
-partial def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints := {})
+def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints := {})
     (iid? : Option InstructionId := none) : String :=
   let c := { c0 with limit := stop }
   let (namePrefix, i0) : String × Nat :=
@@ -1299,26 +1425,35 @@ partial def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints 
       if op ∈ ["call", "tail", "musttail", "notail"] then printCall c i0 stop
       else if op == "callbr" then
         -- `callbr T callee(args) to label %d [label %a, ...]`
-        let rec findToCb (k : Nat) : Nat :=
-          if k ≥ stop then stop else if c.tok k == .ident "to" then k else findToCb (k + 1)
-        let toPos := findToCb i0
+        let rec findToCb (fuel : Nat) (k : Nat) : Nat :=
+          match fuel with
+          | 0 => stop
+          | fuel + 1 =>
+            if k ≥ stop then stop else if c.tok k == .ident "to" then k else findToCb fuel (k + 1)
+        let toPos := findToCb c.fuel i0
         let callText := printCall { c with limit := toPos } i0 toPos
         let dflt := match c.tok (toPos + 1), c.tok (toPos + 2) with
           | .ident "label", .localId b => c.loc b
           | _, _ => ""
-        let rec labelsCb (m : Nat) (acc : List String) : List String :=
-          match c.tok m, c.tok (m + 1) with
-          | .ident "label", .localId b =>
-            let acc' := acc ++ [s!"label {c.loc b}"]
-            if c.tok (m + 2) == .comma then labelsCb (m + 3) acc' else acc'
-          | _, _ => acc
-        let ind := labelsCb (toPos + 4) []
+        let rec labelsCb (fuel : Nat) (m : Nat) (acc : List String) : List String :=
+          match fuel with
+          | 0 => acc
+          | fuel + 1 =>
+            match c.tok m, c.tok (m + 1) with
+            | .ident "label", .localId b =>
+              let acc' := acc ++ [s!"label {c.loc b}"]
+              if c.tok (m + 2) == .comma then labelsCb fuel (m + 3) acc' else acc'
+            | _, _ => acc
+        let ind := labelsCb c.fuel (toPos + 4) []
         callText ++ "\n          to label " ++ dflt ++ " [" ++ ", ".intercalate ind ++ "]"
       else if op == "invoke" then
         -- `invoke T callee(args) to label %n unwind label %u`
-        let rec findTo (k : Nat) : Nat :=
-          if k ≥ stop then stop else if c.tok k == .ident "to" then k else findTo (k + 1)
-        let toPos := findTo i0
+        let rec findTo (fuel : Nat) (k : Nat) : Nat :=
+          match fuel with
+          | 0 => stop
+          | fuel + 1 =>
+            if k ≥ stop then stop else if c.tok k == .ident "to" then k else findTo fuel (k + 1)
+        let toPos := findTo c.fuel i0
         let callText := printCall { c with limit := toPos } i0 toPos
         let callText := if callText.startsWith "invoke" then callText else callText
         let (rest, _) := printGeneric c toPos stop .void false ""
@@ -1333,18 +1468,21 @@ partial def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints 
               match c.tok (k + 1), c.tok (k + 2) with
               | .ident "label", .localId b => (c.loc b, k + 3)
               | _, _ => ("", k + 1)
-            let rec cases (m : Nat) (acc : List String) : List String :=
-              match parseTyAt c m with
-              | some (ct, m1) =>
-                match parseValAt c ct m1 with
-                | some (cv, m2) =>
-                  match c.tok (m2 + 1), c.tok (m2 + 2) with
-                  | .ident "label", .localId b =>
-                    cases (m2 + 3) (acc ++ [s!"    {printTypedOperand c ct cv}, label {c.loc b}\n"])
-                  | _, _ => acc
+            let rec cases (fuel : Nat) (m : Nat) (acc : List String) : List String :=
+              match fuel with
+              | 0 => acc
+              | fuel + 1 =>
+                match parseTyAt c m with
+                | some (ct, m1) =>
+                  match parseValAt c ct m1 with
+                  | some (cv, m2) =>
+                    match c.tok (m2 + 1), c.tok (m2 + 2) with
+                    | .ident "label", .localId b =>
+                      cases fuel (m2 + 3) (acc ++ [s!"    {printTypedOperand c ct cv}, label {c.loc b}\n"])
+                    | _, _ => acc
+                  | none => acc
                 | none => acc
-              | none => acc
-            let cs := cases (k2 + 1) []
+            let cs := cases c.fuel (k2 + 1) []
             s!"switch {printTypedOperand c t v}, label {dflt} [\n" ++ String.join cs ++ "  ]"
           | none => "switch"
         | none => "switch"
@@ -1353,13 +1491,16 @@ partial def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints 
         | some (t, j) =>
           match parseValAt c t j with
           | some (v, k) =>
-            let rec labels (m : Nat) (acc : List String) : List String :=
-              match c.tok m, c.tok (m + 1) with
-              | .ident "label", .localId b =>
-                let acc' := acc ++ [s!"label {c.loc b}"]
-                if c.tok (m + 2) == .comma then labels (m + 3) acc' else acc'
-              | _, _ => acc
-            s!"indirectbr {printTypedOperand c t v}, [{", ".intercalate (labels (k + 2) [])}]"
+            let rec labels (fuel : Nat) (m : Nat) (acc : List String) : List String :=
+              match fuel with
+              | 0 => acc
+              | fuel + 1 =>
+                match c.tok m, c.tok (m + 1) with
+                | .ident "label", .localId b =>
+                  let acc' := acc ++ [s!"label {c.loc b}"]
+                  if c.tok (m + 2) == .comma then labels fuel (m + 3) acc' else acc'
+                | _, _ => acc
+            s!"indirectbr {printTypedOperand c t v}, [{", ".intercalate (labels c.fuel (k + 2) [])}]"
           | none => "indirectbr"
         | none => "indirectbr"
       else if op == "shufflevector" then
@@ -1395,11 +1536,14 @@ partial def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints 
         let opWords := [op] ++ canonFlags flags ++ (if isVol then ["volatile"] else [])
         let rawInts := op == "extractvalue" || op == "insertvalue"
         -- operands end at metadata attachments
-        let rec findAttach (k : Nat) : Nat :=
-          if k ≥ stop then stop
-          else if c.tok k == .comma && (match c.tok (k + 1) with | .metaId _ => true | _ => false)
-            then k else findAttach (k + 1)
-        let opEnd := findAttach j'
+        let rec findAttach (fuel : Nat) (k : Nat) : Nat :=
+          match fuel with
+          | 0 => stop
+          | fuel + 1 =>
+            if k ≥ stop then stop
+            else if c.tok k == .comma && (match c.tok (k + 1) with | .metaId _ => true | _ => false)
+              then k else findAttach fuel (k + 1)
+        let opEnd := findAttach c.fuel j'
         -- predicates for icmp/fcmp
         let (predWords, j2) : List String × Nat :=
           if op == "icmp" || op == "fcmp" then
@@ -1435,23 +1579,26 @@ partial def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints 
   "  " ++ namePrefix ++ body
 
 /-- Print the formal parameters of a function definition as LLVM's `Argument::print` would. -/
-partial def printParams (c0 : WCtx) (start stop : Nat) : List String :=
+def printParams (c0 : WCtx) (start stop : Nat) : List String :=
   let c := { c0 with limit := stop }
-  let rec go (j : Nat) (acc : List String) (anon : Nat) : List String :=
-    if j ≥ stop then acc
-    else if c.tok j == .ellipsis then acc
-    else
-      match parseTyAt c j with
-      | some (t, k) =>
-        let (attrs, k2) := collectAttrs c k
-        let (nm, k3, anon') := match c.tok k2 with
-          | .localId id => (c.loc id, k2 + 1, anon)
-          | _ => (s!"%{anon}", k2, anon + 1)
-        let _ := attrs
-        let item := joinSp [t.print, nm]
-        let next := if c.tok k3 == .comma then k3 + 1 else k3
-        go next (acc ++ [item]) anon'
-      | none => acc
-  go start [] 0
+  let rec go (fuel : Nat) (j : Nat) (acc : List String) (anon : Nat) : List String :=
+    match fuel with
+    | 0 => acc
+    | fuel + 1 =>
+      if j ≥ stop then acc
+      else if c.tok j == .ellipsis then acc
+      else
+        match parseTyAt c j with
+        | some (t, k) =>
+          let (attrs, k2) := collectAttrs c k
+          let (nm, k3, anon') := match c.tok k2 with
+            | .localId id => (c.loc id, k2 + 1, anon)
+            | _ => (s!"%{anon}", k2, anon + 1)
+          let _ := attrs
+          let item := joinSp [t.print, nm]
+          let next := if c.tok k3 == .comma then k3 + 1 else k3
+          go fuel next (acc ++ [item]) anon'
+        | none => acc
+  go c.fuel start [] 0
 
 end LeanNanoLlvm.Llubi
