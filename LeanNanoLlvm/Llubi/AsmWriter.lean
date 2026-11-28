@@ -167,7 +167,11 @@ deriving Inhabited, BEq, Repr
 
 private def fpOf (ft : FloatType) : CVal → Option (IEEEFloat ft.format)
   | .fpBits b => some (IEEEFloat.ofNatBits b)
-  | .fpDec n m e => some (IEEEFloat.ofDecimal ft.format .RNE n m e)
+  | .fpDec n m e =>
+    match ft with
+    -- a decimal `ppc_fp128` constant is the double-double nearest to it
+    | .ppc_fp128 => some (IEEEFloat.quadToDoubleDouble .RNE (IEEEFloat.ofDecimal .fp128 .RNE n m e))
+    | ft' => some (IEEEFloat.ofDecimal ft'.format .RNE n m e)
   | .fpSpec n isInf q p =>
     some (if isInf then IEEEFloat.inf ft.format n
           else if q then IEEEFloat.qNaN ft.format n p

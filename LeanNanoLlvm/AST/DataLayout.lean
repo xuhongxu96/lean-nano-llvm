@@ -140,7 +140,7 @@ mutual
 def typeLayout (dl : DataLayout) : LlvmType → Nat × Nat
   | .int w => (w, intAlignLookup (mergeIntSpecs dl.intAligns (fun (_, a, _) => a)) w)
   | .byte w => (w, intAlignLookup (mergeIntSpecs dl.intAligns (fun (_, a, _) => a)) w)
-  | .float ft => (ft.bitWidth, floatABIAlign ft)
+  | .float ft => (ft.storageBits, floatABIAlign ft)
   | .ptr as => (dl.getPointerSizeInBits as, dl.getPointerABIAlign as)
   | .vector n elem =>
       match dl.typeLayout elem with

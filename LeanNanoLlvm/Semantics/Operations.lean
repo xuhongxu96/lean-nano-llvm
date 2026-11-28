@@ -34,6 +34,24 @@ def floatLiteralValue (ft : FloatType) (bits : Nat) : RegisterValue :=
     .float .ppc_fp128 (.value (IEEEFloat.ofNatBits ((lo <<< 64) ||| hi)))
   | ft => .float ft (.value (IEEEFloat.ofNatBits bits))
 
+/-- The value of a decimal floating-point literal of type `ft` (`ppc_fp128`: the double-double
+nearest to the decimal, not its IEEE binary128 encoding). -/
+def floatDecimalValue (rm : RoundingMode) (ft : FloatType) (neg : Bool) (m : Nat) (e10 : Int) :
+    RegisterValue :=
+  match ft with
+  | .ppc_fp128 => .float .ppc_fp128 (.value (quadToPPC rm (IEEEFloat.ofDecimal .fp128 rm neg m e10)))
+  | ft => .float ft (.value (IEEEFloat.ofDecimal ft.format rm neg m e10))
+
+/-- The value of a special floating-point literal (infinity or NaN) of type `ft`. -/
+def floatSpecialValue (ft : FloatType) (neg isInf quiet : Bool) (payload : Nat) : RegisterValue :=
+  let mk (fmt : FloatFormat) : IEEEFloat fmt :=
+    if isInf then IEEEFloat.inf fmt neg
+    else if quiet then IEEEFloat.qNaN fmt neg payload
+    else IEEEFloat.sNaN fmt neg (if payload == 0 then 1 else payload)
+  match ft with
+  | .ppc_fp128 => .float .ppc_fp128 (.value (quadToPPC .RNE (mk .fp128)))
+  | ft => .float ft (.value (mk ft.format))
+
 def liftUnaryPure (resElemTy : LlvmType) (v : RegisterValue)
     (f : RegisterValue → Except ExecError RegisterValue) : Except ExecError RegisterValue :=
   match v with

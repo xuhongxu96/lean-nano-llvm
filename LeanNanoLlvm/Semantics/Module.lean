@@ -53,7 +53,8 @@ private def collectAddrTakenTypedList : List (LlvmType × Exp) → List GlobalId
     (f1 ++ f2, b1 ++ b2)
 end
 
-private def collectAddrTakenInstr : Instruction → List GlobalId × List GlobalId
+private def collectAddrTakenInstr (fnTys : List (GlobalId × LlvmType)) :
+    Instruction → List GlobalId × List GlobalId
   | .intBinaryOp _ _ e1 e2 | .floatBinaryOp _ _ e1 e2 | .icmp _ _ _ e1 e2 | .fcmp _ _ _ e1 e2 =>
     let (f1, b1) := collectAddrTakenExp e1; let (f2, b2) := collectAddrTakenExp e2; (f1 ++ f2, b1 ++ b2)
   | .floatUnaryOp _ _ e | .conversionOp _ _ e _ | .load _ _ e _ _ _ _ | .extractvalue _ e _ | .freeze (_, e) =>
@@ -73,10 +74,15 @@ private def collectAddrTakenInstr : Instruction → List GlobalId × List Global
   | .insertelement _ v _ e _ idx | .bitinsert _ v _ e _ idx =>
     let (f1, b1) := collectAddrTakenExp v; let (f2, b2) := collectAddrTakenExp e; let (f3, b3) := collectAddrTakenExp idx
     (f1 ++ f2 ++ f3, b1 ++ b2 ++ b3)
-  | .call _ _ callee args _ bundles _ _ =>
-    -- Direct call `@f(...)` does NOT take the address of `@f`; only non-direct callees and arguments do.
+  | .call _ _ callee args _ bundles _ site =>
+    -- A direct call `@f(...)` does NOT take the address of `@f`, unless the call's function type
+    -- differs from `@f`'s: LLVM then calls through `@f` as a pointer (`getCalledFunction` is
+    -- null), and llubi gives `@f` an address. Non-direct callees and arguments take addresses.
     let (fc, bc) := match callee with
-      | .identifier (.global_id _) => ([], [])
+      | .identifier (.global_id f) =>
+        match site.fnTy?, (fnTys.find? (fun (p : GlobalId × LlvmType) => p.1 == f)).map (fun (p : GlobalId × LlvmType) => p.2) with
+        | some ct, some ft => if ct.beq ft then ([], []) else ([f], [])
+        | _, _ => ([], [])
       | other => collectAddrTakenExp other
     let (fa, ba) := args.foldl (init := (fc, bc)) fun (fs, bs) (_, e, _) =>
       let (f1, b1) := collectAddrTakenExp e; (fs ++ f1, bs ++ b1)
@@ -88,6 +94,10 @@ private def collectAddrTakenTerm : Terminator → List GlobalId × List GlobalId
   | _ => ([], [])
 
 private def collectAddrTaken (ents : List TopLevelEntity) : List GlobalId × List GlobalId :=
+  let fnTys : List (GlobalId × LlvmType) := ents.filterMap fun
+    | .declaration d => some (d.name, d.type)
+    | .definition d => some (d.prototype.name, d.prototype.type)
+    | _ => none
   ents.foldl (init := ([], [])) fun (fs, bs) ent =>
     match ent with
     | .global gv =>
@@ -97,7 +107,7 @@ private def collectAddrTaken (ents : List TopLevelEntity) : List GlobalId × Lis
     | .definition defn =>
       defn.blocks.foldl (init := (fs, bs)) fun (fs1, bs1) blk =>
         let (fs2, bs2) := blk.code.foldl (init := (fs1, bs1)) fun (fa, ba) (_, ins) =>
-          let (f1, b1) := collectAddrTakenInstr ins; (fa ++ f1, ba ++ b1)
+          let (f1, b1) := collectAddrTakenInstr fnTys ins; (fa ++ f1, ba ++ b1)
         let (ft, bt) := collectAddrTakenTerm blk.terminator.2
         (fs2 ++ ft, bs2 ++ bt)
     | _ => (fs, bs)

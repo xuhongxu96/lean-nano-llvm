@@ -646,4 +646,19 @@ def IEEEFloat.narrowFromDoubleHex (dst : FloatFormat) (bits : Nat) : IEEEFloat d
   else
     IEEEFloat.convert dst .RNE (IEEEFloat.ofNatBits (fmt := .double) bits)
 
+/-- A binary128 value as a `ppc_fp128` bit pattern (low half first, LLVM APInt order): the high
+double is the value rounded with `rm`, the low double the remainder rounded to nearest. A zero
+low double is +0, except that integer conversions (`sitofp`/`uitofp`, APFloat
+`convertFromAPInt`) give it the high double's sign (`loSignOfHi`): llubi prints `sitofp -3` as
+(-3.0, -0.0) but the literal `-1.0` and `fpext double -2.0` as (x, +0.0). -/
+def IEEEFloat.quadToDoubleDouble (rm : RoundingMode) (q : IEEEFloat .fp128)
+    (loSignOfHi : Bool := false) : IEEEFloat .fp128 :=
+  let hi := q.convert .double rm
+  let pack (lo : IEEEFloat .double) : IEEEFloat .fp128 :=
+    IEEEFloat.ofNatBits ((lo.bits.toNat <<< 64) ||| hi.bits.toNat)
+  if !hi.isFinite then pack (IEEEFloat.zero .double false)
+  else
+    let lo := (IEEEFloat.sub .RNE q (hi.convert .fp128 .RNE)).convert .double .RNE
+    pack (if lo.isZero then IEEEFloat.zero .double (loSignOfHi && hi.sign) else lo)
+
 end LeanNanoLlvm

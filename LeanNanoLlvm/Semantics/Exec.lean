@@ -59,16 +59,11 @@ def execExp (dl : DataLayout) (cfg : SemanticsConfig)
     | _ => .error (.staticError s!"invalid type for float bit literal: found {ty.print}")
   | .floatDec neg m e10 =>
     match ty with
-    | .float ft => .ok (.float ft (.value (IEEEFloat.ofDecimal ft.format cfg.roundingMode neg m e10)), mem, o)
+    | .float ft => .ok (floatDecimalValue cfg.roundingMode ft neg m e10, mem, o)
     | _ => .error (.staticError s!"invalid type for float decimal literal: found {ty.print}")
   | .floatSpecial neg isInf quiet payload =>
     match ty with
-    | .float ft =>
-      let flt :=
-        if isInf then IEEEFloat.inf ft.format neg
-        else if quiet then IEEEFloat.qNaN ft.format neg payload
-        else IEEEFloat.sNaN ft.format neg (if payload == 0 then 1 else payload)
-      .ok (.float ft (.value flt), mem, o)
+    | .float ft => .ok (floatSpecialValue ft neg isInf quiet payload, mem, o)
     | _ => .error (.staticError s!"invalid type for special float literal: found {ty.print}")
   | .blockAddress fn blk =>
     match ty with

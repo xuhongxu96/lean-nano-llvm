@@ -60,14 +60,9 @@ def ppcToQuad (x : IEEEFloat .fp128) : IEEEFloat .fp128 :=
 
 /-- A binary128 value as a `ppc_fp128`: `hi` is the value rounded to double (with `rm`), `lo` the
 remainder rounded to double (LLVM `APFloat` double-double layout). -/
-def quadToPPC (rm : RoundingMode) (q : IEEEFloat .fp128) : IEEEFloat .fp128 :=
-  let hi := q.convert .double rm
-  if !hi.isFinite then packPPC128 hi (IEEEFloat.zero .double false)
-  else
-    let lo := (IEEEFloat.sub .RNE q (hi.convert .fp128 .RNE)).convert .double .RNE
-    -- an exact conversion leaves a zero low part, which carries the sign of the high part
-    -- (APFloat double-double: -1.0 is (-1.0, -0.0))
-    packPPC128 hi (if lo.isZero then IEEEFloat.zero .double hi.sign else lo)
+def quadToPPC (rm : RoundingMode) (q : IEEEFloat .fp128) (loSignOfHi : Bool := false) :
+    IEEEFloat .fp128 :=
+  IEEEFloat.quadToDoubleDouble rm q loSignOfHi
 
 /-- The IEEE value a stored float of type `ft` denotes (`ppc_fp128` is stored as its double pair). -/
 def toSemantic {ft : FloatType} (x : IEEEFloat ft.format) : IEEEFloat ft.format :=
@@ -76,9 +71,10 @@ def toSemantic {ft : FloatType} (x : IEEEFloat ft.format) : IEEEFloat ft.format 
   | _, x => x
 
 /-- The stored form of an IEEE value of type `ft` (inverse of `toSemantic`). -/
-def fromSemantic {ft : FloatType} (rm : RoundingMode) (x : IEEEFloat ft.format) : IEEEFloat ft.format :=
+def fromSemantic {ft : FloatType} (rm : RoundingMode) (x : IEEEFloat ft.format)
+    (loSignOfHi : Bool := false) : IEEEFloat ft.format :=
   match ft, x with
-  | .ppc_fp128, x => quadToPPC rm x
+  | .ppc_fp128, x => quadToPPC rm x loSignOfHi
   | _, x => x
 
 private def ppcAdd (rm : RoundingMode) (a aa c cc : IEEEFloat .double) :
@@ -111,19 +107,21 @@ private def ppcMul (rm : RoundingMode) (a aa c cc : IEEEFloat .double) :
       let lo := IEEEFloat.add rm (IEEEFloat.sub rm p hi) t
       (hi, lo)
 
-private def ppcDiv (rm : RoundingMode) (a aa c cc : IEEEFloat .double) :
-    IEEEFloat .double × IEEEFloat .double :=
-  let q1 := IEEEFloat.div rm a c
-  if !q1.isFinite then (q1, IEEEFloat.zero .double false)
-  else
-    let (p1, p2) := ppcMul rm q1 (IEEEFloat.zero .double false) c cc
-    let (r1, _) := ppcAdd rm a aa p1.neg p2.neg
-    let q2 := IEEEFloat.div rm r1 c
-    let hi := IEEEFloat.add rm q1 q2
-    if !hi.isFinite then (hi, IEEEFloat.zero .double false)
-    else
-      let lo := IEEEFloat.add rm (IEEEFloat.sub rm q1 hi) q2
-      (hi, lo)
+/-- LLVM's `semPPCDoubleDoubleLegacy`: an IEEE-style format with a 106-bit significand and
+double's exponent field, in which `APFloat` divides and takes remainders of `ppc_fp128` values
+(`DoubleAPFloat::divide`/`mod` convert to it and back). Its normal range in LLVM ends at 2^-969,
+not 2^-1022, so results that underflow there may differ. -/
+def ppcLegacyFormat : FloatFormat := { expBits := 11, sigBits := 105 }
+
+/-- A `ppc_fp128` operation as `APFloat` performs it in `ppcLegacyFormat`: both pairs rounded to
+106 bits, the operation, then the result split back into a double pair (high double rounded to
+nearest, low double the remainder). -/
+private def ppcViaLegacy (f : IEEEFloat ppcLegacyFormat → IEEEFloat ppcLegacyFormat → IEEEFloat ppcLegacyFormat)
+    (a aa c cc : IEEEFloat .double) : IEEEFloat .double × IEEEFloat .double :=
+  let toL (h l : IEEEFloat .double) : IEEEFloat ppcLegacyFormat :=
+    (ppcToQuad (packPPC128 h l)).convert ppcLegacyFormat .RNE
+  let r := f (toL a aa) (toL c cc)
+  unpackPPC128 (IEEEFloat.quadToDoubleDouble .RNE (r.convert .fp128 .RNE))
 
 /-- Evaluate LLVM `fcmp` predicate on two non-poison floats (matches `llvm::FCmpInst::compare`). -/
 def evalFCmpPred {fmt : FloatFormat} (pred : FCmpPred) (x y : IEEEFloat fmt) : Bool :=
@@ -330,8 +328,8 @@ def evalFloatBinaryOp {ft : FloatType} (cfg : SemanticsConfig) (op : FloatBinary
                 let (h, l) := ppcAdd cfg.roundingMode a aa c.neg cc.neg
                 (h, if l.isZero && !l.sign && aa.isZero && cc.isZero && !a.isZero && !c.isZero then l.neg else l)
               | .fmul _ => ppcMul cfg.roundingMode a aa c cc
-              | .fdiv _ => ppcDiv cfg.roundingMode a aa c cc
-              | .frem _ => (IEEEFloat.rem a c, IEEEFloat.zero .double false)
+              | .fdiv _ => ppcViaLegacy (IEEEFloat.div cfg.roundingMode) a aa c cc
+              | .frem _ => ppcViaLegacy IEEEFloat.rem a aa c cc
             match handleFMF fmf false false rHi with
             | .poison => (.poison, o2)
             | .value rHi =>
@@ -414,7 +412,7 @@ def evalIntToFP {srcW : Nat} (dstFt : FloatType) (cfg : SemanticsConfig)
     else
       let res := fromSemantic (ft := dstFt) cfg.roundingMode (if isSigned
         then IEEEFloat.ofSignedBitVec dstFt.format cfg.roundingMode x
-        else IEEEFloat.ofUnsignedBitVec dstFt.format cfg.roundingMode x)
+        else IEEEFloat.ofUnsignedBitVec dstFt.format cfg.roundingMode x) (loSignOfHi := true)
       fmfIn fmf res o
 
 /-- IEEE-754 2008 `maxNum`/`minNum` (`APFloat::maxnum`/`minnum`): an sNaN operand yields a qNaN. -/

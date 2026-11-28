@@ -33,6 +33,7 @@ Ids: `B` semantic bugs in lean-nano-llvm, `P` differences in our llubi-compatibl
 | B6 | A datalayout pointer spec with flags (`pe1:64:64:64:32`) is read as the spec of address space 0. | Data Layout: `p[<flags>][<as>]` | `datalayout_pointer_flags.ll` |
 | B7 | `!range` metadata with more than one range is ignored. | `range` metadata | `load_range_list_ub.ll` |
 | B8 | Conversions into `ppc_fp128` (`fpext`, `sitofp`, `uitofp`) produce an encoding other than LLVM's double-double layout (our `ppc_fp128` arithmetic itself uses the right one). | Floating-Point Types | `ppc_fp128_fpext_layout.ll`, `ppc_fp128_sitofp_layout.ll` |
+| B10 | `x86_fp80` (the x87 extended format, not an IEEE interchange format) was 79 bits wide in memory and for `bitcast`, without its explicit integer bit: stores and loads of its bits were wrong and `bitcast` from/to `i80` was rejected. Non-canonical x87 encodings are now decoded as `APFloat` does (unnormals and pseudo-infinities/NaNs are NaN, pseudo-denormals have exponent 1). | Data Layout, Floating-Point Types | `x86_fp80_memory_layout.ll`, `x86_fp80_bitcast.ll`, `x86_fp80_noncanonical_encodings.ll` |
 | B9 | A call to a module-defined `@malloc`/`@calloc` (and `operator new`) is replaced by the builtin allocator instead of executing the definition. | (a defined function is executed as defined) | `defined_allocator_is_called.ll` |
 
 Follow-up instances (same ids): **B1** a declared callee's parameter attributes also apply to
@@ -41,7 +42,14 @@ non-variadic type of its arguments, so calling a variadic function that way is U
 (`call_signature_mismatch_vararg_ub.ll`; the IR parser now records each call's function type,
 `CallSiteInfo.fnTy?`); **B4** conversions (`fpext`, `fptrunc`) used the module's configuration
 instead of the function's denormal mode (`denormal_fpenv_fpext.ll`); **B8** an exact conversion
-leaves a zero low double with the sign of the high double (`ppc_fp128_sitofp_negative.ll`).
+leaves a zero low double with the sign of the high double (`ppc_fp128_sitofp_negative.ll`), for
+integer conversions only (`llubi_ppc_fp128_zero_low_sign.ll`); decimal and special `ppc_fp128`
+literals were IEEE binary128 encodings instead of double-doubles, and `fdiv`/`frem` did not
+compute in APFloat's 106-bit legacy format (`llubi_ppc_fp128_div_rem.ll`).
+
+Known limits (not bugs): our 79-bit `x86_fp80` format does not keep the integer bit of a NaN, so
+llubi's raw bits for a non-canonical NaN are printed as a canonical NaN; `undef`/`freeze` values
+of `x86_fp80` are drawn from the 79 semantic bits (both choices are allowed).
 
 ## Output-only differences (P)
 
@@ -62,6 +70,7 @@ normalizer in `triage_rules.NORMALIZERS` and a `Tests/ll/llubi_*.ll` reproducer.
 | P10 | Immediate UB at the same instruction, reported with a different reason (e.g. llubi checks library-call arguments for poison before reading C-string arguments). |
 | P11 | `dereferenceable` assume-bundle size printed unsigned (llubi: signed). |
 | P12 | Alloca-size UB messages end with an extra `.`. |
+| P14 | A direct call whose type differs from the callee's takes the callee's address (LLVM calls through it as a pointer) and llubi allocates a function object for it, which shifts later stack addresses. Not modelled: function objects llubi allocates for personality functions in some exception-handling code. |
 | P13 | Variadic arguments are not printed on function entry (llubi: `vaarg[i] = <value>`), and a call's function type was printed from the callee instead of the call. |
 
 Follow-ups: **P1** specialized nodes (`!DIFile(...)`) are MDNodes too; **P2** intrinsic
