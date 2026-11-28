@@ -1,5 +1,6 @@
 import Lean
 import LeanNanoLlvm.Refinement.Refinement
+import LeanNanoLlvm.Refinement.AttrOrder
 
 /-! # Refinement Simp Lemmas (`simp_llvm` / `simp_step`)
 

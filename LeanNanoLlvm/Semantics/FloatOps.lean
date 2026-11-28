@@ -12,7 +12,15 @@ open AST
 /-- Poison-aware IEEE floating-point value of a specific LLVM `FloatType`. -/
 abbrev FloatW (ft : FloatType) := PoisonOr (IEEEFloat ft.format)
 
+/-- The denormal mode for values of format `fmt`: the `float:` override (`denormalModeF32`) for
+32-bit floats (the only type of format `single`), the function's mode otherwise. -/
+@[simp] def _root_.LeanNanoLlvm.SemanticsConfig.denormalModeFmt (cfg : SemanticsConfig) (fmt : FloatFormat) : DenormalMode :=
+  match cfg.denormalModeF32 with
+  | some m => if fmt == FloatFormat.single then m else cfg.denormalMode
+  | none => cfg.denormalMode
+
 /-- Flush subnormal floats according to `DenormalModeKind` (matches `llubi::handleDenormal`). -/
+
 def handleDenormal {fmt : FloatFormat} (mode : DenormalModeKind) (isInput : Bool)
     (preserveInputChoice : Bool) (x : IEEEFloat fmt) : IEEEFloat fmt :=
   if !x.isSubnormal then x
@@ -42,6 +50,32 @@ def unpackPPC128 (x : IEEEFloat .fp128) : IEEEFloat .double × IEEEFloat .double
 /-- Pack `(hi, lo)` IEEE doubles into 128-bit `ppc_fp128` (`lo64 || hi64` in LLVM APInt order). -/
 def packPPC128 (hi lo : IEEEFloat .double) : IEEEFloat .fp128 :=
   IEEEFloat.ofNatBits (fmt := .fp128) ((lo.bits.toNat <<< 64) ||| hi.bits.toNat)
+
+/-- The value of a `ppc_fp128` (a pair of doubles, `hi + lo`) as an IEEE binary128: exact, since
+both doubles and their sum fit binary128's 113-bit significand. -/
+def ppcToQuad (x : IEEEFloat .fp128) : IEEEFloat .fp128 :=
+  let (hi, lo) := unpackPPC128 x
+  if !hi.isFinite then hi.convert .fp128 .RNE
+  else IEEEFloat.add .RNE (hi.convert .fp128 .RNE) (lo.convert .fp128 .RNE)
+
+/-- A binary128 value as a `ppc_fp128`: `hi` is the value rounded to double (with `rm`), `lo` the
+remainder rounded to double (LLVM `APFloat` double-double layout). -/
+def quadToPPC (rm : RoundingMode) (q : IEEEFloat .fp128) : IEEEFloat .fp128 :=
+  let hi := q.convert .double rm
+  if !hi.isFinite then packPPC128 hi (IEEEFloat.zero .double false)
+  else packPPC128 hi ((IEEEFloat.sub .RNE q (hi.convert .fp128 .RNE)).convert .double .RNE)
+
+/-- The IEEE value a stored float of type `ft` denotes (`ppc_fp128` is stored as its double pair). -/
+def toSemantic {ft : FloatType} (x : IEEEFloat ft.format) : IEEEFloat ft.format :=
+  match ft, x with
+  | .ppc_fp128, x => ppcToQuad x
+  | _, x => x
+
+/-- The stored form of an IEEE value of type `ft` (inverse of `toSemantic`). -/
+def fromSemantic {ft : FloatType} (rm : RoundingMode) (x : IEEEFloat ft.format) : IEEEFloat ft.format :=
+  match ft, x with
+  | .ppc_fp128, x => quadToPPC rm x
+  | _, x => x
 
 private def ppcAdd (rm : RoundingMode) (a aa c cc : IEEEFloat .double) :
     IEEEFloat .double × IEEEFloat .double :=
@@ -146,14 +180,15 @@ def evalFCmp {ft : FloatType} (cfg : SemanticsConfig) (fmf : FastMathFlags)
   | _, x, y =>
     let x ← handleFMF fmf true flipL x
     let y ← handleFMF fmf true flipR y
-    let fx := handleDenormal cfg.denormalMode.input true denormL x
-    let fy := handleDenormal cfg.denormalMode.input true denormR y
+    let fx := handleDenormal (cfg.denormalModeFmt ft.format).input true denormL x
+    let fy := handleDenormal (cfg.denormalModeFmt ft.format).input true denormR y
     pure (BitVec.ofBool (evalFCmpPred pred fx fy))
 
 /-- Evaluate `fptoui` / `fptosi` (truncates toward zero, poison on NaN/Inf/out-of-range). -/
 def evalFPToInt {ft : FloatType} (dstW : Nat) (isSigned : Bool)
     (v : FloatW ft) : PoisonOr (BitVec dstW) := do
   let x ← v
+  let x := toSemantic x
   let res? := if isSigned then x.toSignedBitVec? dstW else x.toUnsignedBitVec? dstW
   match res? with
   | some bv => .value bv
@@ -304,15 +339,15 @@ def evalFloatBinaryOp {ft : FloatType} (cfg : SemanticsConfig) (op : FloatBinary
       let ry := fmfIn fmf y rx.2
       match rx.1, ry.1 with
       | .value x', .value y' =>
-        let dx := denormIn cfg.denormalMode.input x' ry.2
-        let dy := denormIn cfg.denormalMode.input y' dx.2
+        let dx := denormIn (cfg.denormalModeFmt ft.format).input x' ry.2
+        let dy := denormIn (cfg.denormalModeFmt ft.format).input y' dx.2
         let raw := match op with
           | .fadd _ => IEEEFloat.add cfg.roundingMode dx.1 dy.1
           | .fsub _ => IEEEFloat.sub cfg.roundingMode dx.1 dy.1
           | .fmul _ => IEEEFloat.mul cfg.roundingMode dx.1 dy.1
           | .fdiv _ => IEEEFloat.div cfg.roundingMode dx.1 dy.1
           | .frem _ => IEEEFloat.rem dx.1 dy.1
-        let flushed := handleDenormal cfg.denormalMode.output false false raw
+        let flushed := handleDenormal (cfg.denormalModeFmt ft.format).output false false raw
         match handleFMF fmf false false flushed with
         | .poison => (.poison, dy.2)
         | .value r =>
@@ -337,9 +372,9 @@ def evalFCmpO {ft : FloatType} (cfg : SemanticsConfig) (fmf : FastMathFlags) (pr
         | .ppc_fp128 =>
           (evalFCmp (ft := .ppc_fp128) cfg {} pred false false false false (.value x) (.value y), o2)
         | _ =>
-          match denormIn cfg.denormalMode.input x o2 with
+          match denormIn (cfg.denormalModeFmt ft.format).input x o2 with
           | (fx, o3) =>
-            match denormIn cfg.denormalMode.input y o3 with
+            match denormIn (cfg.denormalModeFmt ft.format).input y o3 with
             | (fy, o4) => (.value (BitVec.ofBool (evalFCmpPred pred fx fy)), o4)
   | _, _ => (.poison, o)
 
@@ -352,13 +387,14 @@ def evalFPConv {srcFt : FloatType} (dstFt : FloatType) (cfg : SemanticsConfig)
     match fmfIn fmf x o with
     | (.poison, o1) => (.poison, o1)
     | (.value x', o1) =>
-      match denormIn cfg.denormalMode.input x' o1 with
+      match denormIn (cfg.denormalModeFmt srcFt.format).input x' o1 with
       | (fx, o2) =>
-        let conv := fx.convert dstFt.format cfg.roundingMode
+        let conv : IEEEFloat dstFt.format :=
+          fromSemantic (ft := dstFt) cfg.roundingMode ((toSemantic (ft := srcFt) fx).convert dstFt.format cfg.roundingMode)
         match handleFMF fmf false false conv with
         | .poison => (.poison, o2)
         | .value c =>
-          let flushed := handleDenormal cfg.denormalMode.output false false c
+          let flushed := handleDenormal (cfg.denormalModeFmt dstFt.format).output false false c
           let inputs := if fx.isNaN then [conv] else []
           match nanPropagate cfg.nanMode flushed inputs o2 with
           | (r, o3) => (.value r, o3)
@@ -372,9 +408,9 @@ def evalIntToFP {srcW : Nat} (dstFt : FloatType) (cfg : SemanticsConfig)
   | .value x =>
     if !isSigned && nneg && x.msb then (.poison, o)
     else
-      let res := if isSigned
+      let res := fromSemantic (ft := dstFt) cfg.roundingMode (if isSigned
         then IEEEFloat.ofSignedBitVec dstFt.format cfg.roundingMode x
-        else IEEEFloat.ofUnsignedBitVec dstFt.format cfg.roundingMode x
+        else IEEEFloat.ofUnsignedBitVec dstFt.format cfg.roundingMode x)
       fmfIn fmf res o
 
 /-- IEEE-754 2008 `maxNum`/`minNum` (`APFloat::maxnum`/`minnum`): an sNaN operand yields a qNaN. -/

@@ -74,7 +74,7 @@ private theorem evalFloatBinary_fadd_refines_nnan (va vb : FloatW .float) (o : O
         · simp only [evalFloatBinaryOp, hinV fa o ha', hinP fb o hb]; exact hpoisonL _
         · have hb' : fb.isNaN = false := Bool.eq_false_iff.mpr hb
           simp only [evalFloatBinaryOp, fmfIn_none, hinV fa o ha', hinV fb o hb',
-            SemanticsConfig.modern, denormIn_ieee_fst, handleDenormal_ieee]
+            SemanticsConfig.modern, SemanticsConfig.denormalModeFmt, denormIn_ieee_fst, handleDenormal_ieee]
           by_cases hr : (IEEEFloat.add RoundingMode.RNE fa fb).isNaN = true
           · simp only [handleFMF, hr, Bool.and_true, ↓reduceIte]; exact hpoisonL _
           · have hr' := Bool.eq_false_iff.mpr hr

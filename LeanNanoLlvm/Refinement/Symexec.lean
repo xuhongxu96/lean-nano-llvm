@@ -164,7 +164,8 @@ elab "llvm_intro" : tactic => do
   evalStep (← `(tactic|
     simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
       applyByValCopies, applyByValCopies.go, splitPhis,
-      RegisterValue.matchesType, byvalDeferredAttrs, applyValueAttrsPure,
+      RegisterValue.matchesType, byvalDeferredAttrs, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs,
+      withSiteAttrs_nil,
       List.length_nil, List.length_cons, List.any_nil, List.any_cons,
       List.getD, List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil,
       Option.getD_some, Option.getD_none,
@@ -237,7 +238,7 @@ macro "llvm_simp_after_step" : tactic => `(tactic| (
       simp only [finishRegInstr, finishVoidInstr, CallFrame.advance, CallFrame.jumpTo,
         MachineState.withFrames, MachineState.withFramesAndMemory,
         commitPhiUpdates, freeAllocaList,
-        applyRetFMFAndAttrsPure, applyValueAttrsPure,
+        applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs,
         liftBinaryPure_bv, evalIntBinaryScalarPure, evalICmpScalarPure_bv,
         evalSelectPure_bv, evalSelectPure_float, evalSelectPure_ptr,
         evalConversionExec_trunc, evalConversionExec_zext, evalConversionExec_sext,

@@ -20,6 +20,20 @@ namespace LeanNanoLlvm.Semantics
 
 open AST
 
+/-- The value of a floating-point bit-pattern literal of type `ft`. `half`, `bfloat` and `float`
+literals wider than the type are 64-bit (double) hex (`IEEEFloat.narrowFromDoubleHex`); `ppc_fp128`
+literals (`0xM<hi><lo>`) are stored in LLVM's APInt order (low half first). -/
+def floatLiteralValue (ft : FloatType) (bits : Nat) : RegisterValue :=
+  match ft with
+  | .float => .float .float (.value (if bits ≥ (1 <<< 32) then IEEEFloat.narrowFromDoubleHex .single bits else IEEEFloat.ofNatBits bits))
+  | .half => .float .half (.value (if bits ≥ (1 <<< 16) then IEEEFloat.narrowFromDoubleHex .half bits else IEEEFloat.ofNatBits bits))
+  | .bfloat => .float .bfloat (.value (if bits ≥ (1 <<< 16) then IEEEFloat.narrowFromDoubleHex .bfloat bits else IEEEFloat.ofNatBits bits))
+  | .ppc_fp128 =>
+    let hi := bits >>> 64
+    let lo := bits &&& ((1 <<< 64) - 1)
+    .float .ppc_fp128 (.value (IEEEFloat.ofNatBits ((lo <<< 64) ||| hi)))
+  | ft => .float ft (.value (IEEEFloat.ofNatBits bits))
+
 def liftUnaryPure (resElemTy : LlvmType) (v : RegisterValue)
     (f : RegisterValue → Except ExecError RegisterValue) : Except ExecError RegisterValue :=
   match v with
@@ -151,12 +165,43 @@ def applySingleAttrPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
   | .noalias => .ok val
   | .readonly => .ok val
 
-def applyValueAttrsPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
+/-- Apply attributes in list order. -/
+def applyValueAttrsSeq (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
     (val : RegisterValue) : List ValueAttr → Except ExecError RegisterValue
   | [] => .ok val
   | a :: rest => do
     let v' ← applySingleAttrPure dl mem ty val a
-    applyValueAttrsPure dl mem ty v' rest
+    applyValueAttrsSeq dl mem ty v' rest
+
+/-- When an attribute takes effect, independently of where it is written. The poison-generating
+attributes (`range`, `nofpclass`, `nonnull`, `align`, ...) come first, then the UB-implying
+checks in llubi's order: `noundef`, `dereferenceable`, `dereferenceable_or_null` (LangRef: a
+value made poison by a poison-generating attribute of a `noundef` parameter is immediate UB;
+llubi `handleAttributes` / `handleMetadata`). -/
+def _root_.LeanNanoLlvm.AST.ValueAttr.phase : ValueAttr → Nat
+  | .noundef => 1
+  | .dereferenceable _ => 2
+  | .dereferenceableOrNull _ => 3
+  | _ => 0
+
+/-- The attributes of one value, stably ordered by `ValueAttr.phase`. -/
+def orderValueAttrs (attrs : List ValueAttr) : List ValueAttr :=
+  attrs.filter (·.phase == 0) ++ attrs.filter (·.phase == 1) ++
+    attrs.filter (·.phase == 2) ++ attrs.filter (·.phase == 3)
+
+@[simp] theorem orderValueAttrs_nil : orderValueAttrs [] = [] := rfl
+
+/-- Apply the attributes (or value metadata) of one value: all poison-generating ones, then the
+UB checks (`orderValueAttrs`). -/
+def applyValueAttrsPure (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
+    (val : RegisterValue) (attrs : List ValueAttr) : Except ExecError RegisterValue :=
+  match attrs with
+  | [] => .ok val
+  | [a] => applySingleAttrPure dl mem ty val a  -- a single attribute needs no ordering
+  | _ => applyValueAttrsSeq dl mem ty val (orderValueAttrs attrs)
+
+@[simp] theorem applyValueAttrsPure_nil (dl : DataLayout) (mem : MemoryState) (ty : LlvmType)
+    (val : RegisterValue) : applyValueAttrsPure dl mem ty val [] = .ok val := rfl
 
 @[simp_llvm]
 def evalIntBinaryScalarPure (op : IntBinaryOp) (v1 v2 : RegisterValue) :
@@ -765,6 +810,6 @@ def evalBitExtractPure (dl : DataLayout) (retTy : LlvmType)
     .ok (evalBitExtractScalarPure dl retTy src off)
 
 attribute [simp_llvm] liftUnaryPure liftBinaryPure evalIntBinaryScalarPure
-attribute [simp_step] applyValueAttrsPure
+attribute [simp_step] applyValueAttrsPure applyValueAttrsSeq orderValueAttrs AST.ValueAttr.phase
 
 end LeanNanoLlvm.Semantics

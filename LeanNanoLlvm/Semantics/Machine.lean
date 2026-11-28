@@ -187,9 +187,13 @@ def withFrames : MachineState → List CallFrame → MachineState
   | ⟨_, mem, cfg, dl, fns, decls⟩, frames' =>
     ⟨frames', mem, cfg, dl, fns, decls⟩
 
-/-- Returns `false` if `fid` is declared `nobuiltin`, disabling C/C++ library call interception. -/
+/-- Whether a call to `fid` may be modelled as a C/C++ library call: `false` if the module defines
+`fid` or declares it `nobuiltin`. -/
 @[simp, simp_step]
 def allowLibcallsFor (st : MachineState) (fid : FunctionId) : Bool :=
+  -- A function the module defines is executed as defined, whatever its name (`malloc`,
+  -- `calloc`, `_Znwm`, ...): only declarations are modelled as library calls (as in llubi).
+  (st.functions.get? fid).isNone &&
   !(((st.declarations.get? fid).map (·.isNoBuiltin)).getD false)
 
 @[simp, simp_step]
@@ -272,10 +276,34 @@ def RegisterValue.matchesType : LlvmType → RegisterValue → Bool
   | .struct p1 fs1, .struct p2 _ fs2 => p1 == p2 && fs1.length == fs2.length
   | _, _ => false
 
+/-- A parameter's callee attributes together with its call-site attributes (`[]` at an entry
+point, where there is no call site). -/
+def withSiteAttrs (callee site : List ValueAttr) : List ValueAttr :=
+  match site with
+  | [] => callee
+  | _ => callee ++ site
+
+@[simp] theorem withSiteAttrs_nil (callee : List ValueAttr) : withSiteAttrs callee [] = callee := rfl
+
+/-- The return attributes in effect when `frame` returns: its own, merged with the call site's
+(llubi applies both sets together, `handleAttributes`); the call site's are applied again by
+`finishCallerReturn`, which is idempotent. -/
+def retAttrsAtReturn (frame : CallFrame) (callers : List CallFrame) : List ValueAttr :=
+  match callers with
+  | caller :: _ =>
+    match caller.returnDest? with
+    | some rd => withSiteAttrs frame.defn.prototype.retAttrs rd.retAttrs
+    | none => frame.defn.prototype.retAttrs
+  | [] => frame.defn.prototype.retAttrs
+
+@[simp] theorem retAttrsAtReturn_nil (frame : CallFrame) :
+    retAttrsAtReturn frame [] = frame.defn.prototype.retAttrs := rfl
+
 /-- Bind formal parameters of a `Definition` to argument values, type-checking and applying callee parameter attributes. -/
 def bindFrameArgs (dl : DataLayout) (mem : MemoryState)
     (argTys : List LlvmType) (isVarArg : Bool) (argAttrs : List (List ValueAttr))
-    (argNames : List LocalId) (argVals : List RegisterValue) :
+    (argNames : List LocalId) (argVals : List RegisterValue)
+    (siteAttrs : List (List ValueAttr) := []) :
     Except ExecError (AssocMap Identifier RegisterValue) :=
   let countBad :=
     argNames.length != argTys.length ||
@@ -289,7 +317,11 @@ def bindFrameArgs (dl : DataLayout) (mem : MemoryState)
         if !v.matchesType ty then
           .error (.staticError s!"Unmatched argument type for %{nm}: expected [{ty.print}], got {v}")
         else
-          let attrs := byvalDeferredAttrs (argAttrs.getD i [])
+          -- Call-site and callee attributes of a parameter form one set (llubi
+          -- `handleAttributes(Ty, V, AttrsAtCallSite, AttrsAtCallee)`), applied in phase order
+          -- (`applyValueAttrsPure`). The call site's were also applied when the argument was
+          -- evaluated; applying them again is idempotent.
+          let attrs := byvalDeferredAttrs (withSiteAttrs (argAttrs.getD i []) (siteAttrs.getD i []))
           match applyValueAttrsPure dl mem ty v attrs with
           | .error e => .error e
           | .ok v' => go (i + 1) ts nms vs (acc.insert (.local_id nm) v')
@@ -313,15 +345,16 @@ def applyRetFMFAndAttrsPure (dl : DataLayout) (mem : MemoryState)
     | .error e => .error e
     | .ok v1 => applyValueAttrsPure dl mem rTy v1 retAttrs
 
-/-- Construct an initial `CallFrame` for entering `defn` with `argVals` (validating signature & param attrs). -/
+/-- Construct an initial `CallFrame` for entering `defn` with `argVals` (validating signature & param
+attrs, merged with the call site's `siteAttrs`). -/
 def mkEntryFrame (dl : DataLayout) (mem : MemoryState) (defn : Definition)
-    (argVals : List RegisterValue) : Except ExecError CallFrame :=
+    (argVals : List RegisterValue) (siteAttrs : List (List ValueAttr) := []) : Except ExecError CallFrame :=
   match defn.prototype.type with
   | .function _ argTys isVarArg =>
     match defn.blocks with
     | [] => .error (.staticError s!"Function @{defn.prototype.name} has no basic blocks")
     | entryBlk :: _ =>
-      match bindFrameArgs dl mem argTys isVarArg defn.prototype.argAttrs defn.args argVals with
+      match bindFrameArgs dl mem argTys isVarArg defn.prototype.argAttrs defn.args argVals siteAttrs with
       | .error e => .error e
       | .ok regs =>
         match splitPhis entryBlk.code with
@@ -421,7 +454,7 @@ def mkEntryFrameWithMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryS
     (defn : Definition) (argVals : List RegisterValue) (siteAttrs : List (List ValueAttr) := [])
     (visible : List AllocId := []) :
     Except ExecError (CallFrame × MemoryState) :=
-  match mkEntryFrame dl mem defn argVals with
+  match mkEntryFrame dl mem defn argVals siteAttrs with
   | .error e => .error e
   | .ok frame => applyByValCopies dl cfg mem defn frame siteAttrs visible
 
@@ -430,19 +463,69 @@ theorem mkEntryFrameWithMem_preserves_wf {dl cfg mem defn argVals siteAttrs visi
     (h : mkEntryFrameWithMem dl cfg mem defn argVals siteAttrs visible = .ok (frame', mem')) :
     MemoryState.WellFormed mem' := by
   unfold mkEntryFrameWithMem at h
-  cases hmk : mkEntryFrame dl mem defn argVals with
+  cases hmk : mkEntryFrame dl mem defn argVals siteAttrs with
   | error e => rw [hmk] at h; cases h
   | ok frame => rw [hmk] at h; exact applyByValCopies_preserves_wf hwf h
 
+/-- The type of a value, as far as the value determines it (`none` for `void`). -/
+def RegisterValue.inferType? : RegisterValue → Option LlvmType
+  | .bv w _ => some (.int w)
+  | .byte w _ => some (.byte w)
+  | .float ft _ => some (.float ft)
+  | .ptr as _ => some (.ptr as)
+  | .vector et es => some (.vector es.length et)
+  | .array et es => some (.array es.length et)
+  | .struct p tys _ => some (.struct p tys)
+  | .void => none
+
+/-- Whether argument values fit a callee's parameter types (count, and each value's type,
+including vector element types). -/
+def callArgsFit (ps : List LlvmType) (isVarArg : Bool) (argVals : List RegisterValue) : Bool :=
+  (if isVarArg then argVals.length ≥ ps.length else argVals.length == ps.length) &&
+  (ps.zip argVals).all fun (t, v) =>
+    v.matchesType t &&
+      match t, v.inferType? with
+      | .vector _ et, some (.vector _ et') => et.beq et'
+      | _, _ => true
+
+/-- `some msg` if a call with return type `retTy` and arguments `argVals` does not match the
+callee's function type `calleeTy`: immediate UB (LangRef `call`: "If the function signature does
+not match the function type of the call, the behavior is undefined"), reported with llubi's
+message (the call's function type, then the callee's). -/
+def callSignatureMismatch? (retTy : LlvmRetType) (calleeTy : LlvmType)
+    (argVals : List RegisterValue) : Option String :=
+  match calleeTy with
+  | .function cRet ps va =>
+    let argsOk := callArgsFit ps va argVals
+    if cRet != retTy || !argsOk then
+      let callTy : LlvmType :=
+        if argsOk then .function retTy ps va
+        else match argVals.mapM RegisterValue.inferType? with
+          | some tys => .function retTy tys false
+          | none => .function retTy ps va
+      some s!"Indirect call through a function pointer with mismatched signature. Expected: {callTy.print}, Actual: {calleeTy.print}"
+    else none
+  | _ => none
+
+/-- A call to a function the module does not define: UB if its declaration's type does not
+match the call, otherwise outside what we execute. -/
+def externalCallConfig (st : MachineState) (fid : FunctionId) (retTy : LlvmRetType)
+    (argVals : List RegisterValue) : Config :=
+  match (st.declarations.get? fid).bind (fun d => callSignatureMismatch? retTy d.type argVals) with
+  | some msg => .ub msg
+  | none => .staticError s!"Call to undefined external function @{fid}"
+
 /-- Check that a callsite's return type and `byval` attributes match the callee prototype. -/
 def checkCallSignatureAndByVal (_dl : DataLayout) (retTy : LlvmRetType)
-    (callArgAttrs : List (List ValueAttr)) (defn : Definition) (siteCC : String := "") :
+    (callArgAttrs : List (List ValueAttr)) (defn : Definition) (siteCC : String := "")
+    (argVals : List RegisterValue := []) :
     Except ExecError Unit :=
   match defn.prototype.type with
-  | .function calleeRetTy ps va =>
-    if calleeRetTy != retTy then
-      .error (.immediateUB s!"Indirect call through a function pointer with mismatched signature. Expected: {(LlvmType.function retTy ps va).print}, Actual: {defn.prototype.type.print}.")
-    else if defn.prototype.callingConv != siteCC then
+  | .function _ _ _ =>
+    match callSignatureMismatch? retTy defn.prototype.type argVals with
+    | some msg => .error (.immediateUB msg)
+    | none =>
+    if defn.prototype.callingConv != siteCC then
       .error (.immediateUB "Mismatched calling convention between callee and callsite.")
     else
       let rec go (i : Nat) : List (List ValueAttr) → Except ExecError Unit
@@ -470,7 +553,7 @@ def mkCallEntryFrameWithMem (dl : DataLayout) (cfg : SemanticsConfig) (mem : Mem
     (retTy : LlvmRetType) (callArgAttrs : List (List ValueAttr))
     (defn : Definition) (argVals : List RegisterValue) (siteCC : String := "")
     (visible : List AllocId := []) : Except ExecError (CallFrame × MemoryState) :=
-  match checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC with
+  match checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC argVals with
   | .error e => .error e
   | .ok () => mkEntryFrameWithMem dl cfg mem defn argVals callArgAttrs visible
 
@@ -479,7 +562,7 @@ theorem mkCallEntryFrameWithMem_preserves_wf {dl cfg mem retTy callArgAttrs defn
     (h : mkCallEntryFrameWithMem dl cfg mem retTy callArgAttrs defn argVals siteCC visible = .ok (frame', mem')) :
     MemoryState.WellFormed mem' := by
   unfold mkCallEntryFrameWithMem at h
-  cases hc : checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC with
+  cases hc : checkCallSignatureAndByVal dl retTy callArgAttrs defn siteCC argVals with
   | error e => rw [hc] at h; cases h
   | ok u => rw [hc] at h; exact mkEntryFrameWithMem_preserves_wf hwf h
 

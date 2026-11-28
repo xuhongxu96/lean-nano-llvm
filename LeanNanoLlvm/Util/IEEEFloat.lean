@@ -627,3 +627,23 @@ instance : ToString (IEEEFloat fmt) where
 end IEEEFloat
 
 end LeanNanoLlvm
+
+namespace LeanNanoLlvm
+
+/-- A narrower floating-point value written as a 64-bit (double) hex literal, e.g.
+`float 0x3FF0000000000000`: the double converted exactly. NaNs keep their sign, their
+signaling/quiet bit and the top payload bits (LLVM's parser; an IEEE conversion would quiet a
+signaling NaN). -/
+def IEEEFloat.narrowFromDoubleHex (dst : FloatFormat) (bits : Nat) : IEEEFloat dst :=
+  let exp := (bits >>> 52) &&& 0x7FF
+  let mant := bits &&& ((1 <<< 52) - 1)
+  if exp == 0x7FF && mant != 0 then
+    let m := mant >>> (52 - dst.sigBits)
+    let m := if m == 0 then 1 else m
+    let sign := (bits >>> 63) &&& 1
+    IEEEFloat.ofNatBits ((sign <<< (dst.expBits + dst.sigBits)) |||
+      (((1 <<< dst.expBits) - 1) <<< dst.sigBits) ||| m)
+  else
+    IEEEFloat.convert dst .RNE (IEEEFloat.ofNatBits (fmt := .double) bits)
+
+end LeanNanoLlvm

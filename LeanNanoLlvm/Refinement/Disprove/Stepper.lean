@@ -371,7 +371,7 @@ def proveDisproofWithExpr (argsExpr : Expr) : TacticM Unit := do
   evalTactic (← `(tactic|
     simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
       applyByValCopies, applyByValCopies.go, splitPhis,
-      RegisterValue.matchesType, byvalDeferredAttrs, applyValueAttrsPure,
+      RegisterValue.matchesType, byvalDeferredAttrs, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs,
       List.length_nil, List.length_cons, List.any_nil, List.any_cons,
       List.getD, List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil,
       Option.getD_some, Option.getD_none,

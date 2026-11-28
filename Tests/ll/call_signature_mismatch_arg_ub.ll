@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 1
 ; EXPECT_ERR: UB: Indirect call through a function pointer with mismatched signature.
-; XFAIL: difftest bug B3 (parameter type mismatch at a call is a static error, not UB)
 ;
 ; difftest (phase 2): "If the function signature does not match the function type of the
 ; call, the behavior is undefined" (LangRef `call`); llubi reports immediate UB. We stop with

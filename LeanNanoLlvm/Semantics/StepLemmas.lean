@@ -412,10 +412,10 @@ theorem Step.ret_top_leaf_iff {st frame tid ty e v}
     | ret_ok _ he' hr =>
       have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
       cases hr with
-      | top_ok _ hattr => rw [hattr]; exact ⟨rfl, rfl⟩
+      | top_ok _ hattr => rw [retAttrsAtReturn_nil] at hattr; rw [hattr]; exact ⟨rfl, rfl⟩
       | call_ok hne _ _ _ _ => cases hne
       | noreturn_ub hne _ _ _ => cases hne
-      | callee_attr_err hattr => rw [hattr]; exact ⟨rfl, rfl⟩
+      | callee_attr_err hattr => rw [retAttrsAtReturn_nil] at hattr; rw [hattr]; exact ⟨rfl, rfl⟩
       | caller_attr_err hne _ _ _ _ => cases hne
       | missing_dest hne _ _ => cases hne
     | ret_exp_err _ he' => have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
@@ -424,8 +424,8 @@ theorem Step.ret_top_leaf_iff {st frame tid ty e v}
     refine ⟨rfl, ?_⟩
     cases hattr : applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList st.memory frame.frameAllocas)
         (.ret ty) {} frame.defn.prototype.retAttrs v with
-    | ok v' => exact StepTerm.ret_ok hretTy (EvalExp.leaf_ok he) (StepRet.top_ok rfl hattr)
-    | error err => exact StepTerm.ret_ok hretTy (EvalExp.leaf_ok he) (StepRet.callee_attr_err hattr)
+    | ok v' => exact StepTerm.ret_ok hretTy (EvalExp.leaf_ok he) (StepRet.top_ok rfl (by rw [retAttrsAtReturn_nil]; exact hattr))
+    | error err => exact StepTerm.ret_ok hretTy (EvalExp.leaf_ok he) (StepRet.callee_attr_err (by rw [retAttrsAtReturn_nil]; exact hattr))
 
 /-- Deterministic inversion for top-level `ret void`. -/
 theorem Step.retVoid_top_iff {st frame tid}
@@ -438,7 +438,7 @@ theorem Step.retVoid_top_iff {st frame tid}
       ev = none ∧
       c' = .halted .void (freeAllocaList st.memory frame.frameAllocas) := by
   have hattr : applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList st.memory frame.frameAllocas)
-      .void {} frame.defn.prototype.retAttrs .void = .ok .void := rfl
+      .void {} (retAttrsAtReturn frame []) .void = .ok .void := rfl
   rw [Step.term_iff hf hc hterm]
   constructor
   · rintro ⟨rfl, ht⟩
@@ -597,7 +597,7 @@ theorem EvalPhis.cons_leaf_iff {dl cfg regs predId mem rid ty incs rest incExp b
       obtain ⟨o, o', ho⟩ := hfmf
       simp only [applyInputFMFExec_none, Except.ok.injEq, Prod.mk.injEq] at ho
       obtain ⟨rfl, _⟩ := ho
-      simp only [applyValueAttrsPure, Except.ok.injEq] at hmd; subst hmd
+      simp only [applyValueAttrsPure_nil, Except.ok.injEq] at hmd; subst hmd
       have hru := (hrest _).mp hr'; cases hru
       rfl
     | cons_missing_pred hl' => rw [hlook] at hl'; cases hl'
@@ -614,14 +614,14 @@ theorem EvalPhis.cons_leaf_iff {dl cfg regs predId mem rid ty incs rest incExp b
       obtain ⟨o, o', ho⟩ := hfmf
       simp only [applyInputFMFExec_none, Except.ok.injEq, Prod.mk.injEq] at ho
       obtain ⟨rfl, _⟩ := ho
-      simp [applyValueAttrsPure] at hmd
+      simp [applyValueAttrsPure_nil] at hmd
     | cons_tail_err hl' he' hfmf hmd hr' =>
       rw [hlook] at hl'; cases hl'
       have hv := (EvalExp.leaf_iff he _).mp he'; cases hv
       obtain ⟨o, o', ho⟩ := hfmf
       simp only [applyInputFMFExec_none, Except.ok.injEq, Prod.mk.injEq] at ho
       obtain ⟨rfl, _⟩ := ho
-      simp only [applyValueAttrsPure, Except.ok.injEq] at hmd; subst hmd
+      simp only [applyValueAttrsPure_nil, Except.ok.injEq] at hmd; subst hmd
       have hru := (hrest _).mp hr'; cases hru
     | cons_nonphi_err hnp => exact False.elim (hnp _ _ _ _ rfl)
   · rintro rfl

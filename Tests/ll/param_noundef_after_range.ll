@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 1
 ; EXPECT_ERR: UB: The value poison violates noundef attribute.
-; XFAIL: difftest bug B1 (noundef is checked before range in the same attribute list)
 ;
 ; difftest (phase 2): poison-generating parameter attributes (range, nofpclass, nonnull, align)
 ; must be applied before noundef is checked, whatever their order in the source (LangRef

@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 63
-; XFAIL: difftest bug B8 (conversions to ppc_fp128 produce the wrong bit layout)
 ;
 ; difftest (phase 2): ppc_fp128 is a pair of doubles (LangRef "Floating-Point Types"); in its
 ; i128 bit pattern the high-order double occupies the low 64 bits (LLVM APInt order, used by

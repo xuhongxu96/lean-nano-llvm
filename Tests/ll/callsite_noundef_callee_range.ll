@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 1
 ; EXPECT_ERR: UB: The value poison violates noundef attribute.
-; XFAIL: difftest bug B1 (call-site and callee parameter attributes are applied in separate passes)
 ;
 ; difftest (phase 2): call-site and callee parameter attributes form one set (llubi
 ; `handleAttributes(Ty, V, AttrsAtCallSite, AttrsAtCallee)`): the callee's range makes 5

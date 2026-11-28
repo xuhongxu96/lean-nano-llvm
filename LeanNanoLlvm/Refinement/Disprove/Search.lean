@@ -98,11 +98,29 @@ private def isCounterexampleConfig (cSrc cTgt : Config) : Bool :=
   | .halted _ _, .ub _ => true
   | _, _ => false
 
+/-- Run `fuel` steps from `c` and return the final configuration. Unlike `runSteps` (written with
+`Nat.rec` so that the kernel can reduce it, and which builds the trace), this is tail-recursive, so
+the search uses constant stack however many steps a candidate runs: interpreting `runSteps` on a
+long loop exhausted Lean's interpreter stack and aborted the process ("deep recursion"). -/
+private def runToFinal (fuel : Nat) (o : OracleState) (c : Config) : Config :=
+  match fuel with
+  | 0 => c
+  | n + 1 =>
+    match c with
+    | .running _ =>
+      let (_, c1, o1) := execStep o c
+      runToFinal n o1 c1
+    | _ => c
+
+private def runForSearch (defn : AST.Definition) (args : List RegisterValue) : Config :=
+  let cfg : SemanticsConfig := .modern
+  runToFinal cfg.maxSteps default (initCallConfig cfg .default64LE {} ∅ ∅ defn args)
+
 private def testWitness (src tgt : AST.Definition) (args : List RegisterValue) : Bool :=
-  let (_, cSrc, _) := runDefinitionWithTrace src args
+  let cSrc := runForSearch src args
   match cSrc with
   | .halted _ _ =>
-    let (_, cTgt, _) := runDefinitionWithTrace tgt args
+    let cTgt := runForSearch tgt args
     isCounterexampleConfig cSrc cTgt
   | _ => false
 

@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 7
-; XFAIL: difftest bug B2 (an unlabeled entry block is named %entry, not its slot number)
 ;
 ; difftest (phase 2): as phi_unnamed_entry_block.ll, with an unnamed parameter: the parameter
 ; is %0, so the unlabeled entry block is %1.

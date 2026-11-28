@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 1
-; XFAIL: difftest bug B6 (a datalayout pointer spec with flags, `pe1:...`, is read as address space 0)
 ;
 ; difftest (phase 2): `p[<flags>][<as>]:...` (LangRef "Data Layout"): in `pe1:64:64:64:32`, `e`
 ; is a flag and the spec (32-bit index width) applies to address space 1. Address space 0

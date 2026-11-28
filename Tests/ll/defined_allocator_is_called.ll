@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 84
-; XFAIL: difftest bug B9 (calls to a module-defined malloc/calloc are replaced by the builtin allocator)
 ;
 ; difftest (phase 2): a function the module defines is executed as defined, whatever its
 ; name; llubi runs the bodies of @malloc and @calloc here and returns 42 + 42. We intercept

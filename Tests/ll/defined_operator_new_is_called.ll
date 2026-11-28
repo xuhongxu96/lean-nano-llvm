@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 42
-; XFAIL: difftest bug B9 (calls to a module-defined operator new are replaced by the builtin allocator)
 ;
 ; difftest (phase 2): as defined_allocator_is_called.ll, for `operator new(unsigned)` (@_Znwj).
 ; Minimized from case 1aa3170c73369178.

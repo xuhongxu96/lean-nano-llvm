@@ -178,10 +178,9 @@ private def fpOf (ft : FloatType) : CVal → Option (IEEEFloat ft.format)
 /-- Decode a hexadecimal float literal of tag `tag` for type `ft` into semantic `IEEEFloat` bits. -/
 def decodeHexFloat (ft : FloatType) (tag : Char) (val : Nat) : Nat :=
   match ft, tag with
-  | .float, 'd' =>
-    (IEEEFloat.convert .single .RNE (IEEEFloat.ofNatBits (fmt := .double) val)).bits.toNat
-  | .half, 'd' | .bfloat, 'd' =>
-    (IEEEFloat.convert ft.format .RNE (IEEEFloat.ofNatBits (fmt := .double) val)).bits.toNat
+  | .float, 'd' | .half, 'd' | .bfloat, 'd' =>
+    -- exact conversion; NaNs keep their signaling bit and top payload (`IEEEFloat.narrowFromDoubleHex`)
+    (IEEEFloat.narrowFromDoubleHex ft.format val).bits.toNat
   | .x86_fp80, 'K' =>
     -- drop the explicit integer bit (bit 63) of the 80-bit encoding
     let sig := val &&& ((1 <<< 63) - 1)

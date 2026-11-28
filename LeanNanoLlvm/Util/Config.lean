@@ -101,6 +101,8 @@ structure SemanticsConfig : Type where
   roundingMode  : RoundingMode := .RNE
   /-- Active denormal mode for FP operations. -/
   denormalMode  : DenormalMode := {}
+  /-- Override of `denormalMode` for 32-bit `float` (`denormal_fpenv(float: ...)`). -/
+  denormalModeF32 : Option DenormalMode := none
   /-- Step budget for multi-block loops and recursive calls (0 = default bounded). -/
   maxSteps      : Nat := 10000
   /-- Maximum call stack depth. -/

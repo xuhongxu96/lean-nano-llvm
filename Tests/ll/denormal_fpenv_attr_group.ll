@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 0
-; XFAIL: difftest bug B4 (denormal_fpenv inside an attribute group is ignored)
 ;
 ; difftest (phase 2): with input mode `preservesign`, "a floating-point operation must treat
 ; any input denormal value as zero" (LangRef `denormal_fpenv`), so x + 0.0 is +0.0 for the

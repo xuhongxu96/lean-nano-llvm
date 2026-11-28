@@ -518,6 +518,8 @@ structure Declaration where
   denormalMode : Option DenormalMode := none
   /-- Calling convention (`""` is the default `ccc`). -/
   callingConv  : String := ""
+  /-- `denormal_fpenv(float: ...)`: the mode of 32-bit `float` (and vectors of it) only. -/
+  denormalModeF32 : Option DenormalMode := none
 deriving Repr
 
 abbrev Code := List (InstructionId × Instruction)

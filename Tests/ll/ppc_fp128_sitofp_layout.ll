@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 63
-; XFAIL: difftest bug B8 (conversions to ppc_fp128 produce the wrong bit layout)
 ;
 ; difftest (phase 2): as ppc_fp128_fpext_layout.ll, for sitofp.
 

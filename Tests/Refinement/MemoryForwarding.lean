@@ -236,7 +236,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
         (det_step_to_halted fun ev c' => by
           rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 v)
                 (by llvm_step)]
-          simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, retXDef]
+          simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs, retXDef]
           rfl)
         (StarStep.step (ev := none)
           (Step.instr rfl rfl
@@ -322,7 +322,7 @@ theorem dead_alloca_store_elim_i8 :
         (det_step_to_halted fun ev c' => by
           rw [Step.ret_top_leaf_iff rfl rfl rfl rfl (v := .bv 8 v)
                 (by llvm_step)]
-          simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, retXDef]
+          simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs, retXDef]
           rfl)
         (StarStep.step (ev := none)
           (Step.instr rfl rfl

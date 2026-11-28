@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 1
-; XFAIL: difftest bug B2 (an unlabeled entry block is named %entry, not its slot number)
 ;
 ; difftest (phase 2): an unlabeled entry block takes the next unnamed slot number, here %0
 ; (LangRef "Functions": "If the first basic block ... has no label, it is assigned %N"), so the

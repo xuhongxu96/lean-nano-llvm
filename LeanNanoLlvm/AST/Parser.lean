@@ -32,9 +32,16 @@ def parseDataLayoutString (s : String) : DataLayout :=
     if part == "e" then { dl with endianness := .little }
     else if part == "E" then { dl with endianness := .big }
     else if part.startsWith "p" then
-      let (allOnesNull, restStr) :=
-        if part.startsWith "po" then (true, (part.drop 2).toString)
-        else (false, (part.drop 1).toString)
+      -- `p[<flags>][<as>][(<name>)]:...` (LangRef "Data Layout"): flags are `u` (unstable
+      -- representation), `e` (external state), `z` (all-zeros null), `o` (all-ones null).
+      let afterP := (part.drop 1).toString
+      let flags := afterP.takeWhile (fun c => c == 'u' || c == 'e' || c == 'z' || c == 'o')
+      let allOnesNull := flags.contains 'o'
+      let restStr := (afterP.drop flags.length).toString
+      -- drop an optional address-space name `(name)` before the first `:`
+      let restStr := match restStr.splitOn ":" with
+        | asPart :: more => ":".intercalate ((asPart.takeWhile (· != '(')).toString :: more)
+        | [] => restStr
       let fields := restStr.splitOn ":"
       match fields with
       | asStr :: sizeStr :: abiStr :: rest =>
@@ -113,9 +120,11 @@ structure PState where
   pos          : Nat := 0
   nextVoid     : Nat := 0
   nextAnon     : Nat := 0
-  rangeMeta    : List (String × Int × Int) := []
+  rangeMeta    : List (String × List (Int × Int)) := []
   intMeta      : List (String × Nat) := []
   noReturnGrps : List Nat := []
+  /-- `denormal_fpenv` of attribute groups: group, general mode, `float:` mode. -/
+  denormGrps   : List (Nat × Option DenormalMode × Option DenormalMode) := []
   vscale       : Nat := 4
   /-- Named type definitions seen so far, as `(name, type, type at vscale = 1)`, used only to
   compute LLVM's recorded alignment for memory operations on scalable types. -/
@@ -950,8 +959,9 @@ private def parseSingleMetaAttr (fuel : Nat) (tag : String) : ParseM (Option Val
       let _ ← bump
       let st ← get
       match st.rangeMeta.find? (fun p => p.1 == nodeId) with
-      | some (_, lo, hi) => return some (.range lo hi)
-      | none => return none
+      | some (_, [(lo, hi)]) => return some (.range lo hi)
+      | some (_, ps@(_ :: _)) => return some (.rangeList ps)
+      | _ => return none
     | .bang =>
       let _ ← bump
       if ← tryEat .lbrace then
@@ -1602,9 +1612,9 @@ def parseBlock (fuel : Nat) (isFirst : Bool) : ParseM Block := do
   let bid ←
     if ← isBlockLabelStart then parseBlockLabel
     else if isFirst then
-      -- LLVM assigns the unnamed entry block implicit ID %0 (or %argCount), so unnamed instructions start at next ID
-      let _ ← freshAnonId
-      pure (.name "entry")
+      -- LLVM gives an unlabeled entry block the next unnamed slot number (%0, or %N after N
+      -- unnamed parameters), and `phi`/`br` refer to it by that number.
+      freshAnonId
     else throw s!"parse error: expected block label, got {repr (← peek)}"
   let mut code : List (InstructionId × Instruction) := []
   let mut term? : Option (InstructionId × Terminator) := none
@@ -1709,10 +1719,30 @@ private def parseDenormKind : String → Option DenormalModeKind
   | "ieee" => some .ieee
   | _ => none
 
-private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMode) := do
+/-- The tokens inside `denormal_fpenv(...)`: `[out[|in]] [, float: out[|in]]` (LangRef
+`denormal_fpenv`; one mode sets both output and input). Returns (general mode, `float:` mode). -/
+def denormFromToks (ts : List Tok) : Option DenormalMode × Option DenormalMode :=
+  let segs := (ts.foldr (init := [[]]) fun t acc =>
+    if t == .comma then [] :: acc else match acc with
+      | seg :: rest => (t :: seg) :: rest
+      | [] => [[t]])
+  let mode (kinds : List DenormalModeKind) : Option DenormalMode :=
+    match kinds with
+    | [m] => some { input := m, output := m }
+    | [outM, inM] => some { input := inM, output := outM }
+    | _ => none
+  let kindsOf (seg : List Tok) : List DenormalModeKind :=
+    seg.filterMap fun | .ident s => parseDenormKind s | _ => none
+  segs.foldl (init := (none, none)) fun (g, f) seg =>
+    match seg with
+    | .ident "float" :: .colon :: rest => (g, mode (kindsOf rest))
+    | _ => (mode (kindsOf seg), f)
+
+private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMode × Option DenormalMode) := do
   let mut isNoRet := false
   let mut isNoBuiltin := false
   let mut denorm? : Option DenormalMode := none
+  let mut denormF32? : Option DenormalMode := none
   let mut guard := 32
   while guard > 0 do
     guard := guard - 1
@@ -1721,6 +1751,10 @@ private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMo
       let _ ← bump
       let st ← get
       if st.noReturnGrps.contains n then isNoRet := true
+      -- `denormal_fpenv` inside the group (`attributes #n = { denormal_fpenv(...) }`)
+      if let some (_, g?, f?) := st.denormGrps.find? (·.1 == n) then
+        if g?.isSome then denorm? := g?
+        if f?.isSome then denormF32? := f?
     | .ident "noreturn" =>
       let _ ← bump
       isNoRet := true
@@ -1730,23 +1764,21 @@ private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMo
     | .ident "denormal_fpenv" =>
       let _ ← bump
       if ← tryEat .lparen then
-        let mut kinds : List DenormalModeKind := []
+        let mut inner : List Tok := []
         let mut depth : Nat := 1
         let mut g := fuel
         while depth > 0 && g > 0 do
           g := g - 1
-          match ← bump with
+          let t ← bump
+          match t with
           | .lparen => depth := depth + 1
           | .rparen => depth := depth - 1
-          | .ident s =>
-            if let some k := parseDenormKind s then
-              kinds := kinds ++ [k]
           | .eof => depth := 0
           | _ => pure ()
-        match kinds with
-        | [m] => denorm? := some { input := m, output := m }
-        | [outM, inM] => denorm? := some { input := inM, output := outM }
-        | _ => pure ()
+          if depth > 0 then inner := t :: inner
+        let (g?, f?) := denormFromToks inner.reverse
+        if g?.isSome then denorm? := g?
+        if f?.isSome then denormF32? := f?
     | .ident "unnamed_addr" | .ident "local_unnamed_addr" | .ident "nounwind"
     | .ident "readonly" | .ident "readnone" | .ident "willreturn"
     | .ident "alwaysinline" | .ident "noinline" | .ident "optnone" | .ident "optsize"
@@ -1773,7 +1805,7 @@ private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMo
       let _ ← bump
       if ← tryEat .eq then let _ ← bump
     | _ => guard := 0
-  return (isNoRet, isNoBuiltin, denorm?)
+  return (isNoRet, isNoBuiltin, denorm?, denormF32?)
 
 /-- Parse a `declare` or `define` header returning `(Declaration, paramNames)`. -/
 private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) := do
@@ -1813,7 +1845,7 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
         argNames := nm :: argNames
         if ← tryEat .comma then go := true
         else expect .rparen "function params"; go := false
-  let (isNoRet, isNoBuiltin, denorm?) ← skipFnAttrs fuel
+  let (isNoRet, isNoBuiltin, denorm?, denormF32?) ← skipFnAttrs fuel
   let decl : Declaration := {
     name := fnName
     type := .function retTy argTys.reverse isVarArg
@@ -1822,6 +1854,7 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
     isNoReturn := isNoRet
     isNoBuiltin := isNoBuiltin
     denormalMode := denorm?
+    denormalModeF32 := denormF32?
     callingConv := cc
   }
   return (decl, argNames.reverse)
@@ -1839,19 +1872,31 @@ structure ParsedModule where
 deriving Repr
 
 /-- Pre-scan `!N = !{ i32 lo, i32 hi }` metadata nodes so `load ... !range !N` resolves cleanly. -/
-private def prescanRangeMetadata (toks : Array Tok) : List (String × Int × Int) :=
+private def prescanRangeMetadata (toks : Array Tok) : List (String × List (Int × Int)) :=
   let n := toks.size
-  let rec go (i : Nat) (acc : List (String × Int × Int)) : List (String × Int × Int) :=
-    if i + 9 ≥ n then acc
+  -- `ty v, ty v, ...}` starting at `j`: the integers, or `none` if the node is not of that form.
+  let rec ints (j : Nat) (fuel : Nat) (acc : List Int) : Option (List Int × Nat) :=
+    match fuel with
+    | 0 => none
+    | fuel + 1 =>
+      match toks.getD j .eof, toks.getD (j + 1) .eof, toks.getD (j + 2) .eof with
+      | .ident _, .intLit v, .comma => ints (j + 3) fuel (v :: acc)
+      | .ident _, .intLit v, .rbrace => some ((v :: acc).reverse, j + 3)
+      | _, _, _ => none
+  let rec pairs : List Int → List (Int × Int)
+    | lo :: hi :: rest => (lo, hi) :: pairs rest
+    | _ => []
+  let rec go (i : Nat) (acc : List (String × List (Int × Int))) : List (String × List (Int × Int)) :=
+    if i + 4 ≥ n then acc
     else
-      match toks.getD i .eof, toks.getD (i + 1) .eof, toks.getD (i + 2) .eof,
-            toks.getD (i + 3) .eof, toks.getD (i + 4) .eof, toks.getD (i + 5) .eof,
-            toks.getD (i + 6) .eof, toks.getD (i + 7) .eof, toks.getD (i + 8) .eof,
-            toks.getD (i + 9) .eof with
-      | .metaId id, .eq, .bang, .lbrace, .ident _, .intLit lo, .comma, .ident _, .intLit hi, .rbrace =>
-        go (i + 10) ((id, lo, hi) :: acc)
-      | _, _, _, _, _, _, _, _, _, _ =>
-        go (i + 1) acc
+      match toks.getD i .eof, toks.getD (i + 1) .eof, toks.getD (i + 2) .eof, toks.getD (i + 3) .eof with
+      | .metaId id, .eq, .bang, .lbrace =>
+        match ints (i + 4) 64 [] with
+        | some (vs, _) =>
+          if vs.length ≥ 2 && vs.length % 2 == 0 then go (i + 4) ((id, pairs vs) :: acc)
+          else go (i + 4) acc
+        | none => go (i + 1) acc
+      | _, _, _, _ => go (i + 1) acc
   termination_by n - i
   go 0 []
 
@@ -1894,6 +1939,40 @@ private def prescanNoReturnGroups (toks : Array Tok) : List Nat :=
   termination_by n - i
   go 0 []
 
+/-- Pre-scan `attributes #N = { ... denormal_fpenv(...) ... }` (LLVM prints function attributes
+through groups). -/
+private def prescanDenormGroups (toks : Array Tok) : List (Nat × Option DenormalMode × Option DenormalMode) :=
+  let n := toks.size
+  -- tokens of the parenthesized group starting after `denormal_fpenv (` at `i`
+  let rec inner (i : Nat) (acc : List Tok) : List Tok × Nat :=
+    if i ≥ n then (acc.reverse, i)
+    else match toks.getD i .eof with
+      | .rparen => (acc.reverse, i + 1)
+      | t => inner (i + 1) (t :: acc)
+  termination_by n - i
+  let rec scanBody (i : Nat) (found : Option (Option DenormalMode × Option DenormalMode)) :
+      Option (Option DenormalMode × Option DenormalMode) × Nat :=
+    if i ≥ n then (found, i)
+    else
+      match toks.getD i .eof, toks.getD (i + 1) .eof with
+      | .rbrace, _ => (found, i + 1)
+      | .ident "denormal_fpenv", .lparen =>
+        let (ts, j) := inner (i + 2) []
+        if j > i then scanBody j (some (denormFromToks ts)) else (found, n)
+      | _, _ => scanBody (i + 1) found
+  termination_by n - i
+  let rec go (i : Nat) (acc : List (Nat × Option DenormalMode × Option DenormalMode)) :=
+    if i + 3 ≥ n then acc
+    else
+      match toks.getD i .eof, toks.getD (i + 1) .eof, toks.getD (i + 2) .eof, toks.getD (i + 3) .eof with
+      | .ident "attributes", .attrGrp grp, .eq, .lbrace =>
+        let (d?, nextI) := scanBody (i + 4) none
+        let acc' := match d? with | some (g, f) => (grp, g, f) :: acc | none => acc
+        if nextI > i then go nextI acc' else acc'
+      | _, _, _, _ => go (i + 1) acc
+  termination_by n - i
+  go 0 []
+
 /-- Locate the parameter list of a function header in `[lo, hi)`: the token range strictly inside
 the first top-level parenthesis pair following the function's `@name`. -/
 def findParamRange (toks : Array Tok) (lo hi : Nat) : Nat × Nat := Id.run do
@@ -1926,6 +2005,7 @@ def parseLlvmModule (input : String) (vscale : Nat := 4) : Except String ParsedM
     rangeMeta := prescanRangeMetadata toks
     intMeta := prescanIntMetadata toks
     noReturnGrps := prescanNoReturnGroups toks
+    denormGrps := prescanDenormGroups toks
     vscale := vscale
   }
   let run : ParseM ParsedModule := do
@@ -2056,7 +2136,8 @@ def parseLlvmModule (input : String) (vscale : Nat := 4) : Except String ParsedM
         let hdrEnd := (← get).pos
         modify fun st => { st with curSrc := #[] }
         expect .lbrace "define body"
-        modify fun st => { st with nextAnon := argNames.length }
+        -- Unnamed values continue after the unnamed parameters (named ones take no slot).
+        modify fun st => { st with nextAnon := argNames.countP (fun | .anonymous _ => true | _ => false) }
         let mut blocks : List Block := []
         let mut first := true
         let mut g := fuel

@@ -11,6 +11,7 @@ import Tests.Refinement.CallerMemory
 import Tests.Refinement.Transitivity
 import Tests.Refinement.Simulation
 import Tests.Refinement.ModuleEnv
+import Tests.Refinement.Difftest
 
 /-!
 # Refinement Tests

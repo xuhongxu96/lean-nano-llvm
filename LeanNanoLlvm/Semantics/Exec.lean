@@ -55,18 +55,7 @@ def execExp (dl : DataLayout) (cfg : SemanticsConfig)
     | _ => .error (.staticError s!"invalid type for int literal: found {ty.print}")
   | .floatBits bits =>
     match ty with
-    | .float .float =>
-      let flt : IEEEFloat .single :=
-        if bits ≥ (1 <<< 32) then
-          IEEEFloat.convert .single .RNE (IEEEFloat.ofNatBits (fmt := .double) bits)
-        else
-          IEEEFloat.ofNatBits bits
-      .ok (.float .float (.value flt), mem, o)
-    | .float .ppc_fp128 =>
-      let hi := bits >>> 64
-      let lo := bits &&& ((1 <<< 64) - 1)
-      .ok (.float .ppc_fp128 (.value (IEEEFloat.ofNatBits ((lo <<< 64) ||| hi))), mem, o)
-    | .float ft => .ok (.float ft (.value (IEEEFloat.ofNatBits bits)), mem, o)
+    | .float ft => .ok (floatLiteralValue ft bits, mem, o)
     | _ => .error (.staticError s!"invalid type for float bit literal: found {ty.print}")
   | .floatDec neg m e10 =>
     match ty with
@@ -846,7 +835,7 @@ theorem execAssumeBundles_sound (dl : DataLayout) (cfg : SemanticsConfig)
 def execRet (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
     (retTy : LlvmRetType) (retVal : RegisterValue) (m1 : MemoryState) : Config :=
   let m2 := freeAllocaList m1 frame.frameAllocas
-  match applyRetFMFAndAttrsPure st.dataLayout m2 retTy {} frame.defn.prototype.retAttrs retVal with
+  match applyRetFMFAndAttrsPure st.dataLayout m2 retTy {} (retAttrsAtReturn frame callers) retVal with
   | .error err => Config.ofError err
   | .ok retVal1 =>
     match callers with
@@ -872,7 +861,7 @@ theorem execRet_sound (st : MachineState) (frame : CallFrame) (callers : List Ca
   unfold execRet
   dsimp only
   cases h1 : applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-      retTy {} frame.defn.prototype.retAttrs retVal with
+      retTy {} (retAttrsAtReturn frame callers) retVal with
   | error err => exact StepRet.callee_attr_err h1
   | ok retVal1 =>
     cases callers with
@@ -1173,7 +1162,7 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           | some (.error err) => (none, Config.ofError err, o2)
           | none =>
             match st.functions.get? fid with
-            | none => (none, .staticError s!"Call to undefined external function @{fid}", o2)
+            | none => (none, externalCallConfig st fid retTy argVals, o2)
             | some calleeDef =>
               if cfg.maxStackDepth != 0 && st.frames.length ≥ cfg.maxStackDepth then
                 (none, .resourceError .stackOverflow, o2)

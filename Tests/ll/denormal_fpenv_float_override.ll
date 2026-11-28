@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 0
 ; EXPECT_OUT: OK: i32 1
-; XFAIL: difftest bug B4 (the `float:` override of denormal_fpenv is applied to every type)
 ;
 ; difftest (phase 2): `denormal_fpenv(float: preservesign)` sets the mode of 32-bit floats only
 ; (LangRef `denormal_fpenv`); doubles keep the default ieee|ieee, so the subnormal double input

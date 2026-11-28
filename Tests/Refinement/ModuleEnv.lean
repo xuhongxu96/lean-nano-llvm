@@ -159,24 +159,24 @@ theorem caller_add0_is_refined_by_direct_in_module :
             | top_ok hnil => cases hnil
             | call_ok hcons h1 hrd _ h2 =>
               cases hcons
-              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
+              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs, helperId32Def] at h1
               injection h1 with hv1; subst hv1
               injection hrd with hrd'; subst hrd'
-              simp only [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
+              simp only [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs] at h2
               injection h2 with hv2; subst hv2
               exact ⟨rfl, rfl⟩
             | noreturn_ub hcons _ hrd hnr =>
               cases hcons; injection hrd with hrd'; subst hrd'
               simp [helperId32Def] at hnr
             | callee_attr_err h1 =>
-              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
+              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs, helperId32Def] at h1
               cases h1
             | caller_attr_err hcons h1 hrd _ h2 =>
               cases hcons
-              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, helperId32Def] at h1
+              simp only [freeAllocaList, applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs, helperId32Def] at h1
               injection h1 with hv1; subst hv1
               injection hrd with hrd'; subst hrd'
-              simp only [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure] at h2
+              simp only [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs] at h2
               cases h2
             | missing_dest hcons _ hrd =>
               cases hcons; cases hrd
@@ -187,7 +187,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
           exact Step.term rfl rfl rfl
             (StepTerm.ret_ok rfl (EvalExp.leaf_ok (by llvm_step; rfl))
               (StepRet.call_ok (rd := { destId := .id (.name "r"), retTy := .ret (.int 32), fmf := {}, retAttrs := [] })
-                rfl (by llvm_step [helperId32Def]; rfl) rfl rfl (by simp [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure]))))
+                rfl (by llvm_step [helperId32Def]; rfl) rfl rfl (by simp [finishCallerReturn, applyRetFMFAndAttrsPure, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs]))))
       hY3
     have hY1 := det_step_chain (st := {
         frames := [{ defn := callerDirectDef, curBlock := .name "entry",
@@ -208,7 +208,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
             | cons_attr_err he ha =>
               rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
               injection he with hpair; cases hpair
-              simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; cases ha
+              simp only [byvalDeferredAttrs_nil, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs] at ha; cases ha
             | cons_tail_err he ha hrest =>
               rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
               injection he with hpair; cases hpair
@@ -238,7 +238,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
               | cons_ok he ha hrest =>
                 rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
                 injection he with hpair; cases hpair
-                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs] at ha; injection ha with hv; subst hv
                 cases hrest
                 obtain ⟨o, _, h⟩ := hintr; rw [hnoIntr _ _ o _ _] at h; cases h
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
@@ -249,7 +249,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
               | cons_ok he ha hrest =>
                 rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
                 injection he with hpair; cases hpair
-                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs] at ha; injection ha with hv; subst hv
                 cases hrest
                 obtain ⟨o, h⟩ := hintr; rw [hnoIntr _ _ o _ _] at h; cases h
             | indirect_ok hne _ _ => exact absurd rfl (hne (.name "id32"))
@@ -260,7 +260,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
               | cons_ok he ha hrest =>
                 rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
                 injection he with hpair; cases hpair
-                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs] at ha; injection ha with hv; subst hv
                 cases hrest
                 rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
                 dsimp only [List.map, tailHidden, MemoryState.hide, AST.CallSiteInfo.default] at hmk
@@ -274,7 +274,7 @@ theorem caller_add0_is_refined_by_direct_in_module :
               | cons_ok he ha hrest =>
                 rw [EvalExp.leaf_iff (by llvm_step; rfl)] at he
                 injection he with hpair; cases hpair
-                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure] at ha; injection ha with hv; subst hv
+                simp only [byvalDeferredAttrs_nil, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs] at ha; injection ha with hv; subst hv
                 cases hrest
                 rw [hlookupId] at hfn; injection hfn with hdef; subst hdef
                 dsimp only [List.map, tailHidden, MemoryState.hide, AST.CallSiteInfo.default] at hmk

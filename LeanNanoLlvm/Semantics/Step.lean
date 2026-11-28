@@ -54,18 +54,7 @@ def evalPureLeafExp? (dl : DataLayout) (cfg : SemanticsConfig)
       | _ => .error (.staticError s!"invalid type for int literal: found {ty.print}")
   | .floatBits bits =>
     some <| match ty with
-      | .float .float =>
-        let flt : IEEEFloat .single :=
-          if bits ≥ (1 <<< 32) then
-            IEEEFloat.convert .single .RNE (IEEEFloat.ofNatBits (fmt := .double) bits)
-          else
-            IEEEFloat.ofNatBits bits
-        .ok (.float .float (.value flt))
-      | .float .ppc_fp128 =>
-        let hi := bits >>> 64
-        let lo := bits &&& ((1 <<< 64) - 1)
-        .ok (.float .ppc_fp128 (.value (IEEEFloat.ofNatBits ((lo <<< 64) ||| hi))))
-      | .float ft => .ok (.float ft (.value (IEEEFloat.ofNatBits bits)))
+      | .float ft => .ok (floatLiteralValue ft bits)
       | _ => .error (.staticError s!"invalid type for float bit literal: found {ty.print}")
   | .floatDec neg m e =>
     some <| match ty with
@@ -635,12 +624,12 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
   | top_ok {retVal'} :
       callers = [] →
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-        retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal' →
+        retTy {} (retAttrsAtReturn frame callers) retVal = .ok retVal' →
       StepRet st frame callers retTy retVal m1 (.halted retVal' (freeAllocaList m1 frame.frameAllocas))
   | call_ok {caller restCallers retVal1 rd retVal2} :
       callers = caller :: restCallers →
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-        retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
+        retTy {} (retAttrsAtReturn frame callers) retVal = .ok retVal1 →
       caller.returnDest? = some rd →
       (frame.defn.prototype.isNoReturn || rd.isNoReturn) = false →
       finishCallerReturn st.dataLayout st.config (freeAllocaList m1 frame.frameAllocas) rd retVal1 = .ok retVal2 →
@@ -653,18 +642,18 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
   | noreturn_ub {caller restCallers retVal1 rd msg} :
       callers = caller :: restCallers →
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-        retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
+        retTy {} (retAttrsAtReturn frame callers) retVal = .ok retVal1 →
       caller.returnDest? = some rd →
       (frame.defn.prototype.isNoReturn || rd.isNoReturn) = true →
       StepRet st frame callers retTy retVal m1 (.ub msg)
   | callee_attr_err {err} :
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-        retTy {} frame.defn.prototype.retAttrs retVal = .error err →
+        retTy {} (retAttrsAtReturn frame callers) retVal = .error err →
       StepRet st frame callers retTy retVal m1 (Config.ofError err)
   | caller_attr_err {caller restCallers retVal1 rd err} :
       callers = caller :: restCallers →
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-        retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
+        retTy {} (retAttrsAtReturn frame callers) retVal = .ok retVal1 →
       caller.returnDest? = some rd →
       (frame.defn.prototype.isNoReturn || rd.isNoReturn) = false →
       finishCallerReturn st.dataLayout st.config (freeAllocaList m1 frame.frameAllocas) rd retVal1 = .error err →
@@ -672,7 +661,7 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
   | missing_dest {caller restCallers retVal1 msg} :
       callers = caller :: restCallers →
       applyRetFMFAndAttrsPure st.dataLayout (freeAllocaList m1 frame.frameAllocas)
-        retTy {} frame.defn.prototype.retAttrs retVal = .ok retVal1 →
+        retTy {} (retAttrsAtReturn frame callers) retVal = .ok retVal1 →
       caller.returnDest? = none →
       StepRet st frame callers retTy retVal m1 (.staticError msg)
 
@@ -680,9 +669,12 @@ inductive StepRet (st : MachineState) (frame : CallFrame) (callers : List CallFr
 
 /-- Effective `SemanticsConfig` for FP ops inside `frame`, applying per-function `denormal_fpenv`. -/
 def frameDenormalCfg (st : MachineState) (frame : CallFrame) : SemanticsConfig :=
-  match frame.defn.prototype.denormalMode with
-  | some dm => { st.config with denormalMode := dm }
-  | none => st.config
+  let cfg := match frame.defn.prototype.denormalMode with
+    | some dm => { st.config with denormalMode := dm }
+    | none => st.config
+  match frame.defn.prototype.denormalModeF32 with
+  | some dm => { cfg with denormalModeF32 := some dm }
+  | none => cfg
 
 /--
 Relational small-step execution of a single instruction `instr` (indexed by `Instruction`
@@ -1256,13 +1248,13 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       st.config.maxStackDepth ≠ 0 →
       st.frames.length ≥ st.config.maxStackDepth →
       StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (.resourceError .stackOverflow)
-  | call_external_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2 msg} :
+  | call_external_err {retTy fmf calleeExp args retAttrs bundles isNoRet site argVals m1 fid m2} :
       EvalCallArgs st.dataLayout st.config frame.registers (st.memory.hide (tailHidden site frame)) args (.ok (argVals, m1)) →
       EvalCallee st.dataLayout st.config frame.registers m1 calleeExp (.ok (fid, m2)) →
       (st.allowLibcallsFor fid && isAllocLibcall fid.toString) = false →
       (∀ o, evalNonAllocIntrinsicExec? st.dataLayout (frameDenormalCfg st frame) m2 fid.toString retTy fmf argVals o (st.allowLibcallsFor fid) (args.map (fun a => a.2.2)) = none) →
       st.functions.get? fid = none →
-      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (.staticError msg)
+      StepInstr st frame callers iid rest (.call retTy fmf calleeExp args retAttrs bundles isNoRet site) none (externalCallConfig st fid retTy argVals)
 
 /-- Relational small-step execution of a block terminator (indexed by `Terminator`). -/
 inductive StepTerm (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
@@ -1486,6 +1478,7 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
     exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) ha) hc) hmk
   | call_spec_oracle_ok ha hc _ _ _ hmk =>
     exact mkCallEntryFrameWithMem_preserves_wf (EvalCallee.preserves_wf (EvalCallArgs.preserves_wf (MemoryState.hide_preserves_wf hwf _) ha) hc) hmk
+  | call_external_err _ _ _ _ _ => unfold externalCallConfig; split <;> trivial
   | _ => first | exact configOfError_wf _ | trivial
 
 theorem StepTerm.preserves_wf {st frame callers tid term c'}

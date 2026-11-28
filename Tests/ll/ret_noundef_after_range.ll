@@ -1,6 +1,5 @@
 ; EXPECT_EXIT: 1
 ; EXPECT_ERR: UB: The value poison violates noundef attribute.
-; XFAIL: difftest bug B1 (return attributes: noundef is checked before range)
 ;
 ; difftest (phase 2): the same ordering for return attributes. The returned 5 is outside
 ; range [0, 2), so the return value is poison, which violates noundef.

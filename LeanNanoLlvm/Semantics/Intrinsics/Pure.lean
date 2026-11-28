@@ -378,7 +378,7 @@ def prepMinMaxInputs {fmt : FloatFormat} (cfg : SemanticsConfig) (fmf : FastMath
     match fmfIn fmf x o with
     | (.poison, o1) => (none, o1)
     | (.value x', o1) =>
-      match denormIn cfg.denormalMode.input x' o1 with
+      match denormIn (cfg.denormalModeFmt fmt).input x' o1 with
       | (fx, o2) =>
         match prepMinMaxInputs cfg fmf xs o2 with
         | (some rest, o3) => (some (fx :: rest), o3)
@@ -394,7 +394,7 @@ def foldMinMaxO {fmt : FloatFormat} (cfg : SemanticsConfig) (k : FPMinMaxKind) (
     match fmfIn fmf x o with
     | (.poison, o1) => (none, o1)
     | (.value x', o1) =>
-      match denormIn cfg.denormalMode.input x' o1 with
+      match denormIn (cfg.denormalModeFmt fmt).input x' o1 with
       | (fx, o2) =>
         match acc with
         | none => foldMinMaxO cfg k fmf nsz xs (some fx) o2
@@ -648,16 +648,16 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
                     | (vc, o3) =>
                       match va, vb, vc with
                       | .value a', .value b', .value c' =>
-                        match denormIn cfg.denormalMode.input a' o3 with
+                        match denormIn (cfg.denormalModeFmt ft3.format).input a' o3 with
                         | (fa, o4) =>
-                          match denormIn cfg.denormalMode.input b' o4 with
+                          match denormIn (cfg.denormalModeFmt ft3.format).input b' o4 with
                           | (fb, o5) =>
-                            match denormIn cfg.denormalMode.input c' o5 with
+                            match denormIn (cfg.denormalModeFmt ft3.format).input c' o5 with
                             | (fc, o6) =>
                               let raw :=
                                 if useFma then IEEEFloat.fma cfg.roundingMode fa fb fc
                                 else IEEEFloat.add cfg.roundingMode (IEEEFloat.mul cfg.roundingMode fa fb) fc
-                              let flushed := handleDenormal cfg.denormalMode.output false false raw
+                              let flushed := handleDenormal (cfg.denormalModeFmt ft3.format).output false false raw
                               match handleFMF fmf false false flushed with
                               | .poison => .ok (.float ft3 .poison, o6)
                               | .value r =>
@@ -704,13 +704,13 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
                 | (vy, o2) =>
                   match vx, vy with
                   | .value x', .value y' =>
-                    match denormIn cfg.denormalMode.input x' o2 with
+                    match denormIn (cfg.denormalModeFmt ft2.format).input x' o2 with
                     | (fx, o3) =>
-                      match denormIn cfg.denormalMode.input y' o3 with
+                      match denormIn (cfg.denormalModeFmt ft2.format).input y' o3 with
                       | (fy, o4) =>
                         match applyFPMinMaxO kind fmf.nsz fx fy o4 with
                         | (raw, o5) =>
-                          let flushed := handleDenormal cfg.denormalMode.output false false raw
+                          let flushed := handleDenormal (cfg.denormalModeFmt ft2.format).output false false raw
                           match handleFMF inFmf false false flushed with
                           | .poison => .ok (.float ft2 .poison, o5)
                           | .value r =>
@@ -868,7 +868,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
             match handleFMF fmf false false raw with
             | .poison => .ok (.float ft .poison, o2)
             | .value r =>
-              let flushed := handleDenormal cfg.denormalMode.output false false r
+              let flushed := handleDenormal (cfg.denormalModeFmt ft.format).output false false r
               match nanPropagate cfg.nanMode flushed nanInputs o2 with
               | (fin, o3) => .ok (.float ft (.value fin), o3)
       | _ => .error (.staticError s!"{name} expects a non-empty float vector argument")
