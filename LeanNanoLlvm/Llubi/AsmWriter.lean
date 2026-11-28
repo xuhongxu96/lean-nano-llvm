@@ -922,6 +922,9 @@ def parseAttrAt (c : WCtx) (i : Nat) : Option (String × Nat) :=
   match c.tok i with
   | .ident s =>
     if startsValue c i then none
+    -- top-level keywords end a declaration's attribute list (tokens carry no line breaks)
+    else if ["define", "declare", "attributes", "target", "source_filename", "module",
+        "uselistorder", "uselistorder_bb"].contains s then none
     else if parseTyAt c i |>.isSome then none
     else if s == "align" then
       match c.tok (i + 1) with
@@ -982,6 +985,11 @@ def parseAttrAt (c : WCtx) (i : Nat) : Option (String × Nat) :=
             | .lparen => goOther fuel (k + 1) (depth + 1) acc
             | .rparen => if depth ≤ 1 then (acc, k + 1) else goOther fuel (k + 1) (depth - 1) acc
             | .intLit n => goOther fuel (k + 1) depth (if acc.isEmpty then toString n else acc ++ ", " ++ toString n)
+            -- named components, e.g. `captures(ret: address, provenance)`
+            | .ident nm =>
+              goOther fuel (k + 1) depth
+                (if acc.isEmpty || acc.endsWith ": " then acc ++ nm else acc ++ ", " ++ nm)
+            | .colon => goOther fuel (k + 1) depth (acc ++ ": ")
             | .eof => (acc, k)
             | _ => goOther fuel (k + 1) depth acc
         let (inner, k) := goOther c.fuel (i + 1) 0 ""
@@ -1467,9 +1475,9 @@ def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints := {})
               match c.tok (k + 1), c.tok (k + 2) with
               | .ident "label", .localId b => (c.loc b, k + 3)
               | _, _ => ("", k + 1)
-            let rec cases (fuel : Nat) (m : Nat) (acc : List String) : List String :=
+            let rec cases (fuel : Nat) (m : Nat) (acc : List String) : List String × Nat :=
               match fuel with
-              | 0 => acc
+              | 0 => (acc, m)
               | fuel + 1 =>
                 match parseTyAt c m with
                 | some (ct, m1) =>
@@ -1478,11 +1486,13 @@ def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints := {})
                     match c.tok (m2 + 1), c.tok (m2 + 2) with
                     | .ident "label", .localId b =>
                       cases fuel (m2 + 3) (acc ++ [s!"    {printTypedOperand c ct cv}, label {c.loc b}\n"])
-                    | _, _ => acc
-                  | none => acc
-                | none => acc
-            let cs := cases c.fuel (k2 + 1) []
-            s!"switch {printTypedOperand c t v}, label {dflt} [\n" ++ String.join cs ++ "  ]"
+                    | _, _ => (acc, m)
+                  | none => (acc, m)
+                | none => (acc, m)
+            let (cs, mEnd) := cases c.fuel (k2 + 1) []
+            -- metadata attachments after the closing `]` (`!prof`, `!make.implicit`, ...)
+            let (atts, _) := if c.tok mEnd == .rbrack then parseAttachments c (mEnd + 1) stop else ([], mEnd)
+            s!"switch {printTypedOperand c t v}, label {dflt} [\n" ++ String.join cs ++ "  ]" ++ printAttachments atts
           | none => "switch"
         | none => "switch"
       else if op == "indirectbr" then
@@ -1565,6 +1575,9 @@ def printInstruction (c0 : WCtx) (start stop : Nat) (hints : InstrHints := {})
             | some a => s!", align {a}"
             | none => ""
           else ""
+        -- the source tokens of `addrspace(N)` are re-joined with spaces
+        let operands := if op == "alloca" then
+            "addrspace(".intercalate (operands.splitOn "addrspace ( ") else operands
         -- `alloca` prints `addrspace(N)` after `align`; reorder if needed
         let operands' :=
           if op == "alloca" && alignStr != "" then

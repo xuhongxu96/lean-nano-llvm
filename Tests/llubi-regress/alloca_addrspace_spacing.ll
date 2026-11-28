@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P4 (llubi output differs: `alloca ..., addrspace(1)` is printed without spaces inside the parentheses)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `alloca_addrspace_spacing.expected`): `alloca ..., addrspace(1)` is printed without spaces inside the parentheses.

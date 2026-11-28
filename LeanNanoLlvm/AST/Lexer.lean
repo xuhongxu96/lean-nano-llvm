@@ -95,10 +95,24 @@ def tokenizeWithLines (input : String) : Array Tok × Array Nat :=
       if isHexDigit c then readHex (c :: acc) cs
       else (acc.reverse, c :: cs)
     | [] => (acc.reverse, [])
+  -- `\XX` (two hex digits) in a quoted name is the byte 0xXX (LLParser `UnEscapeLexed`)
+  let hexVal (ch : Char) : Option Nat :=
+    if ch.isDigit then some (ch.toNat - '0'.toNat)
+    else if 'a' ≤ ch && ch ≤ 'f' then some (ch.toNat - 'a'.toNat + 10)
+    else if 'A' ≤ ch && ch ≤ 'F' then some (ch.toNat - 'A'.toNat + 10)
+    else none
+  let rec unescape : List Char → List Char
+    | '\\' :: '\\' :: cs => '\\' :: unescape cs
+    | '\\' :: a :: b :: cs =>
+      match hexVal a, hexVal b with
+      | some x, some y => Char.ofNat (16 * x + y) :: unescape cs
+      | _, _ => '\\' :: unescape (a :: b :: cs)
+    | c :: cs => c :: unescape cs
+    | [] => []
   let rec readIdAfterSigil : List Char → RawId × List Char
     | '"' :: cs =>
       let (s, rest) := readQuoted [] cs
-      (.name s, rest)
+      (.name (String.ofList (unescape s.toList)), rest)
     | cs =>
       let (s, rest) := readIdent [] cs
       (mkRawId s, rest)

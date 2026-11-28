@@ -198,53 +198,70 @@ private def collectMdDefs (w : WCtx) : List (String × String) := Id.run do
     | _, _ => pure ()
   return acc
 
-/-- Emulate `SlotTracker` numbering of metadata used by instructions (named metadata first,
-then instruction attachments in function order, sorted by kind). -/
-private def computeMdSlots (w : WCtx) (fnSrcs : Array FnSrc) : List (String × Nat) := Id.run do
+/-- The numbers llubi prints for metadata nodes (`!range !3`). They are the order in which the IR
+parser creates `MDNode`s, which this replays over the module's tokens:
+
+* an inline node `!{...}` is created when its closing brace is reached (after the nodes it
+  contains), and uniqued: a node with the same content reuses the earlier node (and number);
+* a numbered definition `!N = !{...}` likewise (`distinct` nodes are never uniqued);
+* the first reference to a numbered node *before* its definition creates a temporary node
+  (forward reference), which also takes a number;
+* named metadata `!name = !{...}` creates no node.
+
+Established against the pinned llubi on modules with inline nodes, definitions before and after
+their uses, uniquing, and nested (TBAA) nodes. Returns node key (as `mdRefAt` computes it) to
+number. -/
+private def computeMdSlots (w : WCtx) (_fnSrcs : Array FnSrc) : List (String × Nat) := Id.run do
+  let isNum (s : String) := !s.isEmpty && s.all Char.isDigit
   let mut slots : List (String × Nat) := []
+  let mut defined : List String := []
+  let mut temped : List String := []
   let mut next := 0
-  -- helper to assign a key (and recursively referenced named nodes)
-  let assign (slots : List (String × Nat)) (next : Nat) (key : String) : List (String × Nat) × Nat :=
-    if slots.any (·.1 == key) then (slots, next) else (slots ++ [(key, next)], next + 1)
-  -- named metadata `!foo = !{!0, !1}`
-  for (nm, _) in w.mdDefs do
-    if !(nm.all Char.isDigit) then
-      -- find its definition tokens and assign referenced nodes in order
-      for i in [0:w.toks.size] do
-        if w.tok i == .metaId nm && w.tok (i + 1) == .eq then
-          let mut j := i + 2
-          while j < w.toks.size && w.tok j != .rbrace do
-            match w.tok j with
-            | .metaId r =>
-              match w.mdDefs.find? (·.1 == r) with
-              | some (_, key) =>
-                let (s', n') := assign slots next key
-                slots := s'; next := n'
-              | none => pure ()
-            | _ => pure ()
-            j := j + 1
-  for fs in fnSrcs do
-    for e in fs.entries do
-      let mut atts : List (String × String) := []
-      let mut j := e.startTok
-      while j + 2 < e.endTok + 1 do
-        match w.tok j, w.tok (j + 1) with
-        | .comma, .metaId kind =>
-          let key := match w.tok (j + 2) with
-            | .metaId r => (w.mdDefs.find? (·.1 == r)).map (·.2) |>.getD ("!" ++ r)
-            | .bang => mdKeyAt w (j + 2)
-            | _ => ""
-          if !key.isEmpty then atts := atts ++ [(kind, key)]
-        | .ident "metadata", .metaId r =>
-          match w.mdDefs.find? (·.1 == r) with
-          | some (_, key) => atts := atts ++ [("", key)]
-          | none => pure ()
-        | _, _ => pure ()
-        j := j + 1
-      -- LLVM's slot tracker ends up numbering nodes in source order of first use
-      for (_, key) in atts do
-        let (s', n') := assign slots next key
-        slots := s'; next := n'
+  -- open metadata braces: (position of `!` or `{`, kind) with kind
+  -- `inline` | `def N` | `distinct N` | `named` | `plain`
+  let mut stack : List (Nat × String) := []
+  for i in [0:w.toks.size] do
+    match w.tok i with
+    | .metaId m =>
+      if isNum m && w.tok (i + 1) != .eq && !defined.contains m && !temped.contains m then
+        temped := m :: temped
+        next := next + 1
+    | .lbrace =>
+      if i > 0 && w.tok (i - 1) == .bang then
+        let kind :=
+          if i ≥ 2 && w.tok (i - 2) == .eq then
+            match w.tok (i - 3) with
+            | .metaId nm => if isNum nm then "def " ++ nm else "named"
+            | _ => "inline"
+          else if i ≥ 3 && w.tok (i - 2) == .ident "distinct" && w.tok (i - 3) == .eq then
+            match w.tok (i - 4) with
+            | .metaId nm => "distinct " ++ nm
+            | _ => "inline"
+          else "inline"
+        stack := (i - 1, kind) :: stack
+      else if !stack.isEmpty then
+        stack := (i, "plain") :: stack
+    | .rbrace =>
+      match stack with
+      | (start, kind) :: rest =>
+        stack := rest
+        if kind == "inline" then
+          let key := (mdRefAt w start).1
+          if !slots.any (·.1 == key) then
+            slots := slots ++ [(key, next)]; next := next + 1
+        else if kind.startsWith "def " then
+          let nm := (kind.drop 4).toString
+          let key := ((w.mdDefs.find? (·.1 == nm)).map (·.2)).getD ("!" ++ nm)
+          if !slots.any (·.1 == key) then
+            slots := slots ++ [(key, next)]; next := next + 1
+          defined := nm :: defined
+        else if kind.startsWith "distinct " then
+          let nm := (kind.drop 9).toString
+          let key := ((w.mdDefs.find? (·.1 == nm)).map (·.2)).getD ("!" ++ nm)
+          slots := slots ++ [(key, next)]; next := next + 1
+          defined := nm :: defined
+      | [] => pure ()
+    | _ => pure ()
   return slots
 
 /-- Parse `attributes #N = { ... }` groups. -/

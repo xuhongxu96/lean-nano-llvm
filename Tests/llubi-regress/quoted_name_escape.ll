@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P5 (llubi output differs: escapes in quoted names are decoded when parsed)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `quoted_name_escape.expected`): escapes in quoted names are decoded when parsed (`@"\01x"` is printed as `@"\01x"`).

@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P2 (llubi output differs: attribute groups are numbered as LLVM prints them)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `attr_group_numbering.expected`): attribute groups are numbered as LLVM prints them.

@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P6 (llubi output differs: `captures(address)` is printed with its components)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `captures_components.expected`): `captures(address)` is printed with its components.

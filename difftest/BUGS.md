@@ -2,10 +2,16 @@
 
 Every entry was confirmed by hand: a minimized reproducer, the pinned oracle's behaviour on it,
 and the LangRef text (llvm-project `a58c4ab`, `llvm/docs/LangRef.md`) that decides who is right.
-Reproducers live in `Tests/ll/` and are marked `; XFAIL: difftest bug <id>`: the `EXPECT_*`
-lines state the correct behaviour, so `scripts/run_ll_tests.sh` reports XPASS (and fails) once
-a bug is fixed. Triage rules (`dt/triage_rules.py`) attribute campaign runs to these ids; the
-per-bug counts are table `triage_bugs` of `dt report`.
+Reproducers live in `Tests/ll/` (semantics, `scripts/run_ll_tests.sh`), `Tests/llubi-regress/`
+(byte-exact llubi output, goldens from the pinned llubi, `scripts/run_llubi_regress.sh`) and
+`Tests/Refinement/Difftest.lean` (refinement and tactics). Triage rules (`dt/triage_rules.py`)
+attribute campaign runs to these ids; the per-bug counts are table `triage_bugs` of `dt report`.
+
+**Status.** All B, P and T bugs are fixed: B1-B9 and T1 in `451acab`, P7-P9 and P11-P12 in
+`67a4ec4`, P1-P6 and P10 in the commit that follows. Each reproducer was first committed as an
+XFAIL test that failed on the unfixed code, and passes now. O1 is a bug in llubi (not ours).
+The phase-2 campaign's first run (`results-run1-d3ba2af/`) used the unfixed code; it is the run
+that found these bugs.
 
 Ids: `B` semantic bugs in lean-nano-llvm, `P` differences in our llubi-compatible output only
 (same execution), `T` bugs in our proof tactics, `O` oracle bugs.
@@ -31,8 +37,8 @@ normalizer in `triage_rules.NORMALIZERS`.
 
 | Id | Difference |
 |---|---|
-| P1 | Metadata nodes numbered differently (llubi uses LLVM's module slot order). |
-| P2 | Attribute groups numbered differently. |
+| P1 | Metadata nodes numbered differently. llubi prints the IR parser's `MDNode` creation order (a forward reference to a numbered node creates a temporary node that takes a number; inline nodes are uniqued), which we now replay. |
+| P2 | Attribute groups numbered differently: a declaration without attributes followed by `define` read the keyword as an attribute, adding a spurious attribute set. |
 | P3 | `switch` printed without its metadata attachments. |
 | P4 | `alloca ..., addrspace(N)` printed as `addrspace ( N)`. |
 | P5 | Escapes in quoted names kept verbatim by the parser and re-escaped (`@"\01LC"` printed `@"\5C01LC"`). |

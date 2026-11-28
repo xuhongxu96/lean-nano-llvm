@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P1 (llubi output differs: metadata nodes are numbered in LLVM SlotTracker order)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `md_slot_numbering.expected`): metadata nodes are numbered in LLVM SlotTracker order (first use), not source order.

@@ -4,6 +4,6 @@ exit: 1
 Entering function: main
   %a = alloca [4 x i8], align 1 => ptr 0x8 [a]
 Stacktrace:
-#0   %r = call ptr @memset(ptr %a, i32 0, i32 poison) at @main <stdin>:10
+#0   %r = call ptr @memset(ptr %a, i32 0, i32 poison) at @main <stdin>:9
 Immediate UB detected: Poison argument passed to a library call at argument index 2.
 error: Execution of function 'main' failed.

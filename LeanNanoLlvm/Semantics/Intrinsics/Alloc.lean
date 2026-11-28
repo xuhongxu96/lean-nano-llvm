@@ -39,6 +39,17 @@ def retAddrSpace : LlvmRetType → Nat
 def heapAllocAlign (dl : DataLayout) (as : Nat) : Nat :=
   if dl.getPointerABIAlign as ≥ 8 then 16 else 8
 
+/-- llubi's report of a poison argument to a library call (`Library::executeLibcall` checks every
+argument before running the call). -/
+def libcallPoisonArgMsg (i : Nat) : String :=
+  s!"Poison argument passed to a library call at argument index {i}."
+
+/-- The UB message of `calloc` with poison or ill-typed arguments. -/
+def callocBadArgsMsg : List RegisterValue → String
+  | [.bv _ .poison, _] => libcallPoisonArgMsg 0
+  | [_, .bv _ .poison] => libcallPoisonArgMsg 1
+  | _ => "calloc called with poison/invalid arguments"
+
 /--
 Relational specification for `malloc`, `calloc`, and C++ `operator new` (used in the primary `Step` relation).
 Permits any valid aligned disjoint address via `MemoryState.AllocSpec`, or returning `null` / OOM.
@@ -48,7 +59,7 @@ inductive AllocLibcallSpec (dl : DataLayout) (cfg : SemanticsConfig) (mem : Memo
     String → LlvmRetType → List RegisterValue → Except ExecError (RegisterValue × MemoryState) → Prop where
   | malloc_poison (retTy : LlvmRetType) (w : Nat) :
       AllocLibcallSpec dl cfg mem objName "malloc" retTy [.bv w .poison]
-        (.error (.immediateUB "malloc called with poison size"))
+        (.error (.immediateUB (libcallPoisonArgMsg 0)))
   | malloc_ok (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) (obj : MemoryObject) (mem' : MemoryState) :
       MemoryState.AllocSpec mem dl cfg sz.toNat (heapAllocAlign dl (retAddrSpace retTy))
         objName (retAddrSpace retTy) .uninitialized .heap false obj mem' →
@@ -83,11 +94,11 @@ inductive AllocLibcallSpec (dl : DataLayout) (cfg : SemanticsConfig) (mem : Memo
   | calloc_bad_args (retTy : LlvmRetType) (args : List RegisterValue) :
       (∀ w1 w2 c s, args ≠ [.bv w1 (.value c), .bv w2 (.value s)]) →
       AllocLibcallSpec dl cfg mem objName "calloc" retTy args
-        (.error (.immediateUB "calloc called with poison/invalid arguments"))
+        (.error (.immediateUB (callocBadArgsMsg args)))
   | cxxNew_poison (name : String) (retTy : LlvmRetType) (w : Nat) :
       isCxxNew name = true →
       AllocLibcallSpec dl cfg mem objName name retTy [.bv w .poison]
-        (.error (.immediateUB "operator new called with poison size"))
+        (.error (.immediateUB (libcallPoisonArgMsg 0)))
   | cxxNew_ok (name : String) (retTy : LlvmRetType) (w : Nat) (sz : BitVec w) (obj : MemoryObject) (mem' : MemoryState) :
       isCxxNew name = true →
       MemoryState.AllocSpec mem dl cfg sz.toNat (heapAllocAlign dl (retAddrSpace retTy))
@@ -111,7 +122,7 @@ def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
   if name == "malloc" then
     some <| match argVals with
       | [a] => match a with
-        | .bv _ .poison => .error (.immediateUB "malloc called with poison size")
+        | .bv _ .poison => .error (.immediateUB (libcallPoisonArgMsg 0))
         | .bv _ (.value sz) =>
           let as := retAddrSpace retTy
           let maxAlign := heapAllocAlign dl as
@@ -133,12 +144,12 @@ def execAllocLibcall (dl : DataLayout) (cfg : SemanticsConfig) (mem : MemoryStat
             match mem.allocate dl cfg total maxAlign objName as .zeroed .heap false with
             | .ok (obj, mem') => .ok (.ptr as (.value (MemoryState.derivePointer dl obj)), mem')
             | .error _ => .ok (.ptr as (.value (Pointer.null dl as)), mem)
-        | _, _ => .error (.immediateUB "calloc called with poison/invalid arguments")
-      | _ => .error (.immediateUB "calloc called with poison/invalid arguments")
+        | _, _ => .error (.immediateUB (callocBadArgsMsg [a1, a2]))
+      | _ => .error (.immediateUB (callocBadArgsMsg argVals))
   else if isCxxNew name then
     some <| match argVals with
       | [a] => match a with
-        | .bv _ .poison => .error (.immediateUB "operator new called with poison size")
+        | .bv _ .poison => .error (.immediateUB (libcallPoisonArgMsg 0))
         | .bv _ (.value sz) =>
           let as := retAddrSpace retTy
           let maxAlign := heapAllocAlign dl as

@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P3 (llubi output differs: `switch` is printed with its metadata attachments)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `switch_metadata.expected`): `switch` is printed with its metadata attachments (`!prof`).

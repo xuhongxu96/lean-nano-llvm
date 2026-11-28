@@ -66,7 +66,11 @@ def evalNonAllocIntrinsicExec? (dl : DataLayout) (cfg : SemanticsConfig) (mem : 
       | some r => some (r.map fun m' => (.void, m', o))
       | none =>
         match (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
-        | some r => some (r.map fun (v, m') => (v, m', o))
+        | some r =>
+          -- llubi checks every argument of a library call for poison before running it
+          match argVals.findIdx? (fun | .bv _ .poison | .ptr _ .poison | .float _ .poison => true | _ => false) with
+          | some i => some (.error (.immediateUB (libcallPoisonArgMsg i)))
+          | none => some (r.map fun (v, m') => (v, m', o))
         | none =>
           (evalPureIntrinsicExec? cfg name retTy fmf argVals o).map fun r =>
             r.map fun (v, o') => (v, mem, o')
@@ -138,13 +142,16 @@ theorem evalNonAllocIntrinsicExec?_preserves_wf {dl cfg mem name retTy fmf argVa
                 cases hl : (if allowLibcalls then evalNonAllocLibcall? dl mem name argVals else none) with
                 | some r =>
                   rw [hl] at h
-                  cases r with
-                  | error e => cases h
-                  | ok p =>
-                    cases h
-                    by_cases ha : allowLibcalls = true
-                    · rw [if_pos ha] at hl; exact evalNonAllocLibcall?_preserves_wf hwf hl
-                    · rw [if_neg ha] at hl; cases hl
+                  dsimp only at h
+                  split at h
+                  · cases h
+                  · cases r with
+                    | error e => cases h
+                    | ok p =>
+                      cases h
+                      by_cases ha : allowLibcalls = true
+                      · rw [if_pos ha] at hl; exact evalNonAllocLibcall?_preserves_wf hwf hl
+                      · rw [if_neg ha] at hl; cases hl
                 | none =>
                   rw [hl] at h
                   cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
@@ -192,7 +199,7 @@ theorem evalNonAllocIntrinsicExec?_none_indep {dl cfg mem name retTy fmf argVals
     | none =>
       simp only [hvw] at h
       cases hl : (if allowLibcalls = true then evalNonAllocLibcall? dl mem name argVals else none) with
-      | some r => simp [hl] at h
+      | some r => simp only [hl] at h; split at h <;> cases h
       | none =>
         cases hp : evalPureIntrinsicExec? cfg name retTy fmf argVals o with
         | some r => simp [hl, hp] at h

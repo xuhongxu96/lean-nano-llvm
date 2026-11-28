@@ -1,4 +1,3 @@
-; XFAIL: difftest bug P10 (llubi output differs: a poison argument of a library call)
 ;
 ; difftest (phase 2), output of `lean-nano-llvm llubi --verbose` against the pinned llubi
 ; (golden `libcall_poison_argument_reason.expected`): a poison argument of a library call (`memset`) is reported as "Poison argument passed to a library call at argument index N.".
