@@ -101,6 +101,7 @@ Bugs in the campaign harness itself, found by the sanity checks and the triage; 
 
 | Id | Bug |
 |---|---|
+| O2 | llubi ignores a `getelementptr` index whose element type has size 0 (`{}`, `[0 x T]`), even a poison one, and returns the base pointer; LangRef ("Poison Values": most instructions return poison when an argument is poison, with a `getelementptr` example) makes the result poison, as ours is. From case `661f6eb3623f33b9`. |
 | O1 | llubi aborts (assertion failures, e.g. "Cannot get layout of opaque structs") on modules the verifier accepts. |
 
 ## Retracted candidates

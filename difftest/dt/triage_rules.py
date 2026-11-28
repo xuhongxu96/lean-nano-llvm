@@ -258,6 +258,13 @@ LLUBI_RULES: list[Rule] = [
          "llubi checks a library call's arguments for poison before reading its C-string "
          "arguments; we read the string first); the outcome agrees",
          pred=same_ub_point),
+    # --- oracle bugs -----------------------------------------------------------------------------
+    Rule("O2-gep-zero-size-poison-index", "oracle-bug", "O2",
+         "llubi skips GEP indices whose element size is 0 (`if (!Scale.isZero())` in "
+         "Context::computeGEP), so a poison index into a zero-sized type gives the base pointer; "
+         "LangRef (Poison Values): most instructions return poison when an argument is poison, as "
+         "we do",
+         ldiff_re=r"= getelementptr[^=]*(\{\}|\[0 x |<0 x )[^=]*=> ptr ", odiff_re=r"= getelementptr[^=]*=> poison"),
     # --- we do not implement a feature the oracle executes ---------------------------------------
     Rule("libcall-not-modelled", "ours-unsupported", None,
          "llubi models this external (C library) function and continues or reports UB in it; we "
