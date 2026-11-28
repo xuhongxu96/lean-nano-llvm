@@ -11,6 +11,19 @@ namespace LeanNanoLlvm.Refinement
 open LeanNanoLlvm AST Semantics
 open Lean Elab Tactic Meta
 
+/-- A debugging line on standard error (`LNL_DISPROVE_DEBUG`); unlike a message, it survives
+`restoreState`. -/
+private def dbgLog (m : MessageData) : MetaM Unit := do
+  IO.eprintln (← m.toString)
+
+/-- Add a closed theorem checked by the kernel only (no elaboration-side processing of its
+possibly large proof term). -/
+private def kernelTheorem (type value : Expr) : MetaM Expr := do
+  let type ← instantiateMVars type
+  let value ← instantiateMVars value
+  if type.hasMVar || value.hasMVar then throwError "kernelTheorem: metavariables in the certificate"
+  return mkConst (← mkAuxLemma [] type value (cache := false))
+
 /-! ## Section 3: Kernel-Pure Concrete Stepper for Refutation Goals -/
 
 def quoteRegisterValue : RegisterValue → Expr
@@ -178,7 +191,7 @@ private def stepConcreteLeft (act : ConcreteAction) : TacticM Bool := do
         simpConcreteStep; return true
       catch e =>
         restoreState s
-        if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then logInfo m!"DTFCMP {e.toMessageData}"
+        if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTFCMP {e.toMessageData}"
         return false
     else if nm == ``AST.Instruction.call then
       let s ← saveState
@@ -465,48 +478,182 @@ by the outcome of running it with the executable interpreter, certified in the k
 (`runSteps_sound`): `.ub ""` if the run aborts, `.halted vY m` (for every `m`) if it returns `vY`
 without emitting events. This handles any instruction on the target side. Returns `false` (goal
 unchanged) if the run neither aborts nor halts silently with a quotable value. -/
-private def replaceTargetByExecution (tgtExpr argsExpr : Expr) : TacticM Bool := do
+private def replaceTargetByExecution (tgtExpr argsExpr : Expr) : TacticM Bool :=
+  withTheReader Core.Context (fun ctx => { ctx with maxRecDepth := max ctx.maxRecDepth 100000 }) do
   let tgt ← evalDefn tgtExpr
   let args ← evalArgs argsExpr
   let cfg : SemanticsConfig := .modern
   let c0 := initCallConfig cfg .default64LE {} ∅ ∅ tgt args
   let (cf, used) := runCounting cfg.maxSteps 0 default c0
-  let fuel := Syntax.mkNumLit (toString (used + 1))
+  let some (_, cY) ← getNotRefinedConfigs | do
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTUCK target-no-goal"
+      return false
+  let fuelE := mkNatLit (used + 1)
+  let auxEq (lhs rhs ty : Expr) : MetaM Expr :=
+    kernelTheorem (mkApp3 (mkConst ``Eq [1]) ty lhs rhs) (mkApp2 (mkConst ``Eq.refl [1]) ty rhs)
+  let runCfgE := mkApp2 (mkConst ``runCfg) fuelE cY
   let s ← saveState
   try
     if cf.isAbortB then
+      let h ← auxEq (mkApp (mkConst ``Semantics.Config.isAbortB) runCfgE) (mkConst ``Bool.true) (mkConst ``Bool)
+      let hStx ← Term.exprToSyntax h
+      let fStx := Syntax.mkNumLit (toString (used + 1))
       evalTactic (← `(tactic|
         refine Config.IsRefinedBy.not_of_canAbort_right
-          (CanAbort.of_runSteps $fuel default (initCallConfig_empty_wf _ _ _ _ _ _)
-            (by decide +kernel)) ?_))
+          (CanAbort.of_runCfg $fStx (initCallConfig_empty_wf _ _ _ _ _ _) $hStx) ?_))
       return true
     match cf with
     | .halted v _ =>
-      if !(runEvents (used + 1) c0).isEmpty then return false
+      if !(runEvents (used + 1) c0).isEmpty then
+        if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTUCK target-emits-events"
+        return false
       let ok := match v with
         | .bv _ _ | .void | .float _ _ => true
         | _ => false
       if !ok then
         if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
-          logInfo m!"DTSTUCK target-returns-unquotable {v.inferType?.map (·.print)}"
+          dbgLog m!"DTSTUCK target-returns-unquotable {v.inferType?.map (·.print)}"
         return false
-      let vStx ← Lean.Elab.Term.exprToSyntax (quoteRegisterValue v)
+      let vE := quoteRegisterValue v
+      let listTy := mkApp (mkConst ``List [0]) (mkConst ``TraceEvent)
+      let htr ← auxEq (mkApp2 (mkConst ``runTrace) fuelE cY) (mkApp (mkConst ``List.nil [0]) (mkConst ``TraceEvent)) listTy
+      let optTy := mkApp (mkConst ``Option [0]) (mkConst ``RegisterValue)
+      let hv ← auxEq (mkApp (mkConst ``Semantics.Config.haltedVal?) runCfgE)
+        (mkApp2 (mkConst ``Option.some [0]) (mkConst ``RegisterValue) vE) optTy
+      let htrStx ← Term.exprToSyntax htr
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTEP tgt-aux-done"
+      let hvStx ← Term.exprToSyntax hv
+      let fStx := Syntax.mkNumLit (toString (used + 1))
       evalTactic (← `(tactic|
-        refine Config.IsRefinedBy.not_of_terminates_right (vY := $vStx)
-          (Terminates.of_runSteps $fuel default (initCallConfig_empty_wf _ _ _ _ _ _)
-            (by decide +kernel) (by decide +kernel)) ?_))
+        refine Config.IsRefinedBy.not_of_terminates_right
+          (Terminates.of_runCfg $fStx (initCallConfig_empty_wf _ _ _ _ _ _) $htrStx $hvStx) ?_))
       evalTactic (← `(tactic| intro _))
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTEP tgt-refined"
       return true
     | _ =>
       if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
         let k := match cf with
           | .running _ => "running" | .staticError m => s!"staticError {m}" | _ => "other"
-        logInfo m!"DTSTUCK target-run-ends {k} after {used} steps"
+        dbgLog m!"DTSTUCK target-run-ends {k} after {used} steps"
       return false
   catch e =>
     restoreState s
     if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
-      logInfo m!"DTSTUCK target-cert-error {e.toMessageData}"
+      dbgLog m!"DTSTUCK target-cert-error {e.toMessageData}"
+    return false
+
+/-- Run the source with the interpreter: `.ok (n, final)` if each of its first `n` steps is
+choice-free and silent and it then stops (`final` halted or stuck), else why not. -/
+private def runSourceDet (c0 : Semantics.Config) (fuel : Nat) : Except String (Nat × Semantics.Config) := Id.run do
+  let mut c := c0
+  let mut n := 0
+  for _ in [:fuel] do
+    match c with
+    | .running _ =>
+      if !c.nextChoiceFree then return .error s!"step {n} takes a choice"
+      let (ev, c1, _) := execStep default c
+      if ev.isSome then return .error s!"step {n} emits an event"
+      c := c1; n := n + 1
+    | _ => break
+  match c with
+  | .halted _ _ | .staticError _ => return .ok (n, c)
+  | .ub _ => return .error s!"the source run aborts after {n} steps"
+  | _ => return .error s!"the source run does not stop within {fuel} steps"
+
+/-- Certify the source side by execution (`DetRun`, `Config.IsRefinedBy.not_of_detRun_left`) and
+close the goal `¬ Config.IsRefinedBy ids cX cY`, where `cY` is `.ub _` or `.halted vY m` (after
+`replaceTargetByExecution`). The run is checked in the kernel, with the oracle a free variable for
+the independence of each step, so every instruction is supported. Returns `false` (goal unchanged)
+if the source run takes a choice, emits an event, or does not stop. -/
+private def certifySourceByExecution (srcExpr argsExpr : Expr) : TacticM Bool :=
+  withTheReader Core.Context (fun ctx => { ctx with maxRecDepth := max ctx.maxRecDepth 100000 }) do
+  let some (cX, cY) ← getNotRefinedConfigs | do
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTUCK source-no-goal"
+      return false
+  let src ← evalDefn srcExpr
+  let args ← evalArgs argsExpr
+  let cfg : SemanticsConfig := .modern
+  let c0 := initCallConfig cfg .default64LE {} ∅ ∅ src args
+  let (n, final) ← match runSourceDet c0 cfg.maxSteps with
+    | .ok r => pure r
+    | .error why =>
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTUCK source-run {why}"
+      return false
+  let s ← saveState
+  try
+    -- the certificate, in chunks of `chunk` steps (`DetRun k c` for each), built right to left
+    let oracleTy := mkConst ``OracleState
+    let dflt ← mkAppOptM ``Inhabited.default #[some oracleTy, none]
+    let reflTrue := mkApp2 (mkConst ``Eq.refl [1]) (mkConst ``Bool) (mkConst ``Bool.true)
+    let evTy := mkApp (mkConst ``Option [0]) (mkConst ``TraceEvent)
+    let cfgTy := mkConst ``Semantics.Config
+    let reflNone := mkApp2 (mkConst ``Eq.refl [1]) evTy (mkApp (mkConst ``Option.none [0]) (mkConst ``TraceEvent))
+    let chunk := 100000
+    let mut left := n
+    while left > 0 do
+      let m := min chunk left
+      let some (cX, _) ← getNotRefinedConfigs | throwError "lost the refutation goal"
+      let mut cs : Array Expr := #[cX]
+      for _ in [:m] do
+        cs := cs.push (mkApp (mkConst ``succCfg) cs.back!)
+      let mut proof := mkConst ``True.intro
+      for k' in [:m] do
+        let k := m - 1 - k'
+        let ck := cs[k]!
+        let x := mkApp2 (mkConst ``stepEvOf) dflt ck
+        let y := mkApp2 (mkConst ``stepCfgErased) dflt ck
+        let indep ← withLocalDeclD `o oracleTy fun o => do
+          let a := mkApp3 (mkConst ``Eq [1]) evTy (mkApp2 (mkConst ``stepEvOf) o ck) x
+          let b := mkApp3 (mkConst ``Eq [1]) cfgTy (mkApp2 (mkConst ``stepCfgErased) o ck) y
+          mkLambdaFVars #[o] (mkApp4 (mkConst ``And.intro) a b
+            (mkApp2 (mkConst ``Eq.refl [1]) evTy x) (mkApp2 (mkConst ``Eq.refl [1]) cfgTy y))
+        proof := mkAppN (mkConst ``DetRun.cons)
+          #[mkNatLit k', ck, reflTrue, reflTrue, reflNone, indep, proof]
+      let cert ← kernelTheorem (mkApp2 (mkConst ``DetRun) (mkNatLit m) cX) proof
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTEP src-cert-done"
+      let certStx ← Term.exprToSyntax cert
+      evalTactic (← `(tactic| refine Config.IsRefinedBy.not_of_detRun_left _ $certStx ?_))
+      left := left - m
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTEP src-chunk-applied"
+    -- compare the final configurations
+    if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTEP src-compare"
+    let some (finalE, _) ← getNotRefinedConfigs | throwError "lost the refutation goal"
+    let cYw ← whnfR cY
+    let auxEq (lhs rhs ty : Expr) (lvl : Level) : MetaM Expr :=
+      kernelTheorem (mkApp3 (mkConst ``Eq [lvl]) ty lhs rhs) (mkApp2 (mkConst ``Eq.refl [lvl]) ty rhs)
+    match final with
+    | .halted vX _ =>
+      if cYw.isAppOf ``Semantics.Config.ub then
+        let h ← auxEq (mkApp (mkConst ``Option.isSome [0]) (mkConst ``RegisterValue) |>.app
+          (mkApp (mkConst ``Semantics.Config.haltedVal?) finalE)) (mkConst ``Bool.true) (mkConst ``Bool) 1
+        let hStx ← Term.exprToSyntax h
+        evalTactic (← `(tactic| exact Config.IsRefinedBy.not_of_haltedB_ub $hStx))
+      else
+        let vXE := quoteRegisterValue vX
+        let optTy := mkApp (mkConst ``Option [0]) (mkConst ``RegisterValue)
+        let h ← auxEq (mkApp (mkConst ``Semantics.Config.haltedVal?) finalE)
+          (mkApp2 (mkConst ``Option.some [0]) (mkConst ``RegisterValue) vXE) optTy 1
+        let hStx ← Term.exprToSyntax h
+        -- the values are unrelated: decided by evaluation (`scalarRefinesB`)
+        let vYE := cYw.getArg! 0
+        let hb ← auxEq (mkApp2 (mkConst ``scalarRefinesB) vXE vYE) (mkConst ``Bool.false) (mkConst ``Bool) 1
+        let hne := mkApp3 (mkConst ``not_isRefinedBy_of_scalarRefinesB) vXE vYE hb
+        let hneStx ← Term.exprToSyntax hne
+        evalTactic (← `(tactic| exact Config.IsRefinedBy.not_of_haltedVal_halted $hStx $hneStx))
+    | .staticError _ =>
+      let h ← auxEq (mkApp (mkConst ``Semantics.Config.isStaticB) finalE) (mkConst ``Bool.true) (mkConst ``Bool) 1
+      let hStx ← Term.exprToSyntax h
+      if cYw.isAppOf ``Semantics.Config.ub then
+        evalTactic (← `(tactic| exact Config.IsRefinedBy.not_of_static_ub $hStx))
+      else
+        evalTactic (← `(tactic| exact Config.IsRefinedBy.not_of_static_halted $hStx))
+    | _ => throwError "unexpected final source configuration"
+    if !(← getGoals).isEmpty then if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTUCK source-goals-left {← getMainTarget}"
+    return (← getGoals).isEmpty
+  catch e =>
+    restoreState s
+    if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
+      dbgLog m!"DTSTUCK source-cert-error {e.toMessageData}"
     return false
 
 /-- Unfold the initial configurations in a refutation goal so the concrete stepper can see them. -/
@@ -540,28 +687,44 @@ def proveDisproofWithExpr (argsExpr : Expr) : TacticM Unit := do
            Semantics.RegisterValue.WellFormedForList,
            Semantics.RegisterValue.WellFormedFor]; done))))
   -- Goal 2: ¬ Config.IsRefinedBy ...
-  -- First: step both sides with the deterministic-step lemmas.
-  let s ← saveState
-  unfoldInitConfigs
-  runConcreteRefutation 256
-  if (← getGoals).isEmpty then return
-  -- Otherwise: certify the target's behaviour by execution, then step only the source.
-  restoreState s
-  if ← replaceTargetByExecution tgtExpr argsExpr then
-    unfoldInitConfigs
-    strongConcreteSimp.set true
-    try runConcreteRefutation 4096 finally strongConcreteSimp.set false
-    if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome && !(← getGoals).isEmpty then
-      let desc : ConcreteAction → String
-        | .halted => "halted" | .ub => "ub" | .instr n => s!"instr {n}" | .term n => s!"term {n}"
-        | .unknown => "unknown"
-      match ← getNotRefinedConfigs with
-      | some (cX, cY) =>
-        logInfo m!"DTSTUCK left={desc (← inspectConcreteConfig cX)} right={desc (← inspectConcreteConfig cY)}"
-      | none => logInfo m!"DTSTUCK goal={← getMainTarget}"
-  else if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
-    logInfo m!"DTSTUCK target-not-certified"
-  if !(← getGoals).isEmpty then
-    throwError "llvm_disprove: could not close refutation goal with witness {argsExpr}"
+  let s0 ← saveState
+  -- 1. Certify both sides by execution: the target's behaviour from an interpreter run
+  --    (`runSteps_sound`), the source's whole behaviour from a kernel-checked deterministic run
+  --    (`DetRun`, for any instruction whose step takes no choice).
+  let ok1 ← tryCatchRuntimeEx
+    (do
+      if ← replaceTargetByExecution tgtExpr argsExpr then certifySourceByExecution srcExpr argsExpr
+      else pure false)
+    (fun e => do
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTUCK path1 {e.toMessageData}"
+      pure false)
+  if ok1 then return
+  restoreState s0
+  -- 2. Step both sides with the deterministic-step lemmas (sources with choices the lemmas cover).
+  let ok2 ← tryCatchRuntimeEx
+    (do unfoldInitConfigs; runConcreteRefutation 256; pure (← getGoals).isEmpty)
+    (fun _ => pure false)
+  if ok2 then return
+  restoreState s0
+  -- 3. The target by execution, the source with the deterministic-step lemmas.
+  tryCatchRuntimeEx (do
+    if ← replaceTargetByExecution tgtExpr argsExpr then
+      unfoldInitConfigs
+      strongConcreteSimp.set true
+      try runConcreteRefutation 4096 finally strongConcreteSimp.set false
+      if (← getGoals).isEmpty then return
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
+        let desc : ConcreteAction → String
+          | .halted => "halted" | .ub => "ub" | .instr n => s!"instr {n}" | .term n => s!"term {n}"
+          | .unknown => "unknown"
+        match ← getNotRefinedConfigs with
+        | some (cX, cY) =>
+          dbgLog m!"DTSTUCK left={desc (← inspectConcreteConfig cX)} right={desc (← inspectConcreteConfig cY)}"
+        | none => dbgLog m!"DTSTUCK goal={← getMainTarget}"
+    else if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
+      dbgLog m!"DTSTUCK target-not-certified")
+    (fun e => do
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then dbgLog m!"DTSTUCK error {e.toMessageData}")
+  throwError "llvm_disprove: could not close refutation goal with witness {argsExpr}"
 
 end LeanNanoLlvm.Refinement

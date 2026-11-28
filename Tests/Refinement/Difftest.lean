@@ -217,4 +217,59 @@ example : [llvm-definition|
       }
     ] := by llvm_refine
 
+
+/-- T3 (complete): the source is certified by execution as well. Every step of a source whose run
+takes no choice is its only step (`Step.det_of_exec`: the relational semantics is the
+interpreter's on choice-free steps), so a kernel-checked run (`DetRun`) stands for all of the
+source's behaviours, whatever its instructions: here `fcmp` on a converted float, `fsub` on
+`half`, and a loop through an intrinsic call, none of which the deterministic-step lemmas cover. -/
+example : ¬ ([llvm-definition|
+      define i1 @f(i32 %x) {
+      entry:
+        %y = sitofp i32 %x to float
+        %c = fcmp olt float %y, 1.0
+        ret i1 %c
+      }
+    ] ⊒ [llvm-definition|
+      define i1 @f(i32 %x) {
+      entry:
+        ret i1 1
+      }
+    ]) := by llvm_disprove [.bv 32 (.value 5#32)]
+
+example : ¬ ([llvm-definition|
+      define half @f(half %x) {
+      entry:
+        %y = fsub half %x, 1.0
+        ret half %y
+      }
+    ] ⊒ [llvm-definition|
+      define half @f(half %x) {
+      entry:
+        ret half 0.0
+      }
+    ]) := by llvm_disprove [.float .half (.value (IEEEFloat.ofNatBits 0x4200))]
+
+example : ¬ ([llvm-definition|
+      define i32 @f(i32 %n) {
+      entry:
+        br label %loop
+      loop:
+        %i = phi i32 [0, %entry], [%i.next, %loop]
+        %s = phi i32 [0, %entry], [%s.next, %loop]
+        %s.next = add i32 %s, %i
+        %i.next = add i32 %i, 1
+        %c = icmp ult i32 %i.next, %n
+        br i1 %c, label %loop, label %exit
+      exit:
+        %m = call i32 @llvm.umax.i32(i32 %s.next, i32 7)
+        ret i32 %m
+      }
+    ] ⊒ [llvm-definition|
+      define i32 @f(i32 %n) {
+      entry:
+        ret i32 7
+      }
+    ]) := by llvm_disprove [.bv 32 (.value 20#32)]
+
 end LeanNanoLlvm.Tests.Refinement.Difftest
