@@ -1764,7 +1764,9 @@ def denormFromToks (ts : List Tok) : Option DenormalMode × Option DenormalMode 
     | .ident "float" :: .colon :: rest => (g, mode (kindsOf rest))
     | _ => (mode (kindsOf seg), f)
 
-private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMode × Option DenormalMode) := do
+private def skipFnAttrs (fuel : Nat) :
+    ParseM (Bool × Bool × Option DenormalMode × Option DenormalMode × Option FunctionId) := do
+  let mut personality? : Option FunctionId := none
   let mut isNoRet := false
   let mut isNoBuiltin := false
   let mut denorm? : Option DenormalMode := none
@@ -1823,7 +1825,9 @@ private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMo
     | .ident "personality" =>
       let _ ← bump
       let _ ← parseType fuel
-      let _ ← parseExp fuel
+      match ← parseExp fuel with
+      | .identifier (.global_id g) => personality? := some g
+      | _ => pure ()
     | .ident "addrspace" =>
       let _ ← bump
       skipParenGroup fuel
@@ -1831,7 +1835,7 @@ private def skipFnAttrs (fuel : Nat) : ParseM (Bool × Bool × Option DenormalMo
       let _ ← bump
       if ← tryEat .eq then let _ ← bump
     | _ => guard := 0
-  return (isNoRet, isNoBuiltin, denorm?, denormF32?)
+  return (isNoRet, isNoBuiltin, denorm?, denormF32?, personality?)
 
 /-- Parse a `declare` or `define` header returning `(Declaration, paramNames)`. -/
 private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) := do
@@ -1871,7 +1875,7 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
         argNames := nm :: argNames
         if ← tryEat .comma then go := true
         else expect .rparen "function params"; go := false
-  let (isNoRet, isNoBuiltin, denorm?, denormF32?) ← skipFnAttrs fuel
+  let (isNoRet, isNoBuiltin, denorm?, denormF32?, personality?) ← skipFnAttrs fuel
   let decl : Declaration := {
     name := fnName
     type := .function retTy argTys.reverse isVarArg
@@ -1882,6 +1886,7 @@ private def parseFnHeader (fuel : Nat) : ParseM (Declaration × List LocalId) :=
     denormalMode := denorm?
     denormalModeF32 := denormF32?
     callingConv := cc
+    personality? := personality?
   }
   return (decl, argNames.reverse)
 

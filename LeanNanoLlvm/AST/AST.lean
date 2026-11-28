@@ -530,6 +530,9 @@ structure Declaration where
   callingConv  : String := ""
   /-- `denormal_fpenv(float: ...)`: the mode of 32-bit `float` (and vectors of it) only. -/
   denormalModeF32 : Option DenormalMode := none
+  /-- The `personality` function of a definition: a constant use of it, which takes its address
+  (llubi gives it a function object, like any address-taken function). -/
+  personality? : Option FunctionId := none
 deriving Repr
 
 abbrev Code := List (InstructionId × Instruction)

@@ -947,7 +947,7 @@ def elabNanoLlvmDeclaration : Syntax → TermElabM Expr
     let denormE ← mkOptionExpr (mkConst ``DenormalMode) (denorm.map toExpr)
     let ccStr := (ccName.map (·.getString)).getD ""
     mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr isNoReturn, toExpr isNoBuiltin, denormE, toExpr ccStr,
-      ← mkOptionExpr (mkConst ``DenormalMode) none]
+      ← mkOptionExpr (mkConst ``DenormalMode) none, ← mkOptionExpr (mkConst ``FunctionId) none]
   | _ => throwUnsupportedSyntax
 
 elab "[llvm-declaration|" p:nanollvm_declaration "]" : term => elabNanoLlvmDeclaration p
@@ -1048,7 +1048,7 @@ def elabNanoLlvmDefinition : Syntax → TermElabM Expr
     let denormE ← mkOptionExpr (mkConst ``DenormalMode) (denorm.map toExpr)
     let ccStr := (ccName.map (·.getString)).getD ""
     let decl ← mkAppM ``Declaration.mk #[idE, fnTy, argAttrsList, ← elabValueAttrList retAttrs, toExpr isNoReturn, toExpr isNoBuiltin, denormE, toExpr ccStr,
-      ← mkOptionExpr (mkConst ``DenormalMode) none]
+      ← mkOptionExpr (mkConst ``DenormalMode) none, ← mkOptionExpr (mkConst ``FunctionId) none]
     mkAppM ``Definition.mk #[decl, argNameList, blockList]
   | _ => throwUnsupportedSyntax
 

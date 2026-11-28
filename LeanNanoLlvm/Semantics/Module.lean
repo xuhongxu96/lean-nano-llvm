@@ -105,6 +105,8 @@ private def collectAddrTaken (ents : List TopLevelEntity) : List GlobalId × Lis
       | some e => let (f1, b1) := collectAddrTakenExp e; (fs ++ f1, bs ++ b1)
       | none => (fs, bs)
     | .definition defn =>
+      -- `personality ptr @f` is a constant use of `@f`: it takes its address
+      let fs := fs ++ defn.prototype.personality?.toList
       defn.blocks.foldl (init := (fs, bs)) fun (fs1, bs1) blk =>
         let (fs2, bs2) := blk.code.foldl (init := (fs1, bs1)) fun (fa, ba) (_, ins) =>
           let (f1, b1) := collectAddrTakenInstr fnTys ins; (fa ++ f1, ba ++ b1)

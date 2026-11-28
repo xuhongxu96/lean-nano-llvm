@@ -1575,11 +1575,11 @@ private def unexpandDenormOpt (denorm : Syntax) : UnexpandM (Option (TSyntax `na
 
 @[app_unexpander Declaration.mk]
 def unexpandDeclarationMk : Unexpander
-  | `($_ $name $ty $argAttrs $retAttrs $isNoRet $isNoBuiltin $denorm $ccVal $denormF32) => do
-    -- the `float:` override has no surface syntax in `[llvm-definition| ...]`
-    match stripParens denormF32 with
-    | `(none) | `(Option.none) => pure ()
-    | _ => throw ()
+  | `($_ $name $ty $argAttrs $retAttrs $isNoRet $isNoBuiltin $denorm $ccVal $denormF32 $pers) => do
+    -- the `float:` override and the personality have no surface syntax in `[llvm-definition| ...]`
+    match stripParens denormF32, stripParens pers with
+    | `(none), `(none) | `(Option.none), `(none) | `(none), `(Option.none) | `(Option.none), `(Option.none) => pure ()
+    | _, _ => throw ()
     let rAttrs ← unexpandValueAttrList retAttrs
     let aAttrsList ← unexpandArgAttrLists argAttrs
     let denormOpt ← unexpandDenormOpt denorm

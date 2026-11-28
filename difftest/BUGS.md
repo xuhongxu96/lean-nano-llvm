@@ -91,7 +91,7 @@ normalizer in `triage_rules.NORMALIZERS` and a `Tests/ll/llubi_*.ll` reproducer.
 | P10 | Immediate UB at the same instruction, reported with a different reason (e.g. llubi checks library-call arguments for poison before reading C-string arguments). |
 | P11 | `dereferenceable` assume-bundle size printed unsigned (llubi: signed). |
 | P12 | Alloca-size UB messages end with an extra `.`. |
-| P14 | A direct call whose type differs from the callee's takes the callee's address (LLVM calls through it as a pointer) and llubi allocates a function object for it, which shifts later stack addresses. Not modelled: function objects llubi allocates for personality functions in some exception-handling code. |
+| P14 | A direct call whose type differs from the callee's takes the callee's address (LLVM calls through it as a pointer) and llubi allocates a function object for it, which shifts later stack addresses. A personality function (`personality ptr @f`) is such a constant use too (`Declaration.personality?`). |
 | P15 | A load that violated both `!noundef` and `!dereferenceable` reported the `!dereferenceable` violation; llubi checks undefined bits, then the poison-generating metadata, then `!noundef`, then `!dereferenceable` (`Semantics.loadValueChecks`). |
 | P16 | A `blockaddress` pointer printed its object's internal name instead of the block label (`[L1]`); a pointer to an unnamed global printed `[@0]` instead of `[@]`; a store to a function object was reported as a write to constant memory instead of an out-of-bounds access (function objects are not constant in llubi). |
 | P13 | Variadic arguments are not printed on function entry (llubi: `vaarg[i] = <value>`), and a call's function type was printed from the callee instead of the call. |
