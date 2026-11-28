@@ -600,7 +600,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
           | .float ft (.value flt) =>
             match fmfIn fmf flt o0 with
             | (.poison, o1) => .ok (.float ft .poison, o1)
-            | (.value f', o1) => .ok (.float ft (handleFMF fmf false false f'.abs), o1)
+            | (.value f', o1) => .ok (.float ft (handleFMF fmf false false (floatAbs f')), o1)
           | other => .error (.staticError s!"Expected float in llvm.fabs, got {other}")
         match v with
         | .vector _ elems =>
@@ -620,7 +620,7 @@ def evalPureIntrinsicExec? (cfg : SemanticsConfig) (name : String) (retTy : Llvm
                 match fmfIn fmf sg o1 with
                 | (vs, o2) =>
                   match vm, vs with
-                  | .value m', .value s' => .ok (.float ft2 (handleFMF fmf false false (m'.copySign s')), o2)
+                  | .value m', .value s' => .ok (.float ft2 (handleFMF fmf false false (floatCopySign m' s')), o2)
                   | _, _ => .ok (.float ft2 .poison, o2)
             else .error (.staticError "Mismatched float types in llvm.copysign")
           | .float ft _, _ => .ok (.float ft .poison, o0)

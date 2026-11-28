@@ -132,6 +132,9 @@ structure PState where
   curSrc       : Array SrcEntry := #[]
   lines        : Array Nat := #[]
   fnSrcs       : Array FnSrc := #[]
+  /-- The last floating-point type parsed: the type of an `f0x` literal that follows it (its bit
+  pattern's word order depends on the type, see `decodeHexFloatForType`). -/
+  lastFloatTy  : Option FloatType := none
 deriving Inhabited
 
 abbrev ParseM := StateT PState (Except String)
@@ -210,13 +213,15 @@ def parseType : Nat → ParseM LlvmType
   | fuel + 1 => do
     let t ← bump
     match t with
-    | .ident "half" => return .float .half
-    | .ident "bfloat" => return .float .bfloat
-    | .ident "float" => return .float .float
-    | .ident "double" => return .float .double
-    | .ident "x86_fp80" => return .float .x86_fp80
-    | .ident "fp128" => return .float .fp128
-    | .ident "ppc_fp128" => return .float .ppc_fp128
+    | .ident "half" => modify fun st => { st with lastFloatTy := some .half }; return .float .half
+    | .ident "bfloat" => modify fun st => { st with lastFloatTy := some .bfloat }; return .float .bfloat
+    | .ident "float" => modify fun st => { st with lastFloatTy := some .float }; return .float .float
+    | .ident "double" => modify fun st => { st with lastFloatTy := some .double }; return .float .double
+    | .ident "x86_fp80" =>
+      modify fun st => { st with lastFloatTy := some .x86_fp80 }; return .float .x86_fp80
+    | .ident "fp128" => modify fun st => { st with lastFloatTy := some .fp128 }; return .float .fp128
+    | .ident "ppc_fp128" =>
+      modify fun st => { st with lastFloatTy := some .ppc_fp128 }; return .float .ppc_fp128
     | .ident "metadata" => return .ptr 0
     | .ident "ptr" =>
       if ← tryEatIdent "addrspace" then
@@ -491,11 +496,9 @@ private def decodeHexFloatForType (tag : Char) (val : Nat) : Exp :=
     let hi64 := val &&& mask64
     .floatBits ((hi64 <<< 64) ||| lo64)
   else if tag == 'K' then
-    -- LLVM `0xK<80-bit>`: bit 79 = sign, bits 78..64 = exp (15b), bit 63 = explicit int bit, bits 62..0 = frac (63b)
-    let sign := (val >>> 79) &&& 1
-    let exp := (val >>> 64) &&& ((1 <<< 15) - 1)
-    let frac := val &&& ((1 <<< 63) - 1)
-    .floatBits ((sign <<< 78) ||| (exp <<< 63) ||| frac)
+    -- LLVM `0xK<80-bit>`: the x87 encoding itself (sign, 15-bit exponent, explicit integer bit,
+    -- 63-bit fraction), which is also our `x86_fp80` representation (`FloatFormat.explicitInt`)
+    .floatBits (val &&& ((1 <<< 80) - 1))
   else if tag == 'M' then
     -- LLVM `0xM<hi64><lo64>`: preserve raw 128-bit IBM double-double pair
     .floatBits val
@@ -511,6 +514,13 @@ def parseExp : Nat → ParseM Exp
     | .localId id => return .identifier (.local_id id)
     | .globalId id => return .identifier (.global_id id)
     | .intLit n => return .int n
+    | .hexLit 'f' val =>
+      -- `f0x<bits>`: the type's bit pattern as an APInt; a `ppc_fp128` APInt holds the high
+      -- double in its low word, while `.floatBits` of `ppc_fp128` is in `0xM` order (high first)
+      if (← get).lastFloatTy == some .ppc_fp128 then
+        let m64 : Nat := (1 <<< 64) - 1
+        return .floatBits (((val &&& m64) <<< 64) ||| (val >>> 64))
+      else return .floatBits val
     | .hexLit tag val => return decodeHexFloatForType tag val
     | .fltLit neg mant exp10 => return .floatDec neg mant exp10
     | .ident "true" => return .bool true

@@ -62,6 +62,12 @@ NORMALIZERS: list[Normalizer] = [
                       r"object size|overflows uint64_t)\. Size: \d+)\.$", r"\1"),)),
     Normalizer("signature-mismatch-dot", "P8", "the mismatched-signature UB message ends with an extra `.`",
                ours=((r"(mismatched signature\. Expected: .*)\.$", r"\1"),)),
+    Normalizer("x87-nan-hidden-bit", "O3", "llubi prints a NaN converted from `x86_fp80` as hex "
+               "(`double 0x7FF8000000000000`) where its bits are those of the NaN it prints as `NaN`: "
+               "APFloat's conversion keeps the x87 integer bit in a significand bit that "
+               "`bitcastToAPInt` drops but `bitwiseIsEqual` (its print-as-decimal test) sees",
+               llubi=((r"=> (half|bfloat|float|double|fp128) 0x(7FF8000000000000|7FC00000|7E00|7FC0|"
+                       r"7FFF8000000000000000000000000000)$", r"=> \1 NaN"),)),
 ]
 
 

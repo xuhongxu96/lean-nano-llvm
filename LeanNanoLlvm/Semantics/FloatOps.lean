@@ -64,6 +64,24 @@ def quadToPPC (rm : RoundingMode) (q : IEEEFloat .fp128) (loSignOfHi : Bool := f
     IEEEFloat .fp128 :=
   IEEEFloat.quadToDoubleDouble rm q loSignOfHi
 
+/-- `llvm.fabs` on a stored float of type `ft`. A `ppc_fp128` is negative when its high double
+is, and changing its sign flips both doubles (`DoubleAPFloat::clearSign`/`changeSign`). -/
+def floatAbs {ft : FloatType} (x : IEEEFloat ft.format) : IEEEFloat ft.format :=
+  match ft, x with
+  | .ppc_fp128, x =>
+    let (hi, lo) := unpackPPC128 x
+    if hi.sign then packPPC128 hi.neg lo.neg else x
+  | _, x => x.abs
+
+/-- `llvm.copysign` on stored floats of type `ft` (`ppc_fp128`: the sign of the high double; a
+sign change flips both doubles, as `DoubleAPFloat::copySign` does). -/
+def floatCopySign {ft : FloatType} (mag sgn : IEEEFloat ft.format) : IEEEFloat ft.format :=
+  match ft, mag, sgn with
+  | .ppc_fp128, m, s =>
+    let (hi, lo) := unpackPPC128 m
+    if hi.sign != (unpackPPC128 s).1.sign then packPPC128 hi.neg lo.neg else m
+  | _, m, s => m.copySign s
+
 /-- The IEEE value a stored float of type `ft` denotes (`ppc_fp128` is stored as its double pair). -/
 def toSemantic {ft : FloatType} (x : IEEEFloat ft.format) : IEEEFloat ft.format :=
   match ft, x with

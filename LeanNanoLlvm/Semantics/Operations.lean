@@ -32,7 +32,7 @@ def floatLiteralValue (ft : FloatType) (bits : Nat) : RegisterValue :=
     let hi := bits >>> 64
     let lo := bits &&& ((1 <<< 64) - 1)
     .float .ppc_fp128 (.value (IEEEFloat.ofNatBits ((lo <<< 64) ||| hi)))
-  | ft => .float ft (.value (IEEEFloat.ofNatBits bits))
+  | ft => .float ft (.value (IEEEFloat.ofNatBits bits).readEncoding)
 
 /-- The value of a decimal floating-point literal of type `ft` (`ppc_fp128`: the double-double
 nearest to the decimal, not its IEEE binary128 encoding). -/
@@ -762,7 +762,7 @@ private def memBitsToScalar (dl : DataLayout) (ty : LlvmType) (slice : List MemB
       if isPoison then RegisterValue.poisonOf ty
       else match ty with
         | .int w => .bv w (.value (BitVec.ofNat w valBits))
-        | .float ft => .float ft (.value (IEEEFloat.ofNatBits valBits))
+        | .float ft => .float ft (.value (IEEEFloat.ofNatBits valBits).readEncoding)
         | .ptr as =>
           let prov := if provOk then provAcc.getD .nullary else .nullary
           .ptr as (.value { prov := prov, addrWidth := numBits, addr := BitVec.ofNat numBits valBits })

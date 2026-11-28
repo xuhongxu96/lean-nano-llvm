@@ -3,10 +3,19 @@ import LeanNanoLlvm.Util.Hex
 
 namespace LeanNanoLlvm
 
-/-- Parameters defining an IEEE-754 binary floating-point format. -/
+/-- Parameters defining an IEEE-754 binary floating-point format.
+
+`explicitInt` formats store the significand's integer bit explicitly, between the exponent and
+the `sigBits` fraction bits (the x87 80-bit extended format). Their encodings that have no IEEE
+counterpart are classified as LLVM's `APFloat` does (`initFromF80LongDoubleAPInt`): an exponent of
+0 with the integer bit set (pseudo-denormal) is a normal number of exponent `eMin`; a maximal
+exponent other than `1.000…` (pseudo-infinity, pseudo-NaN) and any other exponent with the integer
+bit clear (unnormal) are NaNs. Such encodings are kept bit for bit by sign operations and by NaN
+propagation, as `APFloat` keeps them; arithmetic produces canonical encodings. -/
 structure FloatFormat : Type where
   expBits : Nat
-  sigBits : Nat -- trailing significand bits (excluding implicit leading bit)
+  sigBits : Nat -- trailing significand bits (excluding the leading integer bit)
+  explicitInt : Bool := false
 deriving Repr, DecidableEq, Inhabited
 
 namespace FloatFormat
@@ -15,10 +24,12 @@ def half   : FloatFormat := { expBits := 5,  sigBits := 10 }   -- IEEE binary16
 def bfloat : FloatFormat := { expBits := 8,  sigBits := 7 }    -- bfloat16
 def single : FloatFormat := { expBits := 8,  sigBits := 23 }   -- IEEE binary32 (float)
 def double   : FloatFormat := { expBits := 11, sigBits := 52 }   -- IEEE binary64 (double)
-def x86_fp80 : FloatFormat := { expBits := 15, sigBits := 63 }   -- x87 80-bit extended (64-bit precision)
+def x86_fp80 : FloatFormat := { expBits := 15, sigBits := 63, explicitInt := true }  -- x87 80-bit extended
 def fp128    : FloatFormat := { expBits := 15, sigBits := 112 }  -- IEEE binary128 (fp128)
 
-@[simp] def totalBits (fmt : FloatFormat) : Nat := 1 + fmt.expBits + fmt.sigBits
+/-- Width of the significand field: the fraction, plus the integer bit if it is explicit. -/
+@[simp] def fieldBits (fmt : FloatFormat) : Nat := fmt.sigBits + (if fmt.explicitInt then 1 else 0)
+@[simp] def totalBits (fmt : FloatFormat) : Nat := 1 + fmt.expBits + fmt.fieldBits
 @[simp] def precision (fmt : FloatFormat) : Nat := fmt.sigBits + 1
 @[simp] def bias      (fmt : FloatFormat) : Nat := (1 <<< (fmt.expBits - 1)) - 1
 @[simp] def expMask   (fmt : FloatFormat) : Nat := (1 <<< fmt.expBits) - 1
@@ -60,26 +71,45 @@ instance : Inhabited (IEEEFloat fmt) := ⟨⟨0⟩⟩
 
 /-- Pack `(sign, rawExp, rawSig)` into an `IEEEFloat`. -/
 def pack (fmt : FloatFormat) (sign : Bool) (rawExp rawSig : Nat) : IEEEFloat fmt :=
-  let sBit := if sign then (1 <<< (fmt.expBits + fmt.sigBits)) else 0
-  let eBits := (rawExp &&& fmt.expMask) <<< fmt.sigBits
+  let sBit := if sign then (1 <<< (fmt.expBits + fmt.fieldBits)) else 0
+  let eBits := (rawExp &&& fmt.expMask) <<< fmt.fieldBits
+  -- an explicit integer bit is set exactly for nonzero exponents (canonical encodings)
+  let iBit := if fmt.explicitInt && (rawExp &&& fmt.expMask) != 0 then 1 <<< fmt.sigBits else 0
   let mBits := rawSig &&& fmt.sigMask
-  ⟨BitVec.ofNat fmt.totalBits (sBit ||| eBits ||| mBits)⟩
+  ⟨BitVec.ofNat fmt.totalBits (sBit ||| eBits ||| iBit ||| mBits)⟩
 
 @[simp] def sign (x : IEEEFloat fmt) : Bool :=
-  ((x.bits.toNat >>> (fmt.expBits + fmt.sigBits)) &&& 1) == 1
+  ((x.bits.toNat >>> (fmt.expBits + fmt.fieldBits)) &&& 1) == 1
 
 @[simp] def rawExp (x : IEEEFloat fmt) : Nat :=
-  (x.bits.toNat >>> fmt.sigBits) &&& fmt.expMask
+  (x.bits.toNat >>> fmt.fieldBits) &&& fmt.expMask
 
 @[simp] def rawSig (x : IEEEFloat fmt) : Nat :=
   x.bits.toNat &&& fmt.sigMask
 
-@[simp] def isZero      (x : IEEEFloat fmt) : Bool := x.rawExp == 0 && x.rawSig == 0
-@[simp] def isSubnormal (x : IEEEFloat fmt) : Bool := x.rawExp == 0 && x.rawSig != 0
-@[simp] def isNormal    (x : IEEEFloat fmt) : Bool := x.rawExp != 0 && x.rawExp != fmt.expMask
-@[simp] def isFinite    (x : IEEEFloat fmt) : Bool := x.rawExp != fmt.expMask
-@[simp] def isInf       (x : IEEEFloat fmt) : Bool := x.rawExp == fmt.expMask && x.rawSig == 0
-@[simp] def isNaN       (x : IEEEFloat fmt) : Bool := x.rawExp == fmt.expMask && x.rawSig != 0
+/-- The explicit integer bit (`explicitInt` formats; `false` otherwise). -/
+@[simp] def intBit (x : IEEEFloat fmt) : Bool :=
+  fmt.explicitInt && ((x.bits.toNat >>> fmt.sigBits) &&& 1) == 1
+
+/-- An `explicitInt` encoding that `APFloat` reads as a NaN although its exponent is not maximal
+(unnormal), or whose maximal exponent comes with a clear integer bit (pseudo-infinity/NaN). -/
+@[simp] def isPseudoNaN (x : IEEEFloat fmt) : Bool :=
+  fmt.explicitInt && x.rawExp != 0 && !x.intBit
+
+/-- The exponent field, except that an `explicitInt` pseudo-denormal (exponent 0, integer bit
+set) counts as exponent 1, the exponent of its value. -/
+@[simp] def effExp (x : IEEEFloat fmt) : Nat :=
+  if fmt.explicitInt && x.rawExp == 0 && x.intBit then 1 else x.rawExp
+
+@[simp] def isZero      (x : IEEEFloat fmt) : Bool := x.effExp == 0 && x.rawSig == 0
+@[simp] def isSubnormal (x : IEEEFloat fmt) : Bool := x.effExp == 0 && x.rawSig != 0
+@[simp] def isNormal    (x : IEEEFloat fmt) : Bool :=
+  x.effExp != 0 && x.rawExp != fmt.expMask && !x.isPseudoNaN
+@[simp] def isFinite    (x : IEEEFloat fmt) : Bool := x.rawExp != fmt.expMask && !x.isPseudoNaN
+@[simp] def isInf       (x : IEEEFloat fmt) : Bool :=
+  x.rawExp == fmt.expMask && x.rawSig == 0 && !x.isPseudoNaN
+@[simp] def isNaN       (x : IEEEFloat fmt) : Bool :=
+  x.rawExp == fmt.expMask && x.rawSig != 0 || x.isPseudoNaN
 @[simp] def isQNaN      (x : IEEEFloat fmt) : Bool := x.isNaN && ((x.rawSig &&& fmt.quietBit) != 0)
 @[simp] def isSNaN      (x : IEEEFloat fmt) : Bool := x.isNaN && ((x.rawSig &&& fmt.quietBit) == 0)
 @[simp] def isNegZero   (x : IEEEFloat fmt) : Bool := x.isZero && x.sign
@@ -103,11 +133,27 @@ def sNaN (fmt : FloatFormat) (neg : Bool := false) (payload : Nat := 1) : IEEEFl
   pack fmt neg fmt.expMask p'
 
 def makeQuiet (x : IEEEFloat fmt) : IEEEFloat fmt :=
-  if x.isNaN then pack fmt x.sign fmt.expMask (x.rawSig ||| fmt.quietBit) else x
+  if x.isNaN then ⟨BitVec.ofNat fmt.totalBits (x.bits.toNat ||| fmt.quietBit)⟩ else x
+
+/-- The value `APFloat` reads from an encoding (`initFromAPInt`), as `bitcastToAPInt` writes it
+back: for an `explicitInt` format, an unnormal (exponent neither 0 nor maximal, integer bit clear)
+is a NaN with the maximal exponent and the same significand, and a pseudo-denormal (exponent 0,
+integer bit set) has exponent 1; any other encoding, and every encoding of other formats, is read
+as it is. Applied wherever a value is made from bits (`bitcast`, loads, literals, `undef`). -/
+def readEncoding (x : IEEEFloat fmt) : IEEEFloat fmt :=
+  if !fmt.explicitInt then x
+  else
+    let e := x.rawExp
+    let n := x.bits.toNat
+    if e != 0 && e != fmt.expMask && !x.intBit then
+      ⟨BitVec.ofNat fmt.totalBits (n - (e <<< fmt.fieldBits) + (fmt.expMask <<< fmt.fieldBits))⟩
+    else if e == 0 && x.intBit then
+      ⟨BitVec.ofNat fmt.totalBits (n + (1 <<< fmt.fieldBits))⟩
+    else x
 
 /-- Bitwise negation (flips the sign bit, including for NaN and ±0). -/
 def neg (x : IEEEFloat fmt) : IEEEFloat fmt :=
-  ⟨x.bits ^^^ (1#(fmt.totalBits) <<< (fmt.expBits + fmt.sigBits))⟩
+  ⟨x.bits ^^^ (1#(fmt.totalBits) <<< (fmt.expBits + fmt.fieldBits))⟩
 
 @[simp]
 theorem neg_neg (x : IEEEFloat fmt) : x.neg.neg = x := by
@@ -117,11 +163,11 @@ theorem neg_neg (x : IEEEFloat fmt) : x.neg.neg = x := by
 
 /-- Bitwise absolute value (clears the sign bit, including for NaN and -0). -/
 def abs (x : IEEEFloat fmt) : IEEEFloat fmt :=
-  pack fmt false x.rawExp x.rawSig
+  ⟨BitVec.ofNat fmt.totalBits (x.bits.toNat &&& ((1 <<< (fmt.expBits + fmt.fieldBits)) - 1))⟩
 
 /-- Bitwise copysign (magnitude of `mag`, sign bit of `sgn`). -/
 def copySign (mag sgn : IEEEFloat fmt) : IEEEFloat fmt :=
-  pack fmt sgn.sign mag.rawExp mag.rawSig
+  if mag.sign == sgn.sign then mag else mag.neg
 
 /-- Classification mask bit (matches LLVM `llvm.is.fpclass`). -/
 def fpClassBit (x : IEEEFloat fmt) : Nat :=
@@ -137,11 +183,11 @@ Decompose a finite non-zero float into `(sign, mantissa, exp2)` such that its ex
 real value is `(-1)^sign * mantissa * 2^exp2` with `mantissa > 0`.
 -/
 def toDyadic (x : IEEEFloat fmt) : Bool × Nat × Int :=
-  if x.rawExp == 0 then
+  if x.effExp == 0 then
     (x.sign, x.rawSig, fmt.eMin - (fmt.sigBits : Int))
   else
     let m := (1 <<< fmt.sigBits) ||| x.rawSig
-    let e := (x.rawExp : Int) - (fmt.bias : Int) - (fmt.sigBits : Int)
+    let e := (x.effExp : Int) - (fmt.bias : Int) - (fmt.sigBits : Int)
     (x.sign, m, e)
 
 /-- Compute `floor(log2(num / den))` exactly for `num > 0, den > 0`. -/
@@ -225,7 +271,7 @@ def compareNonNaN (x y : IEEEFloat fmt) : Ordering :=
   else
     -- Same sign: compare magnitude by lexicographical (rawExp, rawSig)
     let magCmp :=
-      match compare x.rawExp y.rawExp with
+      match compare x.effExp y.effExp with
       | .eq => compare x.rawSig y.rawSig
       | c => c
     if x.sign then

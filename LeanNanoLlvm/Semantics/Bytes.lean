@@ -54,41 +54,14 @@ def writeBitLoop (dl : DataLayout) (offsetInBits : Nat) (bitFn : Nat → MemBit)
     match setLogicalBit dl bs (offsetInBits + i) (bitFn i) with
     | ⟨data⟩ => writeBitLoop dl offsetInBits bitFn (i + 1) rem ⟨data⟩
 
-/-- The stored bit pattern of a float of type `ft` (`x86_fp80`: insert the explicit integer
-bit 63, which is 1 unless the exponent is 0). -/
-def floatStorageBits (ft : FloatType) (n : Nat) : Nat :=
-  match ft with
-  | .x86_fp80 =>
-    let sig := n &&& ((1 <<< 63) - 1)
-    let se := n >>> 63
-    let intBit := if se &&& 0x7FFF == 0 then 0 else 1
-    (se <<< 64) ||| (intBit <<< 63) ||| sig
-  | _ => n
+/-- The stored bit pattern of a float of type `ft`: its representation (for `x86_fp80`, the x87
+encoding with its explicit integer bit, `FloatFormat.explicitInt`). -/
+def floatStorageBits (_ft : FloatType) (n : Nat) : Nat := n
 
-/-- The value of a stored bit pattern of type `ft`. `x86_fp80` is the x87 extended format, not an
-IEEE interchange format: its integer bit (63) is explicit, so some encodings have no IEEE
-counterpart. They are decoded as LLVM's `APFloat` does (`initFromF80LongDoubleAPInt`):
-unnormals (exponent ≠ 0, integer bit 0), pseudo-infinities and pseudo-NaNs (exponent 0x7FFF,
-integer bit 0) are NaNs; pseudo-denormals (exponent 0, integer bit 1) have the value of exponent 1.
-Our 79-bit format (`FloatFormat.x86_fp80`, implicit integer bit) keeps a NaN's fraction but not
-the integer bit, so such a NaN is re-encoded canonically (a fraction of 0 becomes the quiet NaN). -/
-def floatOfStorageBits (ft : FloatType) (v : Nat) : Nat :=
-  match ft with
-  | .x86_fp80 =>
-    let sig64 := v &&& ((1 <<< 64) - 1)
-    let exp := (v >>> 64) &&& 0x7FFF
-    let sign := (v >>> 79) &&& 1
-    let intBit := sig64 >>> 63
-    let frac := sig64 &&& ((1 <<< 63) - 1)
-    let mk (e f : Nat) := (sign <<< 78) ||| (e <<< 63) ||| f
-    let nan := mk 0x7FFF (if frac == 0 then 1 <<< 62 else frac)
-    if exp == 0x7FFF then
-      if sig64 == (1 <<< 63) then mk 0x7FFF 0   -- infinity
-      else nan                                    -- NaN, pseudo-NaN, pseudo-infinity
-    else if exp != 0 && intBit == 0 then nan      -- unnormal
-    else if exp == 0 && intBit == 1 then mk 1 frac  -- pseudo-denormal
-    else mk exp frac
-  | _ => v
+/-- The value of a stored bit pattern of type `ft`: the pattern itself. `x86_fp80` encodings with
+no IEEE counterpart (unnormals, pseudo-infinities/NaNs, pseudo-denormals) are kept as they are
+and classified as LLVM's `APFloat` does when they are used (`FloatFormat.explicitInt`). -/
+def floatOfStorageBits (_ft : FloatType) (v : Nat) : Nat := v
 
 /-- Write a scalar value into `bytes` starting at logical `offsetInBits`. -/
 def writeScalarBits (dl : DataLayout) (val : RegisterValue) (ty : LlvmType)
@@ -228,7 +201,7 @@ def readScalarBits (dl : DataLayout) (cfg : SemanticsConfig) (bytes : Array MemB
     else
       let res := match ty with
         | .int w => RegisterValue.bv w (.value (BitVec.ofNat w valBits))
-        | .float ft => RegisterValue.float ft (.value (IEEEFloat.ofNatBits (floatOfStorageBits ft valBits)))
+        | .float ft => RegisterValue.float ft (.value (IEEEFloat.ofNatBits (floatOfStorageBits ft valBits)).readEncoding)
         | .ptr as =>
           let prov := if provOk then provAcc.getD .nullary else .nullary
           RegisterValue.ptr as (.value { prov := prov, addrWidth := numBits, addr := BitVec.ofNat numBits valBits })

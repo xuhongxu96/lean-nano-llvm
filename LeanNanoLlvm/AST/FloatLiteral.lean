@@ -13,8 +13,8 @@ printing floating-point numbers:
 * the `AsmWriter` constant printer `writeAPFloatInternal` (`+inf`, `+qnan`, `-snan(0x..)`,
   round-trip decimal, or `f0x...` bit pattern).
 
-`x86_fp80` values are stored with an implicit integer bit in `IEEEFloat`; `bits80` rebuilds the
-explicit-integer-bit 80-bit encoding that LLVM's `bitcastToAPInt` produces.
+`x86_fp80` values are represented by their x87 encoding (`FloatFormat.explicitInt`), which is
+what LLVM's `bitcastToAPInt` produces.
 -/
 
 namespace LeanNanoLlvm.AST.FloatLiteral
@@ -169,12 +169,7 @@ def apToStringRoundTrip? {fmt : FloatFormat} (x : IEEEFloat fmt) : Option String
 
 /-- `bitcastToAPInt` value and bit width of a float of LLVM type `ft`. -/
 def bitcastBits (ft : FloatType) (x : IEEEFloat ft.format) : Nat × Nat :=
-  match ft with
-  | .x86_fp80 =>
-    let intBit := if x.rawExp == 0 then 0 else 1
-    let sgn := if x.sign then 1 else 0
-    ((sgn <<< 79) ||| (x.rawExp <<< 64) ||| (intBit <<< 63) ||| x.rawSig, 80)
-  | _ => (x.bits.toNat, ft.bitWidth)
+  (x.bits.toNat, ft.bitWidth)
 
 /-- `ppc_fp128` (double-double) decimal rendering if it round-trips: the high double carries the
 whole value (low double zero) and its 6-digit decimal is exact. Lean stores `ppc_fp128` as a
@@ -246,13 +241,17 @@ private def asmStringIEEE (ft : FloatType) (x : IEEEFloat ft.format) : String :=
       "f0x" ++ Hex.upperPadded ((w + 3) / 4) bits
 
 /-- LLVM `AsmWriter` rendering of a floating-point constant (`writeAPFloatInternal`). A
-`ppc_fp128` whose low double is zero prints as its high double when that is infinite or NaN. -/
+`ppc_fp128` whose low double is zero prints as its high double when that is infinite or NaN.
+The decimal test compares values (`APFloat::operator==`), not bits, so a low double of -0.0
+counts as zero. -/
 def asmString (ft : FloatType) (x : IEEEFloat ft.format) : String :=
   if ft == .ppc_fp128 then
     let bits := x.bits.toNat
     let hiD : IEEEFloat .double := IEEEFloat.ofNatBits (bits &&& ((1 <<< 64) - 1))
     if (bits >>> 64) == 0 && (hiD.isInf || hiD.isNaN) then asmStringIEEE .double hiD
-    else match ppcDecimal? bits with
+    else
+      let valueBits := if bits >>> 64 == 1 <<< 63 then bits &&& ((1 <<< 64) - 1) else bits
+      match ppcDecimal? valueBits with
       | some s => s
       | none => "f0x" ++ Hex.upperPadded 32 bits
   else asmStringIEEE ft x

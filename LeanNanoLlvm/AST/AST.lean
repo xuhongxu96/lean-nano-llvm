@@ -62,13 +62,11 @@ def format : FloatType → FloatFormat
 @[simp]
 def bitWidth (ft : FloatType) : Nat := ft.format.totalBits
 
-/-- Width of the type's bit pattern in memory and for `bitcast` (LLVM's primitive size):
-`bitWidth`, except `x86_fp80`, whose 80-bit encoding has an explicit integer bit that the 79-bit
-semantic format (`FloatFormat.x86_fp80`) leaves implicit. -/
+/-- Width of the type's bit pattern in memory and for `bitcast` (LLVM's primitive size); our
+representation is that bit pattern for every type (`x86_fp80` included: its format stores the
+explicit integer bit, `FloatFormat.explicitInt`). -/
 @[simp]
-def storageBits : FloatType → Nat
-  | .x86_fp80 => 80
-  | ft => ft.bitWidth
+def storageBits (ft : FloatType) : Nat := ft.bitWidth
 
 end FloatType
 

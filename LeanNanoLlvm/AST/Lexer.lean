@@ -233,6 +233,10 @@ def tokenizeWithLines (input : String) : Array Tok × Array Nat :=
               let n := (parseNatStr (String.ofList intDs)).getD 0
               let v : Int := if neg then - (Int.ofNat n) else Int.ofNat n
               go fuel' (acc.push (.intLit v)) rest1
+          else if c == 'f' && (match rest with | '0' :: 'x' :: d :: _ => isHexDigit d | _ => false) then
+            -- `f0x<hex>`: a floating-point constant given by its bit pattern (LLLexer)
+            let (hs, rest2) := readHex [] (rest.drop 2)
+            go fuel' (acc.push (.hexLit 'f' (parseHexNat hs))) rest2
           else if isIdentStart c || ((c == '+' || c == '-') && match rest with | d :: _ => d.isAlpha | [] => false) then
             let (s, rest2) := readIdent [c] rest
             go fuel' (acc.push (.ident s)) rest2

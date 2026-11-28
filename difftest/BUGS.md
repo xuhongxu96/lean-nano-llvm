@@ -36,6 +36,7 @@ Ids: `B` semantic bugs in lean-nano-llvm, `P` differences in our llubi-compatibl
 | B10 | `x86_fp80` (the x87 extended format, not an IEEE interchange format) was 79 bits wide in memory and for `bitcast`, without its explicit integer bit: stores and loads of its bits were wrong and `bitcast` from/to `i80` was rejected. Non-canonical x87 encodings are now decoded as `APFloat` does (unnormals and pseudo-infinities/NaNs are NaN, pseudo-denormals have exponent 1). | Data Layout, Floating-Point Types | `x86_fp80_memory_layout.ll`, `x86_fp80_bitcast.ll`, `x86_fp80_noncanonical_encodings.ll` |
 | B11 | An `llvm.assume` operand bundle on a pointer other than the modelled ones (`separate_storage`) ignored a poison pointer, which llubi reports as immediate UB ("Assume on poison pointer."). | `llvm.assume` operand bundles | `llubi_assume_separate_storage_poison.ll` |
 | B9 | A call to a module-defined `@malloc`/`@calloc` (and `operator new`) is replaced by the builtin allocator instead of executing the definition. | (a defined function is executed as defined) | `defined_allocator_is_called.ll` |
+| B12 | `llvm.fabs` and `llvm.copysign` on `ppc_fp128` treated the double pair as one IEEE binary128 value (sign = the low double's sign bit, only that bit changed). A double-double's sign is its high double's, and a sign change negates both doubles (`DoubleAPFloat::changeSign`), so `fabs(-1 + 2^-1074)` was `(1, 2^-1074)`, value `1 + 2^-1074`, instead of `1 - 2^-1074`. From case `6357d1590901c055`. | `llvm.fabs`, `llvm.copysign` | `llubi_ppc_fp128_sign_ops.ll` |
 
 Follow-up instances (same ids): **B1** a declared callee's parameter attributes also apply to
 the arguments (`decl_param_noundef_ub.ll`); **B3** a call without an explicit type has the
@@ -50,9 +51,20 @@ integer conversions only (`llubi_ppc_fp128_zero_low_sign.ll`); decimal and speci
 literals were IEEE binary128 encodings instead of double-doubles, and `fdiv`/`frem` did not
 compute in APFloat's 106-bit legacy format (`llubi_ppc_fp128_div_rem.ll`).
 
-Known limits (not bugs): our 79-bit `x86_fp80` format does not keep the integer bit of a NaN, so
-llubi's raw bits for a non-canonical NaN are printed as a canonical NaN; `undef`/`freeze` values
-of `x86_fp80` are drawn from the 79 semantic bits (both choices are allowed).
+**B10** follow-up: `x86_fp80` values are now represented by their x87 encoding, explicit integer
+bit included (`FloatFormat.explicitInt`; the IEEE library classifies x87 encodings as `APFloat`
+does). A NaN's integer bit used to be lost (a 79-bit format has no room for it) where `APFloat`
+keeps it through `bitcast`, NaN propagation, `fneg`/`fabs`/`copysign`, `select`, `freeze` and
+memory; an unnormal read from bits is a NaN with the maximal exponent and a pseudo-denormal has
+exponent 1, as `bitcastToAPInt` writes them back (`IEEEFloat.readEncoding`); `undef`/`freeze`
+values are drawn over all 80 bits, as llubi draws them (`llubi_x86_fp80_explicit_int_bit.ll`).
+Randomized check against llubi (450 runs over every encoding class, 3 seeds): 2,477 -> 3
+differing lines, all O3. Corpus cases with `x86_fp80`: 1,097 -> 1,197 of 1,268 runs agree; the
+rest are O3 and llubi's unsupported `llvm.canonicalize` and libcalls.
+
+Coverage: `f0x<hex>` floating-point literals (the bit pattern of the type; LLVM's current
+printer form) were rejected by our parser, so 3,859 corpus cases were unsupported; they now
+parse (`llubi_f0x_literals.ll`), and 7,596 of their 7,718 llubi runs agree.
 
 B8 follow-up: `ppc_fp128` division is computed in LLVM's legacy 106-bit format, whose normal range
 ends at 2^-969 (`minExponent = -1022 + 53`); a quotient below 2^-968 is rounded to a multiple of
@@ -116,6 +128,7 @@ Bugs in the campaign harness itself, found by the sanity checks and the triage; 
 |---|---|
 | O2 | llubi ignores a `getelementptr` index whose element type has size 0 (`{}`, `[0 x T]`), even a poison one, and returns the base pointer; LangRef ("Poison Values": most instructions return poison when an argument is poison, with a `getelementptr` example) makes the result poison, as ours is. From case `661f6eb3623f33b9`. |
 | O1 | llubi aborts (assertion failures, e.g. "Cannot get layout of opaque structs") on modules the verifier accepts. |
+| O3 | Not a bug, an `APFloat` artefact: converting an `x86_fp80` NaN to a narrower type keeps the x87 integer bit in a significand bit that `bitcastToAPInt` drops but `bitwiseIsEqual` sees, so llubi prints such a NaN as hex (`double 0x7FF8000000000000`) although its bits are those it prints as `NaN`. A `double` has no room for the hidden bit; triage normalizer `x87-nan-hidden-bit`. |
 
 ## Retracted candidates
 

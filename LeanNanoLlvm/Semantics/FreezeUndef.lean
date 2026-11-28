@@ -51,7 +51,7 @@ inductive FreezeRel (dl : DataLayout) (cfg : SemanticsConfig) :
       FreezeRel dl cfg (.float ft (.value f)) (.float ft (.value f))
   | float_poison (ft : FloatType) (bits : BitVec ft.bitWidth) :
       (cfg.freezeMode = .zero → bits = BitVec.ofNat ft.bitWidth 0) →
-      FreezeRel dl cfg (.float ft .poison) (.float ft (.value (IEEEFloat.ofBits bits)))
+      FreezeRel dl cfg (.float ft .poison) (.float ft (.value (IEEEFloat.ofBits bits).readEncoding))
   | ptr_val (as : Nat) (p : Pointer) :
       FreezeRel dl cfg (.ptr as (.value p)) (.ptr as (.value p))
   | ptr_poison (as : Nat) (bits : BitVec (dl.getPointerSizeInBits as)) :
@@ -219,7 +219,7 @@ def freezeValue (dl : DataLayout) (cfg : SemanticsConfig) :
     | (bs', o') => (.byte w bs', o')
   | .float ft .poison, oracle =>
     match drawFreezeBits cfg ft.bitWidth oracle with
-    | (bits, o') => (.float ft (.value (IEEEFloat.ofBits bits)), o')
+    | (bits, o') => (.float ft (.value (IEEEFloat.ofBits bits).readEncoding), o')
   | .float ft (.value f), oracle => (.float ft (.value f), oracle)
   | .ptr as .poison, oracle =>
     match drawFreezeBits cfg (dl.getPointerSizeInBits as) oracle with
@@ -330,7 +330,7 @@ inductive UndefValRel (dl : DataLayout) (cfg : SemanticsConfig) :
       UndefValRel dl cfg (.byte w) (RegisterValue.byteOfBitVec bits)
   | float (ft : FloatType) (bits : BitVec ft.bitWidth) :
       (cfg.undefMode = .zero → bits = BitVec.ofNat ft.bitWidth 0) →
-      UndefValRel dl cfg (.float ft) (.float ft (.value (IEEEFloat.ofBits bits)))
+      UndefValRel dl cfg (.float ft) (.float ft (.value (IEEEFloat.ofBits bits).readEncoding))
   | ptr (as : Nat) (bits : BitVec (dl.getPointerSizeInBits as)) :
       (cfg.undefMode = .zero → bits = BitVec.ofNat (dl.getPointerSizeInBits as) (dl.getNullPtrValue as)) →
       UndefValRel dl cfg (.ptr as)
@@ -366,7 +366,7 @@ mutual
 def genUndefZeroExec (dl : DataLayout) : LlvmType → Except ExecError RegisterValue
   | .int w => .ok (.bv w (.value (BitVec.ofNat w 0)))
   | .byte w => .ok (RegisterValue.byteOfBitVec (BitVec.ofNat w 0))
-  | .float ft => .ok (.float ft (.value (IEEEFloat.ofBits (BitVec.ofNat ft.bitWidth 0))))
+  | .float ft => .ok (.float ft (.value (IEEEFloat.ofBits (BitVec.ofNat ft.bitWidth 0)).readEncoding))
   | .ptr as =>
     let pw := dl.getPointerSizeInBits as
     .ok (.ptr as (.value { prov := .nullary, addrWidth := pw, addr := BitVec.ofNat pw (dl.getNullPtrValue as) }))
@@ -426,7 +426,7 @@ def genUndefNondetExec (dl : DataLayout) : LlvmType → OracleState → Except E
     | (bv, o') => .ok (RegisterValue.byteOfBitVec bv, o')
   | .float ft, o =>
     match o.nextBitVec ft.bitWidth with
-    | (bv, o') => .ok (.float ft (.value (IEEEFloat.ofBits bv)), o')
+    | (bv, o') => .ok (.float ft (.value (IEEEFloat.ofBits bv).readEncoding), o')
   | .ptr as, o =>
     let pw := dl.getPointerSizeInBits as
     match o.nextBitVec pw with

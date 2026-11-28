@@ -166,7 +166,7 @@ inductive CVal where
 deriving Inhabited, BEq, Repr
 
 private def fpOf (ft : FloatType) : CVal → Option (IEEEFloat ft.format)
-  | .fpBits b => some (IEEEFloat.ofNatBits b)
+  | .fpBits b => some (IEEEFloat.ofNatBits b).readEncoding
   | .fpDec n m e =>
     match ft with
     -- a decimal `ppc_fp128` constant is the double-double nearest to it
@@ -185,11 +185,12 @@ def decodeHexFloat (ft : FloatType) (tag : Char) (val : Nat) : Nat :=
   | .float, 'd' | .half, 'd' | .bfloat, 'd' =>
     -- exact conversion; NaNs keep their signaling bit and top payload (`IEEEFloat.narrowFromDoubleHex`)
     (IEEEFloat.narrowFromDoubleHex ft.format val).bits.toNat
+  | _, 'f' =>
+    -- `f0x<bits>`: the type's APInt bit pattern, which is our representation for every type
+    val
   | .x86_fp80, 'K' =>
-    -- drop the explicit integer bit (bit 63) of the 80-bit encoding
-    let sig := val &&& ((1 <<< 63) - 1)
-    let rest := val >>> 64
-    (rest <<< 63) ||| sig
+    -- the x87 encoding itself (our representation keeps the explicit integer bit)
+    val &&& ((1 <<< 80) - 1)
   | .fp128, 'L' =>
     let first := val >>> 64
     let second := val &&& ((1 <<< 64) - 1)
