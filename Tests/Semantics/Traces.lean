@@ -55,7 +55,9 @@ theorem single_block_noundef_param_value_ok :
       .ok (.bv 8 (.value (9 : BitVec 8))) := by
   decide +kernel
 
-/-- Varargs function accepts extra arguments beyond fixed parameters. -/
+/-- Varargs function accepts extra arguments beyond fixed parameters. The call names the variadic
+function type, as LLVM requires (`call i32 @first_arg(i32 42, i32 99, i8 7)` would have the
+non-variadic type of its arguments, a signature mismatch: immediate UB). -/
 def varargsModule : AST.TopLevel := [llvm|
   define i32 @first_arg(i32 %x, ...) {
   entry:
@@ -64,7 +66,7 @@ def varargsModule : AST.TopLevel := [llvm|
 
   define i32 @main() {
   entry:
-    %r = call i32 @first_arg(i32 42, i32 99, i8 7)
+    %r = call i32 (i32, ...) @first_arg(i32 42, i32 99, i8 7)
     ret i32 %r
   }
 ]
@@ -72,6 +74,46 @@ def varargsModule : AST.TopLevel := [llvm|
 theorem varargs_call_returns_first_arg :
     runModuleFunction varargsModule (.name "main") =
       .ok (.bv 32 (.value (42 : BitVec 32))) := by
+  decide +kernel
+
+/-- A call in the `[llvm| ...]` syntax records its function type, as the IR parser does: without
+an explicit type it is the non-variadic type of the arguments, so calling a variadic function
+that way, or passing an `i64` where the callee takes an `i32`, is a signature mismatch:
+immediate UB (LangRef `call`). DSL calls used to record no type and skipped the check. -/
+def callTypeMismatchModule : AST.TopLevel := [llvm|
+  define i32 @first_arg(i32 %x, ...) {
+  entry:
+    ret i32 %x
+  }
+
+  define i32 @id(i32 %x) {
+  entry:
+    ret i32 %x
+  }
+
+  define i32 @main() {
+  entry:
+    %r = call i32 @first_arg(i32 42, i32 99)
+    ret i32 %r
+  }
+
+  define i32 @main2() {
+  entry:
+    %r = call i32 @id(i64 42)
+    ret i32 %r
+  }
+]
+
+theorem dsl_call_implied_type_vs_variadic_is_ub :
+    (match runModuleFunction callTypeMismatchModule (.name "main") with
+     | .error (.immediateUB _) => true
+     | _ => false) = true := by
+  decide +kernel
+
+theorem dsl_call_argument_type_mismatch_is_ub :
+    (match runModuleFunction callTypeMismatchModule (.name "main2") with
+     | .error (.immediateUB _) => true
+     | _ => false) = true := by
   decide +kernel
 
 private theorem exists_halted_of_toExcept_ok {c : Config} {v : RegisterValue}

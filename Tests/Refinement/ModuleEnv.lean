@@ -82,7 +82,8 @@ theorem caller_add0_is_refined_by_direct_in_module :
       | poison => llvm_simp
       | value bv => llvm_simp
     have hlookupId : helperId32Env.fns.get? (.name "id32") = some helperId32Def := rfl
-    have hmkCallee : mkCallEntryFrameWithMem .default64LE .modern initMem (.ret (.int 32)) [[]] helperId32Def [.bv 32 v] =
+    have hmkCallee : mkCallEntryFrameWithMem .default64LE .modern initMem (.ret (.int 32)) [[]] helperId32Def [.bv 32 v]
+        "" [] (some (.function (.ret (.int 32)) [.int 32] false)) =
       .ok ({ defn := helperId32Def, curBlock := .name "entry", remainingCode := [],
              terminator := entryTerm helperId32Def,
              registers := (∅ : AssocMap AST.Identifier RegisterValue).insert

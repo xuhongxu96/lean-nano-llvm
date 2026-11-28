@@ -286,7 +286,11 @@ entry:
 #test_unexpand (Instruction.fcmp FastMathFlags.none .oeq .f32 (.identifier (.local_id (.name "a"))) (.identifier (.local_id (.name "b"))))
 #test_unexpand (Instruction.select FastMathFlags.fast .i1 (.bool true) .i32 (.int 1) (.int 2))
 #test_unexpand (Instruction.getelementptr GEPFlags.mkInbounds .i32 (.ptr 0) (.identifier (.local_id (.name "p"))) [(.i64, .int 0)])
-#test_unexpand (Instruction.call (.ret .i32) {} (.identifier (.global_id (.name "f"))) [] [] [] false CallSiteInfo.default)
+#test_unexpand (Instruction.call (.ret .i32) {} (.identifier (.global_id (.name "f"))) [] [] [] false
+  { fnTy? := some (.function (.ret .i32) [] false) })
+#test_unexpand (Instruction.call (.ret .i32) {} (.identifier (.global_id (.name "printf")))
+  [(.ptr 0, .identifier (.local_id (.name "s")), []), (.i32, .int 1, [])] [] [] false
+  { fnTy? := some (.function (.ret .i32) [.ptr 0] true) })
 #test_unexpand_canon (TopLevel.mk [
   .definition {
     prototype := {

@@ -252,28 +252,46 @@ private def unexpandGEPFlags (stx : Syntax) : UnexpandM (Array (TSyntax `nanollv
       gepArrayFromBools hasInbounds hasNusw hasNuw
     | none => throw ()
 
-private def unexpandCallSiteInfo (stx : Syntax) : UnexpandM (Bool × String) := do
+/-- A call's recorded function type, if it must be written (`call i32 (ptr, ...) @f(...)`): only
+when it is variadic, since otherwise it is the type `[llvm-instruction| call ...]` infers from
+the arguments. -/
+private def explicitCallType? (fnTy : Syntax) : Option (TSyntax `nanollvm_type) :=
+  match stripParens fnTy with
+  | `(some $t) | `(Option.some $t) =>
+    match asType? (stripParens t) with
+    | some ty =>
+      match ty with
+      | `(nanollvm_type| $_r:nanollvm_type ( $ps:nanollvm_fn_param,* )) =>
+        if ps.getElems.any (fun p => match p with | `(nanollvm_fn_param| ...) => true | _ => false)
+        then some ty else none
+      | _ => none
+    | none => none
+  | _ => none
+
+private def unexpandCallSiteInfo (stx : Syntax) :
+    UnexpandM (Bool × String × Option (TSyntax `nanollvm_type)) := do
   let s := stripParens stx
   match s with
   | `($id:ident) =>
     match id.getId.eraseMacroScopes with
-    | ``CallSiteInfo.default | `CallSiteInfo.default => return (false, "")
+    | ``CallSiteInfo.default | `CallSiteInfo.default => return (false, "", none)
     | _ => throw ()
   | `($f:ident $tl $ccVal $va) =>
-    match f.getId.eraseMacroScopes, asBool? tl, asStr? ccVal, (some va : Option _) with
-    | ``CallSiteInfo.mk, some tl, some ccStr, _
-    | `CallSiteInfo.mk, some tl, some ccStr, _ => return (tl, ccStr)  -- `fnTy?` is not shown
-    | _, _, _, _ => throw ()
+    match f.getId.eraseMacroScopes, asBool? tl, asStr? ccVal with
+    | ``CallSiteInfo.mk, some tl, some ccStr
+    | `CallSiteInfo.mk, some tl, some ccStr => return (tl, ccStr, explicitCallType? va)
+    | _, _, _ => throw ()
   | `($f:ident $tl $ccVal) =>
     match f.getId.eraseMacroScopes, asBool? tl, asStr? ccVal with
     | ``CallSiteInfo.mk, some tl, some ccStr
-    | `CallSiteInfo.mk, some tl, some ccStr => return (tl, ccStr)
+    | `CallSiteInfo.mk, some tl, some ccStr => return (tl, ccStr, none)
     | _, _, _ => throw ()
   | _ =>
     match extractStructFields? s with
     | some fields =>
       let mut isTail := false
       let mut ccStr := ""
+      let mut explicitTy : Option (TSyntax `nanollvm_type) := none
       for (nm, val) in fields do
         match nm with
         | `isTail =>
@@ -284,9 +302,9 @@ private def unexpandCallSiteInfo (stx : Syntax) : UnexpandM (Bool × String) := 
           match asStr? val with
           | some str => ccStr := str
           | none => throw ()
-        | `fnTy? => pure ()  -- the call's function type is not shown (see `CallSiteInfo.fnTy?`)
+        | `fnTy? => explicitTy := explicitCallType? val
         | _ => throw ()
-      pure (isTail, ccStr)
+      pure (isTail, ccStr, explicitTy)
     | none => throw ()
 
 private def unexpandDenormalModeKind (stx : Syntax) : UnexpandM (TSyntax `ident) := do
@@ -1409,7 +1427,11 @@ def unexpandInstructionCall : Unexpander
     let bundlesOpt ← unexpandOpBundles bundles
     match asBool? isNoRet with
     | some isNoRet =>
-      let (isTail, ccStr) ← unexpandCallSiteInfo site
+      let (isTail, ccStr, explicitTy) ← unexpandCallSiteInfo site
+      -- a variadic call type is written in place of the return type
+      let retTy : Syntax ← match explicitTy with
+        | some t => do pure (← `([llvm-type| $t:nanollvm_type])).raw
+        | none => pure retTy
       unexpandCallCore retTy fmf callee args rAttrs bundlesOpt isNoRet isTail ccStr
     | none => throw ()
   | `($_ $retTy $fmf $callee [$args,*] $retAttrs $bundles $isNoRet) => do

@@ -827,9 +827,24 @@ def elabNanoLlvmInstruction : Syntax → TermElabM Expr
           mkAppM ``Prod.mk #[mkStrLit tag.getString, teLst]
         | _ => throwUnsupportedSyntax
     let bundleList ← mkListLit bundleTy bundleExprs
-    let site : CallSiteInfo := { isTail := tl.isSome, callingConv := (ccName.map (·.getString)).getD "" }
-    let siteE : Expr := if site == CallSiteInfo.default then Lean.mkConst ``CallSiteInfo.default else toExpr site
-    mkAppM ``Instruction.call #[← elabNanoLlvmRetType retTy, toExpr (elabFastMathFlags flags), ← elabNanoLlvmExp callee, argList, ← elabValueAttrList retAttrs, bundleList, toExpr nr.isSome, siteE]
+    -- The call's function type, as the IR parser records it (`CallSiteInfo.fnTy?`): written as the
+    -- return type (`call i32 (ptr, ...) @printf(...)`), or else the non-variadic type of the
+    -- arguments.
+    let (retE, fnTyE) ← match retTy with
+      | `(nanollvm_type| $r:nanollvm_type ( $_ps:nanollvm_fn_param,* )) => do
+        pure (← elabNanoLlvmRetType r, ← elabNanoLlvmType retTy)
+      | _ => do
+        let retE ← elabNanoLlvmRetType retTy
+        let argTyEs ← args.getElems.toList.mapM fun a =>
+          match a.raw with
+          | `(nanollvm_call_arg| $t:nanollvm_type $_attrs:nanollvm_value_attr* $_e:nanollvm_exp) =>
+            elabNanoLlvmType t
+          | _ => throwUnsupportedSyntax
+        pure (retE, ← mkAppM ``LlvmType.function
+          #[retE, ← mkListLit (mkConst ``LlvmType) argTyEs, toExpr false])
+    let siteE ← mkAppM ``CallSiteInfo.mk #[toExpr tl.isSome,
+      mkStrLit ((ccName.map (·.getString)).getD ""), ← mkAppM ``Option.some #[fnTyE]]
+    mkAppM ``Instruction.call #[retE, toExpr (elabFastMathFlags flags), ← elabNanoLlvmExp callee, argList, ← elabValueAttrList retAttrs, bundleList, toExpr nr.isSome, siteE]
   | `(nanollvm_instruction| freeze $ty:nanollvm_type $v:nanollvm_exp) => do
     let tv ← mkAppM ``Prod.mk #[← elabNanoLlvmType ty, ← elabNanoLlvmExp v]
     mkAppM ``Instruction.freeze #[tv]

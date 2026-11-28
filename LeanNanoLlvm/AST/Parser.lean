@@ -1585,7 +1585,21 @@ private def parseInvoke (fuel : Nat) (iid? : Option InstructionId) :
   let cc ← parseCallingConv
   let retAttrs ← parseValueAttrs fuel
   let retTy ← parseRetType fuel
-  if (← peek) == .lparen then skipParenGroup fuel
+  -- optional explicit function type, as for `call` (`CallSiteInfo.fnTy?`)
+  let explicitTy? : Option (List LlvmType × Bool) ← do
+    if ← tryEat .lparen then
+      let mut tys : List LlvmType := []
+      let mut va := false
+      let mut g := fuel
+      while !(← tryEat .rparen) && g > 0 do
+        g := g - 1
+        if ← tryEat .ellipsis then va := true
+        else
+          let t ← parseType fuel
+          tys := t :: tys
+        let _ ← tryEat .comma
+      pure (some (tys.reverse, va))
+    else pure none
   let callee ← parseExp fuel
   expect .lparen "invoke args"
   let mut args : List (LlvmType × Exp × List ValueAttr) := []
@@ -1631,7 +1645,11 @@ private def parseInvoke (fuel : Nat) (iid? : Option InstructionId) :
   let iid ← match iid? with
     | some id => pure id
     | none => match retTy with | .void => freshVoidId | .ret _ => pure (InstructionId.id (← freshAnonId))
-  return ((iid, .call retTy fmf callee args.reverse retAttrs [] isNoRet { callingConv := cc }), .br normalLbl)
+  let fnTy := match explicitTy? with
+    | some (tys, va) => LlvmType.function retTy tys va
+    | none => .function retTy (args.reverse.map (·.1)) false
+  return ((iid, .call retTy fmf callee args.reverse retAttrs [] isNoRet
+    { callingConv := cc, fnTy? := some fnTy }), .br normalLbl)
 
 /-- Parse a single basic block (with explicit or implicit label). -/
 def parseBlock (fuel : Nat) (isFirst : Bool) : ParseM Block := do

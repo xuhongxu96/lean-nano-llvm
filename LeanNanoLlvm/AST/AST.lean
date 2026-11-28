@@ -460,8 +460,9 @@ structure CallSiteInfo where
   isTail      : Bool := false
   callingConv : String := ""
   /-- The call's function type: the explicit one (`call void (i32, ...) @f(...)`), or the
-  non-variadic type of the arguments when none is written. The IR parser always sets it; calls
-  built with the `[llvm-definition| ...]` syntax leave it `none` (no explicit types there). -/
+  non-variadic type of the arguments when none is written. The IR parser and the
+  `[llvm-definition| ...]` syntax always set it; `none` (a call built by hand) skips the
+  call-type check against the callee. -/
   fnTy?       : Option LlvmType := none
 deriving Repr, DecidableEq, Inhabited
 

@@ -44,7 +44,9 @@ non-variadic type of its arguments, so calling a variadic function that way is U
 (`call_signature_mismatch_vararg_ub.ll`; the IR parser now records each call's function type,
 `CallSiteInfo.fnTy?`; its first version compared named struct types unresolved, a regression
 found by campaign run 2 and fixed with `call_named_struct_type.ll`; the affected run-2 cases are
-re-run); **B4** conversions (`fpext`, `fptrunc`) used the module's configuration
+re-run; `invoke`/`callbr` recorded no type, and the `[llvm| ...]` syntax neither, so their
+signatures were not checked: both now record it, and the syntax accepts the explicit form
+`call i32 (ptr, ...) @f(...)`, `Tests/Semantics/Traces.lean`); **B4** conversions (`fpext`, `fptrunc`) used the module's configuration
 instead of the function's denormal mode (`denormal_fpenv_fpext.ll`); **B8** an exact conversion
 leaves a zero low double with the sign of the high double (`ppc_fp128_sitofp_negative.ll`), for
 integer conversions only (`llubi_ppc_fp128_zero_low_sign.ll`); decimal and special `ppc_fp128`
