@@ -34,6 +34,11 @@ LLUBI_REJECT_RE = re.compile(r"(error: .*input module is broken|^<stdin>:\d+:\d+
 OURS_PARSE_RE = re.compile(r"^llubi: <stdin>: error:", re.M)
 
 
+# Outputs of non-matching runs are kept up to this many characters (their tail). Triage compares
+# them line by line, so a run whose output was cut is re-run rather than compared.
+KEEP_CHARS = 2_000_000
+
+
 def _side(r: Run, keep: bool) -> dict[str, Any]:
     d: dict[str, Any] = {
         "exit": r.exit,
@@ -44,8 +49,9 @@ def _side(r: Run, keep: bool) -> dict[str, Any]:
         "stderr_lines": r.stderr.count("\n"),
     }
     if keep:
-        d["stdout"] = r.stdout[-20000:]
-        d["stderr"] = r.stderr[-50000:]
+        d["stdout"] = r.stdout[-KEEP_CHARS:]
+        d["stderr"] = r.stderr[-KEEP_CHARS:]
+        d["truncated"] = len(r.stdout) > KEEP_CHARS or len(r.stderr) > KEEP_CHARS
     return d
 
 

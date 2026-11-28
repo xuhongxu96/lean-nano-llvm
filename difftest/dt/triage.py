@@ -89,10 +89,11 @@ def triage_llubi(row: dict[str, Any], module: str | None = None) -> dict[str, An
     # mismatch
     if "stderr" not in L or "stderr" not in O:
         return {**out, "class": "untriaged", "rule": "no-outputs"}
-    # Outputs are stored truncated to their last 50,000 characters: two tails cut at different
-    # offsets cannot be compared line by line. Such runs are re-run with full outputs
-    # (`dt retriage-truncated`) before triage.
-    if len(ls) >= 50000 or len(os_) >= 50000:
+    # Outputs are stored truncated to their tail (`oracle_llubi.KEEP_CHARS`; 50,000 characters
+    # of stderr in the first run): two tails cut at different offsets cannot be compared line by
+    # line, so such runs are reported as untriaged.
+    if L.get("truncated") or O.get("truncated") or (
+            "truncated" not in L and (len(ls) >= 50000 or len(os_) >= 50000)):
         return {**out, "class": "untriaged", "rule": "truncated-output"}
     norms = R.NORMALIZERS
     nl, no = _norm_all(ls, "llubi", norms), _norm_all(os_, "ours", norms)
