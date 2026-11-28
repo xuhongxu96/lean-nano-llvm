@@ -78,10 +78,9 @@ normalizer in `triage_rules.NORMALIZERS` and a `Tests/ll/llubi_*.ll` reproducer.
 | P16 | A `blockaddress` pointer printed its object's internal name instead of the block label (`[L1]`); a pointer to an unnamed global printed `[@0]` instead of `[@]`; a store to a function object was reported as a write to constant memory instead of an out-of-bounds access (function objects are not constant in llubi). |
 | P13 | Variadic arguments are not printed on function entry (llubi: `vaarg[i] = <value>`), and a call's function type was printed from the callee instead of the call. |
 
-Follow-ups: **P1** specialized nodes (`!DIFile(...)`) are MDNodes too; **P2** intrinsic
-metadata nodes are keyed by all their tokens (float operands made distinct nodes collide);
-**P2** a function's trailing `align N` is its alignment, not an attribute; intrinsic
-declarations carry LLVM's implicit attribute sets (table generated from the pinned `opt` by
+Follow-ups: **P1** specialized nodes (`!DIFile(...)`) are MDNodes too; metadata nodes are keyed by all their tokens (nodes differing only in float operands were
+uniqued into one); **P2** a function's trailing `align N` is its alignment, not an attribute;
+intrinsic declarations carry LLVM's implicit attribute sets (table generated from the pinned `opt` by
 `difftest/tools/gen_intrinsic_attrs.py`).
 
 ## Tactic bugs (T)
@@ -89,6 +88,8 @@ declarations carry LLVM's implicit attribute sets (table generated from the pinn
 | Id | Bug |
 |---|---|
 | T1 | `llvm_disprove`'s witness search evaluates loops in Lean's interpreter without a recursion bound; on a large trip count Lean aborts the whole process ("deep recursion was detected at 'interpreter'", uncaught, exit 134) despite the search's 2000 ms budget. Example: pair `32746c0f44bea3e7`. |
+| T2 | `llvm_disprove`'s search was bounded by wall-clock time (2000 ms), so whether a witness was found depended on the machine's load: the result was not reproducible. It is now bounded by heartbeats (Lean's allocation counter, the unit of `maxHeartbeats`; default 20,000 ×1000, `(heartbeats := N)`), identical across runs and loads; `(timeout := ms)` remains as an optional safety net. Calibration: every witness found in run 2 cost under 40 ×1000 heartbeats; 2 s of the old search cost 2,000–43,000. |
+| T3 | `llvm_disprove` found a valid witness but could not certify it ("could not close refutation goal", 12,921 obligations in run 2): its certifier stepped both programs with deterministic-step lemmas for a fixed set of instructions (no calls, `extractvalue`, `fcmp`, `ret void`, …), and values computed in a loop were left unevaluated. The target's behaviour is now certified by running the executable interpreter in the kernel (`runSteps_sound`: any interpreter run is a behaviour), so any target instruction is supported; the source side, whose behaviours must all be known, gained deterministic lemmas for intrinsic calls, `extractvalue`, `fcmp` and `ret void`, and evaluates register values when stepping loops. On a random sample of 60 such obligations, 49 are now certified. Remaining: `fcmp` on values computed by float conversions, `alloca`/memory on the source side, non-intrinsic calls. Example: pair `0076a63f65e69b99`. |
 
 ## Harness bugs (H)
 

@@ -21,6 +21,19 @@ def quoteRegisterValue : RegisterValue → Expr
     let bvExpr := mkApp2 (mkConst ``BitVec.ofNat) (mkNatLit w) (mkNatLit bv.toNat)
     mkApp2 (mkConst ``RegisterValue.bv) (mkNatLit w)
       (mkApp2 (mkConst ``PoisonOr.value) (mkApp (mkConst ``BitVec) (mkNatLit w)) bvExpr)
+  | .float ft v =>
+    let ftE := mkConst (match ft with
+      | .half => ``AST.FloatType.half | .bfloat => ``AST.FloatType.bfloat
+      | .float => ``AST.FloatType.float | .double => ``AST.FloatType.double
+      | .x86_fp80 => ``AST.FloatType.x86_fp80 | .fp128 => ``AST.FloatType.fp128
+      | .ppc_fp128 => ``AST.FloatType.ppc_fp128)
+    let fmtE := mkApp (mkConst ``AST.FloatType.format) ftE
+    let tyE := mkApp (mkConst ``IEEEFloat) fmtE
+    let valE := match v with
+      | .poison => mkApp (mkConst ``PoisonOr.poison) tyE
+      | .value x =>
+        mkApp2 (mkConst ``PoisonOr.value) tyE (mkApp2 (mkConst ``IEEEFloat.ofNatBits) fmtE (mkNatLit x.bits.toNat))
+    mkApp2 (mkConst ``RegisterValue.float) ftE valE
   | _ => mkConst ``RegisterValue.void
 
 def quoteRegisterValueList (vs : List RegisterValue) : Expr :=
@@ -71,7 +84,24 @@ private def inspectConcreteConfig (c : Expr) : TacticM ConcreteAction := do
         return .term nm
   return .unknown
 
+/-- When set, the stepper also evaluates the concrete operations bound in registers
+(`simp_llvm`, BitVec literals), so that values computed in one block can decide branches later
+(loops). Used by the second pass of `proveDisproofWithExpr`. -/
+initialize strongConcreteSimp : IO.Ref Bool ← IO.mkRef false
+
 private def simpConcreteStep : TacticM Unit := do
+  if ← strongConcreteSimp.get then
+    try
+      evalTactic (← `(tactic|
+        simp (config := { decide := true }) only [simp_step, simp_llvm,
+          bitvec_ofInt_ofNat, bitvec_ofInt_neg, bitvec_ofInt_negSucc,
+          BitVec.ofNat_eq_ofNat, BitVec.reduceAdd, BitVec.reduceSub, BitVec.reduceMul,
+          BitVec.reduceULT, BitVec.reduceSLT, BitVec.reduceULE, BitVec.reduceSLE,
+          AST.LlvmType.scalarType, AST.FastMathFlags.any,
+          Bool.or_self, Bool.false_eq_true, ↓reduceIte, ↓reduceDIte,
+          beq_self_eq_true, Config.ofError]))
+    catch _ => pure ()
+    return
   try
     evalTactic (← `(tactic|
       simp only [simp_step,
@@ -131,6 +161,40 @@ private def stepConcreteLeft (act : ConcreteAction) : TacticM Bool := do
             (Step.conversionOp_leaf_iff rfl rfl (by llvm_step; rfl) (fun _ => rfl)) ?_))
         simpConcreteStep; return true
       catch _ => restoreState s; return false
+    else if nm == ``AST.Instruction.extractvalue then
+      let s ← saveState
+      try
+        evalTactic (← `(tactic|
+          refine Config.IsRefinedBy.not_of_det_step_left
+            (Step.extractvalue_leaf_iff rfl rfl (by llvm_step; rfl)) ?_))
+        simpConcreteStep; return true
+      catch _ => restoreState s; return false
+    else if nm == ``AST.Instruction.fcmp then
+      let s ← saveState
+      try
+        evalTactic (← `(tactic|
+          refine Config.IsRefinedBy.not_of_det_step_left
+            (Step.fcmp_leaf_iff rfl rfl (by llvm_step; rfl) (by llvm_step; rfl) (fun _ => ⟨_, rfl⟩)) ?_))
+        simpConcreteStep; return true
+      catch e =>
+        restoreState s
+        if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then logInfo m!"DTFCMP {e.toMessageData}"
+        return false
+    else if nm == ``AST.Instruction.call then
+      let s ← saveState
+      try
+        evalTactic (← `(tactic|
+          first
+          | refine Config.IsRefinedBy.not_of_det_step_left
+              (Step.call_intrinsic_leaf_iff rfl rfl
+                (by first | rfl | (simp [leafCallArgs?, simp_step]; rfl))
+                rfl rfl rfl (fun _ => ⟨_, rfl⟩)) ?_
+          | refine Config.IsRefinedBy.not_of_det_step_left
+              (Step.call_intrinsic_leaf_err_iff rfl rfl
+                (by first | rfl | (simp [leafCallArgs?, simp_step]; rfl))
+                rfl rfl (fun _ => rfl)) ?_))
+        simpConcreteStep; return true
+      catch _ => restoreState s; return false
     else if nm == ``AST.Instruction.freeze then
       let s ← saveState
       try
@@ -147,6 +211,13 @@ private def stepConcreteLeft (act : ConcreteAction) : TacticM Bool := do
         evalTactic (← `(tactic|
           refine Config.IsRefinedBy.not_of_det_step_left
             (Step.ret_top_leaf_iff rfl rfl rfl rfl (by llvm_step; rfl)) ?_))
+        simpConcreteStep; return true
+      catch _ => restoreState s; return false
+    else if nm == ``AST.Terminator.retVoid then
+      let s ← saveState
+      try
+        evalTactic (← `(tactic|
+          refine Config.IsRefinedBy.not_of_det_step_left (Step.retVoid_top_iff rfl rfl rfl rfl) ?_))
         simpConcreteStep; return true
       catch _ => restoreState s; return false
     else if nm == ``AST.Terminator.br then
@@ -237,6 +308,14 @@ private def stepConcreteRight (actL actR : ConcreteAction) : TacticM Bool := do
         evalTactic (← `(tactic|
           refine Config.IsRefinedBy.not_of_step_right
             ((Step.ret_top_leaf_iff rfl rfl rfl rfl (by (try llvm_step); rfl) none _).mpr ⟨rfl, rfl⟩) ?_))
+        simpConcreteStep; return true
+      catch _ => restoreState s; return false
+    else if nm == ``AST.Terminator.retVoid then
+      let s ← saveState
+      try
+        evalTactic (← `(tactic|
+          refine Config.IsRefinedBy.not_of_step_right
+            ((Step.retVoid_top_iff rfl rfl rfl rfl none _).mpr ⟨rfl, rfl⟩) ?_))
         simpConcreteStep; return true
       catch _ => restoreState s; return false
     else if nm == ``AST.Terminator.br then
@@ -350,6 +429,99 @@ def extractNotDefRefines : TacticM (Expr × Expr) := do
       return (inner.getArg! 0, inner.getArg! 1)
   throwError "llvm_disprove: expected goal of the form `¬ (src ⊒ tgt)`, got:{indentExpr tgt}"
 
+/-- Run `c` with the executable interpreter (default oracle) to a final configuration, at most
+`fuel` steps; also return the steps taken. Tail-recursive (see `Disprove.Search.runToFinal`). -/
+private def runCounting (fuel used : Nat) (o : OracleState) (c : Semantics.Config) :
+    Semantics.Config × Nat :=
+  match fuel with
+  | 0 => (c, used)
+  | n + 1 =>
+    match c with
+    | .running _ =>
+      let (_, c1, o1) := execStep o c
+      runCounting n (used + 1) o1 c1
+    | _ => (c, used)
+
+/-- The events a run emits (whether the trace is empty decides whether its termination counts). -/
+private def runEvents (fuel : Nat) (c : Semantics.Config) : List TraceEvent :=
+  (runSteps fuel default c).1
+
+private unsafe def evalArgsImpl (e : Expr) : MetaM (List RegisterValue) :=
+  Lean.Meta.evalExpr (List RegisterValue) (mkApp (mkConst ``List [levelZero]) (mkConst ``RegisterValue)) e
+
+@[implemented_by evalArgsImpl]
+private def evalArgs (_ : Expr) : MetaM (List RegisterValue) :=
+  throwError "evalArgs requires compiled VM"
+
+private unsafe def evalDefnImpl (e : Expr) : MetaM AST.Definition :=
+  Lean.Meta.evalExpr AST.Definition (mkConst ``AST.Definition) e
+
+@[implemented_by evalDefnImpl]
+private def evalDefn (_ : Expr) : MetaM AST.Definition :=
+  throwError "evalDefn requires compiled VM"
+
+/-- Replace the target configuration of `⊢ ¬ Config.IsRefinedBy ids cX (initCallConfig … tgt args)`
+by the outcome of running it with the executable interpreter, certified in the kernel
+(`runSteps_sound`): `.ub ""` if the run aborts, `.halted vY m` (for every `m`) if it returns `vY`
+without emitting events. This handles any instruction on the target side. Returns `false` (goal
+unchanged) if the run neither aborts nor halts silently with a quotable value. -/
+private def replaceTargetByExecution (tgtExpr argsExpr : Expr) : TacticM Bool := do
+  let tgt ← evalDefn tgtExpr
+  let args ← evalArgs argsExpr
+  let cfg : SemanticsConfig := .modern
+  let c0 := initCallConfig cfg .default64LE {} ∅ ∅ tgt args
+  let (cf, used) := runCounting cfg.maxSteps 0 default c0
+  let fuel := Syntax.mkNumLit (toString (used + 1))
+  let s ← saveState
+  try
+    if cf.isAbortB then
+      evalTactic (← `(tactic|
+        refine Config.IsRefinedBy.not_of_canAbort_right
+          (CanAbort.of_runSteps $fuel default (initCallConfig_empty_wf _ _ _ _ _ _)
+            (by decide +kernel)) ?_))
+      return true
+    match cf with
+    | .halted v _ =>
+      if !(runEvents (used + 1) c0).isEmpty then return false
+      let ok := match v with
+        | .bv _ _ | .void | .float _ _ => true
+        | _ => false
+      if !ok then
+        if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
+          logInfo m!"DTSTUCK target-returns-unquotable {v.inferType?.map (·.print)}"
+        return false
+      let vStx ← Lean.Elab.Term.exprToSyntax (quoteRegisterValue v)
+      evalTactic (← `(tactic|
+        refine Config.IsRefinedBy.not_of_terminates_right (vY := $vStx)
+          (Terminates.of_runSteps $fuel default (initCallConfig_empty_wf _ _ _ _ _ _)
+            (by decide +kernel) (by decide +kernel)) ?_))
+      evalTactic (← `(tactic| intro _))
+      return true
+    | _ =>
+      if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
+        let k := match cf with
+          | .running _ => "running" | .staticError m => s!"staticError {m}" | _ => "other"
+        logInfo m!"DTSTUCK target-run-ends {k} after {used} steps"
+      return false
+  catch e =>
+    restoreState s
+    if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
+      logInfo m!"DTSTUCK target-cert-error {e.toMessageData}"
+    return false
+
+/-- Unfold the initial configurations in a refutation goal so the concrete stepper can see them. -/
+private def unfoldInitConfigs : TacticM Unit := do
+  evalTactic (← `(tactic|
+    simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
+      applyByValCopies, applyByValCopies.go, splitPhis,
+      RegisterValue.matchesType, byvalDeferredAttrs, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs,
+      List.length_nil, List.length_cons, List.any_nil, List.any_cons,
+      List.getD, List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil,
+      Option.getD_some, Option.getD_none,
+      Bool.or_self, Bool.or_false, Bool.false_or, bne_self_eq_false,
+      Bool.false_eq_true, ↓reduceIte, ite_self, List.isEmpty_nil,
+      Bool.not_true, Bool.not_false, beq_self_eq_true]))
+
 /-- Prove `⊢ ¬ (src ⊒ tgt)` given an explicit `Expr` of type `List RegisterValue`. -/
 def proveDisproofWithExpr (argsExpr : Expr) : TacticM Unit := do
   -- Unfold named `Definition` constants (if any) so `ArgValuesWellFormed` and `initCallConfig` reduce.
@@ -368,17 +540,27 @@ def proveDisproofWithExpr (argsExpr : Expr) : TacticM Unit := do
            Semantics.RegisterValue.WellFormedForList,
            Semantics.RegisterValue.WellFormedFor]; done))))
   -- Goal 2: ¬ Config.IsRefinedBy ...
-  evalTactic (← `(tactic|
-    simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
-      applyByValCopies, applyByValCopies.go, splitPhis,
-      RegisterValue.matchesType, byvalDeferredAttrs, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs,
-      List.length_nil, List.length_cons, List.any_nil, List.any_cons,
-      List.getD, List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil,
-      Option.getD_some, Option.getD_none,
-      Bool.or_self, Bool.or_false, Bool.false_or, bne_self_eq_false,
-      Bool.false_eq_true, ↓reduceIte, ite_self, List.isEmpty_nil,
-      Bool.not_true, Bool.not_false, beq_self_eq_true]))
+  -- First: step both sides with the deterministic-step lemmas.
+  let s ← saveState
+  unfoldInitConfigs
   runConcreteRefutation 256
+  if (← getGoals).isEmpty then return
+  -- Otherwise: certify the target's behaviour by execution, then step only the source.
+  restoreState s
+  if ← replaceTargetByExecution tgtExpr argsExpr then
+    unfoldInitConfigs
+    strongConcreteSimp.set true
+    try runConcreteRefutation 4096 finally strongConcreteSimp.set false
+    if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome && !(← getGoals).isEmpty then
+      let desc : ConcreteAction → String
+        | .halted => "halted" | .ub => "ub" | .instr n => s!"instr {n}" | .term n => s!"term {n}"
+        | .unknown => "unknown"
+      match ← getNotRefinedConfigs with
+      | some (cX, cY) =>
+        logInfo m!"DTSTUCK left={desc (← inspectConcreteConfig cX)} right={desc (← inspectConcreteConfig cY)}"
+      | none => logInfo m!"DTSTUCK goal={← getMainTarget}"
+  else if (← IO.getEnv "LNL_DISPROVE_DEBUG").isSome then
+    logInfo m!"DTSTUCK target-not-certified"
   if !(← getGoals).isEmpty then
     throwError "llvm_disprove: could not close refutation goal with witness {argsExpr}"
 

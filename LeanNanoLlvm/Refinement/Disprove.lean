@@ -10,7 +10,7 @@ Proves negations of LLVM IR refinement (`¬ (src ⊒ tgt)`) with **100% kernel p
 
 Supports two modes:
 - `llvm_disprove [arg1, arg2, ...]` — certify a specific concrete counterexample `List RegisterValue`.
-- `llvm_disprove` / `llvm_disprove (timeout := 5000)` — run a fast, timeout-bounded
+- `llvm_disprove` / `llvm_disprove (heartbeats := 400000)` — run a heartbeat-budgeted (deterministic)
   meta-level heuristic witness search (no bitwidth cap; works for `i1`..`i128`+) prioritizing
   `poison`, AST-extracted constants (`c`, `c ± 1`, `-c`, `~c`), bitwidth boundaries
   (`0, 1, -1, INT_MIN, INT_MAX, w, w-1`), powers of two, and PRNG bit patterns, then
@@ -54,22 +54,43 @@ elab "llvm_disprove " "[" args:term,* "]" : tactic => do
   let argsExpr ← elabTerm listTerm (some (mkApp (mkConst ``List [levelZero]) (mkConst ``RegisterValue)))
   proveDisproofWithExpr argsExpr
 
-/-- Disprove an unsound LLVM IR refinement `¬ (src ⊒ tgt)` via timeout-bounded heuristic
-    counterexample search (default `timeout := 2000` ms) + kernel-pure certification. -/
-syntax "llvm_disprove" ("(" "timeout" ":=" num ")")? : tactic
+/-- A setting of `llvm_disprove`'s search: `(heartbeats := N)` (thousands; deterministic) or
+`(timeout := ms)` (wall clock; a safety net, not deterministic). -/
+syntax disproveCfg := "(" (&"heartbeats" <|> &"timeout") " := " num ")"
+
+/-- Disprove an unsound LLVM IR refinement `¬ (src ⊒ tgt)` via a heuristic counterexample
+    search + kernel-pure certification. The search is bounded by `heartbeats` (thousands, as in
+    `maxHeartbeats`; default `defaultSearchHeartbeats`), so its outcome is deterministic.
+    `timeout := ms` adds a wall-clock limit as a safety net (not deterministic; off by default). -/
+syntax "llvm_disprove" (ppSpace disproveCfg)* : tactic
 
 /-- Like `llvm_disprove`, but also displays the found counterexample and emits a clickable
     `Try this: llvm_disprove [...]` suggestion (like `simp?`). -/
-syntax "llvm_disprove?" ("(" "timeout" ":=" num ")")? : tactic
+syntax "llvm_disprove?" (ppSpace disproveCfg)* : tactic
 
-private def runDisproveSearch (stx : Syntax) (timeoutMs : Nat) (suggest : Bool) : TacticM Unit := do
+private def parseDisproveCfgs (cfgs : Array (TSyntax ``disproveCfg)) : Nat × Option Nat := Id.run do
+  let mut hb := defaultSearchHeartbeats
+  let mut to? : Option Nat := none
+  for c in cfgs do
+    let isHb := (c.raw.find? fun t => t.isAtom && t.getAtomVal == "heartbeats").isSome
+    let n := ((c.raw.find? fun t => t.isNatLit?.isSome).bind (·.isNatLit?)).getD 0
+    if isHb then hb := n else to? := some n
+  return (hb, to?)
+
+private def runDisproveSearch (stx : Syntax) (hbBudget : Nat) (timeoutMs? : Option Nat)
+    (suggest : Bool) : TacticM Unit := do
   let (srcExpr, tgtExpr) ← extractNotDefRefines
   let srcDef ← evalDef srcExpr
   let tgtDef ← evalDef tgtExpr
-  match ← findCounterexample srcDef tgtDef timeoutMs with
-  | none =>
-    throwError "llvm_disprove: no counterexample found within {timeoutMs}ms"
-  | some witness =>
+  let deadline? ← timeoutMs?.mapM fun ms => return (← IO.monoMsNow) + ms
+  match ← findCounterexample srcDef tgtDef ⟨hbBudget, deadline?⟩ with
+  | .error .exhausted =>
+    throwError "llvm_disprove: no counterexample among the candidates searched"
+  | .error .heartbeats =>
+    throwError "llvm_disprove: no counterexample found within {hbBudget} heartbeats (×1000)"
+  | .error .wallClock =>
+    throwError "llvm_disprove: no counterexample found within {timeoutMs?.getD 0}ms (wall clock)"
+  | .ok witness =>
     let argsExpr := quoteRegisterValueList witness
     proveDisproofWithExpr argsExpr
     if suggest then
@@ -83,12 +104,12 @@ private def runDisproveSearch (stx : Syntax) (timeoutMs : Nat) (suggest : Bool) 
         (header := header)
 
 elab_rules : tactic
-  | `(tactic| llvm_disprove $[(timeout := $t)]?) => do
-    let timeoutMs := match t with | some n => n.getNat | none => 2000
-    runDisproveSearch (← getRef) timeoutMs false
-  | `(tactic| llvm_disprove? $[(timeout := $t)]?) => do
-    let timeoutMs := match t with | some n => n.getNat | none => 2000
-    runDisproveSearch (← getRef) timeoutMs true
+  | `(tactic| llvm_disprove $cfgs:disproveCfg*) => do
+    let (hb, to?) := parseDisproveCfgs cfgs
+    runDisproveSearch (← getRef) hb to? false
+  | `(tactic| llvm_disprove? $cfgs:disproveCfg*) => do
+    let (hb, to?) := parseDisproveCfgs cfgs
+    runDisproveSearch (← getRef) hb to? true
 
 end LeanNanoLlvm.Refinement
 

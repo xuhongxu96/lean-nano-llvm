@@ -121,8 +121,8 @@ def obligation_block(kind: str, src_mod: str, src_fn: str, tgt_mod: str, tgt_fn:
 
 
 # One elaboration thread per process: parallelism comes from running many processes, and a
-# single thread keeps each check's resource use (and `llvm_disprove`'s wall-clock search budget)
-# independent of the host's core count.
+# single thread keeps each check's resource use independent of the host's core count.
+# (`llvm_disprove`'s search budget is in heartbeats, so its outcome does not depend on load.)
 LEAN_FLAGS = ["-j1"]
 
 LEAN_ERR_RE = re.compile(r"^(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+): error(?:\([^)\s]*\))?: (?P<msg>.*)$", re.M)

@@ -4,14 +4,36 @@ import LeanNanoLlvm.Semantics.Module
 
 /-! # Counterexample Search for `llvm_disprove`
 
-Meta-level, timeout-bounded witness search that runs the executable interpreter
-(`LeanNanoLlvm.Semantics.Module`). Only the disproof front end depends on this module. -/
+Meta-level witness search that runs the executable interpreter
+(`LeanNanoLlvm.Semantics.Module`). Only the disproof front end depends on this module.
+
+The search is bounded by a budget of heartbeats (Lean's allocation counter, the unit of
+`maxHeartbeats`) spent on all candidate runs, not by wall-clock time, so whether it finds a
+witness, and which one, depends only on the program and the budget: the result is the same under
+any load and on any machine running the same build. (A budget of interpreter steps would be
+deterministic too, but the cost of a step varies by orders of magnitude: one step can copy a
+large memory object.) An optional wall-clock
+limit can be added as a safety net; when it is hit the result is reported as such. -/
 
 namespace LeanNanoLlvm.Refinement
 
 open LeanNanoLlvm AST Semantics
 
-/-! ## Section 2: Meta-Level Heuristic Witness Search (Timeout-Bounded) -/
+/-! ## Section 2: Meta-Level Heuristic Witness Search (Step-Budgeted) -/
+
+/-- The search's limits: `heartbeats` (in thousands, like `maxHeartbeats`) in total
+(deterministic), and optionally a wall-clock deadline (`IO.monoMsNow` value; not deterministic,
+off by default). -/
+structure SearchBudget where
+  heartbeats : Nat
+  deadlineMs? : Option Nat := none
+
+/-- Why a search stopped without a witness. -/
+inductive SearchStop where
+  | exhausted   -- every candidate tried
+  | heartbeats  -- the heartbeat budget ran out
+  | wallClock   -- the optional wall-clock limit was reached
+deriving Inhabited, BEq
 
 private def collectExpInts : AST.Exp → List Int
   | .int n => [n]
@@ -102,62 +124,104 @@ private def isCounterexampleConfig (cSrc cTgt : Config) : Bool :=
 `Nat.rec` so that the kernel can reduce it, and which builds the trace), this is tail-recursive, so
 the search uses constant stack however many steps a candidate runs: interpreting `runSteps` on a
 long loop exhausted Lean's interpreter stack and aborted the process ("deep recursion"). -/
-private def runToFinal (fuel : Nat) (o : OracleState) (c : Config) : Config :=
+private def runToFinal (fuel : Nat) (used : Nat) (o : OracleState) (c : Config) :
+    Config × Nat × OracleState :=
   match fuel with
-  | 0 => c
+  | 0 => (c, used, o)
   | n + 1 =>
     match c with
     | .running _ =>
       let (_, c1, o1) := execStep o c
-      runToFinal n o1 c1
-    | _ => c
+      runToFinal n (used + 1) o1 c1
+    | _ => (c, used, o)
 
-private def runForSearch (defn : AST.Definition) (args : List RegisterValue) : Config :=
+/-- The search state: the heartbeat count at which the budget ends, and why the search stopped
+(if it did). -/
+private structure SearchState where
+  hbEnd : Nat
+  stopped : Option SearchStop := none
+
+private abbrev SearchM := StateT SearchState IO
+
+private def outOfBudget (b : SearchBudget) : SearchM Bool := do
+  let st ← get
+  if st.stopped.isSome then return true
+  if (← IO.getNumHeartbeats) >= st.hbEnd then
+    set { st with stopped := some .heartbeats }; return true
+  if let some d := b.deadlineMs? then
+    if (← IO.monoMsNow) >= d then
+      set { st with stopped := some .wallClock }; return true
+  return false
+
+/-- Steps run between two budget checks. -/
+private def chunkSteps : Nat := 64
+
+/-- Run a candidate (at most `cfg.maxSteps` steps), checking the budget every `chunkSteps`
+steps; `none` if the budget ran out first. -/
+private def runForSearch (b : SearchBudget) (defn : AST.Definition) (args : List RegisterValue) :
+    SearchM (Option Config) := do
   let cfg : SemanticsConfig := .modern
-  runToFinal cfg.maxSteps default (initCallConfig cfg .default64LE {} ∅ ∅ defn args)
+  let mut c := initCallConfig cfg .default64LE {} ∅ ∅ defn args
+  let mut done := 0
+  let mut o : OracleState := default
+  for _ in [:cfg.maxSteps / chunkSteps + 1] do
+    if done >= cfg.maxSteps then break
+    match c with
+    | .running _ =>
+      if ← outOfBudget b then return none
+      let (c', n, o') := runToFinal (min chunkSteps (cfg.maxSteps - done)) 0 o c
+      c := c'; done := done + n; o := o'
+    | _ => break
+  return some c
 
-private def testWitness (src tgt : AST.Definition) (args : List RegisterValue) : Bool :=
-  let cSrc := runForSearch src args
+/-- Run `src` and `tgt` on `args` within the remaining budget. A candidate whose run is cut off
+by the budget is not a witness (and the search then stops). -/
+private def testWitness (b : SearchBudget) (src tgt : AST.Definition) (args : List RegisterValue) :
+    SearchM Bool := do
+  let some cSrc ← runForSearch b src args | return false
   match cSrc with
   | .halted _ _ =>
-    let cTgt := runForSearch tgt args
-    isCounterexampleConfig cSrc cTgt
-  | _ => false
+    let some cTgt ← runForSearch b tgt args | return false
+    return isCounterexampleConfig cSrc cTgt
+  | _ => return false
 
-/-- Enumerate index tuples into `pools` whose index sum equals `targetSum`, bounded by fuel
-    and wall-clock `deadlineMs`. Total (no `partial`). -/
+/-- Enumerate index tuples into `pools` whose index sum equals `targetSum`, within the budget.
+    Total (no `partial`). -/
 private def searchByPrioritySum (src tgt : AST.Definition) (pools : List (Array RegisterValue))
-    (deadlineMs : Nat) (maxSum : Nat) : IO (Option (List RegisterValue)) := do
+    (b : SearchBudget) (maxSum : Nat) : SearchM (Option (List RegisterValue)) := do
   -- Recursive helper over remaining pools (structurally recursive on `pools`)
   let rec go (rem : List (Array RegisterValue)) (budget : Nat) (acc : List RegisterValue) :
-      IO (Option (List RegisterValue)) := do
+      SearchM (Option (List RegisterValue)) := do
     match rem with
     | [] =>
       if budget != 0 then return none
-      let now ← IO.monoMsNow
-      if now >= deadlineMs then return none
+      if ← outOfBudget b then return none
       let args := acc.reverse
-      if testWitness src tgt args then return some args else return none
+      if ← testWitness b src tgt args then return some args else return none
     | pool :: rest =>
       let limit := min (budget + 1) pool.size
       for i in [:limit] do
-        let now ← IO.monoMsNow
-        if now >= deadlineMs then return none
+        if ← outOfBudget b then return none
         match ← go rest (budget - i) (pool[i]! :: acc) with
         | some w => return some w
         | none => pure ()
       return none
   for s in [:maxSum + 1] do
-    let now ← IO.monoMsNow
-    if now >= deadlineMs then return none
+    if ← outOfBudget b then return none
     match ← go pools s [] with
     | some w => return some w
     | none => pure ()
   return none
 
-/-- Timeout-bounded heuristic counterexample search for `src ⊒ tgt`. -/
-def findCounterexample (src tgt : AST.Definition) (timeoutMs : Nat) :
-    IO (Option (List RegisterValue)) := do
+/-- Default budget of `llvm_disprove`'s search, in thousands of heartbeats over all candidates
+(a tenth of the default `maxHeartbeats`). Calibrated on the phase-2 corpus: every witness found
+there costs under 40 (×1000); 2 s of search under the old wall-clock budget cost 2,000–43,000. -/
+def defaultSearchHeartbeats : Nat := 20_000
+
+/-- Heuristic counterexample search for `src ⊒ tgt`, bounded by `b`. Returns the witness, or
+why the search stopped without one. -/
+def findCounterexample (src tgt : AST.Definition) (b : SearchBudget) :
+    IO (Except SearchStop (List RegisterValue)) := do
   let paramTypes :=
     match src.prototype.type with
     | .function _ pts => pts
@@ -167,26 +231,32 @@ def findCounterexample (src tgt : AST.Definition) (timeoutMs : Nat) :
   for ty in paramTypes do
     match ty with
     | .int w => pools := pools ++ [buildCandidatesForWidth w astConsts]
-    | _ => return none
-  let startMs ← IO.monoMsNow
-  let deadlineMs := startMs + timeoutMs
+    | _ => return .error .exhausted
   let maxSum := pools.foldl (fun acc p => acc + p.size) 0
-  match ← searchByPrioritySum src tgt pools deadlineMs maxSum with
-  | some w => return some w
-  | none =>
-    -- Fallback: deterministic PRNG sampling over the full pools until timeout
-    let mut state : UInt64 := 0x243f6a8885a308d3
-    for _ in [:20000] do
-      let now ← IO.monoMsNow
-      if now >= deadlineMs then return none
-      let mut args : List RegisterValue := []
-      for pool in pools do
-        state := state * 6364136223846793005 + 1442695040888963407
-        let idx := (state.toNat) % pool.size
-        args := args ++ [pool[idx]!]
-      if testWitness src tgt args then
-        return some args
-    return none
+  let search : SearchM (Option (List RegisterValue)) := do
+    match ← searchByPrioritySum src tgt pools b maxSum with
+    | some w => return some w
+    | none =>
+      if (← get).stopped.isSome then return none
+      -- Fallback: deterministic PRNG sampling over the full pools
+      let mut state : UInt64 := 0x243f6a8885a308d3
+      for _ in [:20000] do
+        if ← outOfBudget b then return none
+        let mut args : List RegisterValue := []
+        for pool in pools do
+          state := state * 6364136223846793005 + 1442695040888963407
+          let idx := (state.toNat) % pool.size
+          args := args ++ [pool[idx]!]
+        if ← testWitness b src tgt args then
+          return some args
+      return none
+  let hb0 ← IO.getNumHeartbeats
+  let (r, st) ← search.run { hbEnd := hb0 + b.heartbeats * 1000 }
+  if (← IO.getEnv "LNL_DISPROVE_STATS").isSome then
+    IO.eprintln s!"llvm_disprove search: {((← IO.getNumHeartbeats) - hb0) / 1000} heartbeats (×1000)"
+  match r with
+  | some w => return .ok w
+  | none => return .error (st.stopped.getD .exhausted)
 
 open Lean Elab Tactic Meta
 
