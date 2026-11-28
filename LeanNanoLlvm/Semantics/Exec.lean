@@ -998,13 +998,9 @@ def execInstr (st : MachineState) (frame : CallFrame) (callers : List CallFrame)
           let ev := if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat rawBytes) else none
           match bytesToValue dl cfg rawBytes ty o1 with
           | (rawVal, hasUndef, o2) =>
-            match applyValueAttrsPure dl m1 ty rawVal md with
+            match loadValueChecks dl m1 ty rawVal hasUndef noundef md with
             | .error err => (ev, Config.ofError err, o2)
             | .ok val =>
-              if noundef && (hasUndef || val.containsPoison) then
-                (ev, .ub (if hasUndef || rawVal.containsPoison then "The value loaded contains undefined bits."
-                          else s!"The value {val.llubiString m1 dl} violates !noundef metadata."), o2)
-              else
                 (ev, finishRegInstr st frame callers rest iid val (m1.bindWildcard p.prov mo.allocId), o2)
       | _ => (none, .staticError s!"Expected pointer in load, got {ptrVal}", o1)
   | .store valTy valExp ptrTy ptrExp align? isVol =>
@@ -1457,20 +1453,9 @@ theorem execInstr_sound {st frame callers iid rest instr o ev c' o'}
               obtain ⟨hasUndef, o2⟩ := restP
               rw [hbtv] at h; dsimp only at h
               have hrel := bytesToValue_satisfies_rel hbtv
-              cases hmd : applyValueAttrsPure st.dataLayout m1 ty rawVal md with
+              cases hmd : loadValueChecks st.dataLayout m1 ty rawVal hasUndef noundef md with
               | error err => rw [hmd] at h; cases h; exact StepInstr.load_md_err ih1 hver hrel hmd
-              | ok val =>
-                rw [hmd] at h; dsimp only at h
-                by_cases hbad : (noundef && (hasUndef || val.containsPoison)) = true
-                · rw [if_pos hbad] at h; cases h
-                  simp only [Bool.and_eq_true, Bool.or_eq_true] at hbad
-                  obtain ⟨rfl, hup⟩ := hbad
-                  exact StepInstr.load_noundef_ub ih1 hver hrel hmd hup
-                · rw [if_neg hbad] at h; cases h
-                  exact StepInstr.load_ok ih1 hver hrel hmd (by
-                    intro hn
-                    simp only [hn, Bool.true_and, Bool.or_eq_true, not_or] at hbad
-                    exact ⟨Bool.eq_false_iff.mpr hbad.1, Bool.eq_false_iff.mpr hbad.2⟩)
+              | ok val => rw [hmd] at h; cases h; exact StepInstr.load_ok ih1 hver hrel hmd
       | _ => cases h; exact StepInstr.load_ptr_nonptr ih1 (by intro _ _ heq; cases heq)
   | store valTy valExp ptrTy ptrExp align? isVol =>
     dsimp only at h

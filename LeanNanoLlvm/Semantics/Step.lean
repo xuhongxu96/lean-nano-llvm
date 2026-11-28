@@ -22,6 +22,23 @@ open AST
 def blockAddrKey (fn : FunctionId) (blk : BlockId) : RawId :=
   .name s!"__bb__{fn.toString}__{blk.toString}"
 
+/-- The value of a `load` from the value read (`rawVal`, with `hasUndef` if it had undefined
+bits), in llubi's order (`visitLoadInst`): with `!noundef`, undefined or poison bits read from
+memory are immediate UB ("The value loaded contains undefined bits."); then the poison-generating
+metadata (`!range`, `!nofpclass`, `!nonnull`, `!align`); then `!noundef` on the result; then
+`!dereferenceable` / `!dereferenceable_or_null`. -/
+def loadValueChecks (dl : DataLayout) (mem : MemoryState) (ty : LlvmType) (rawVal : RegisterValue)
+    (hasUndef noundef : Bool) (md : List ValueAttr) : Except ExecError RegisterValue :=
+  if noundef && (hasUndef || rawVal.containsPoison) then
+    .error (.immediateUB "The value loaded contains undefined bits.")
+  else
+    match applyValueAttrsSeq dl mem ty rawVal (md.filter (·.phase == 0)) with
+    | .error e => .error e
+    | .ok v1 =>
+      if noundef && v1.containsPoison then
+        .error (.immediateUB s!"The value {v1.llubiString mem dl} violates !noundef metadata.")
+      else applyValueAttrsPure dl mem ty v1 (md.filter (·.phase != 0))
+
 /-- Name of the memory object behind `blockaddress(@fn, %blk)`: llubi prints such pointers with
 the block's label (`ptr 0x8 [L1]`), see `MemoryState.objectDisplayName`. -/
 def blockAddrObjName (blk : BlockId) : String := "__bb__" ++ blk.toString
@@ -879,8 +896,7 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       m1.verifyMemAccess p (st.dataLayout.typeStoreSize ty) (align?.getD (st.dataLayout.typeABIAlign ty)) false = .ok (mo, offset) →
       BytesToValueRel st.dataLayout st.config
         (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty rawVal hasUndef →
-      applyValueAttrsPure st.dataLayout m1 ty rawVal md = .ok val →
-      (noundef = true → hasUndef = false ∧ val.containsPoison = false) →
+      loadValueChecks st.dataLayout m1 ty rawVal hasUndef noundef md = .ok val →
       StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md)
         (if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat
           (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty))) else none)
@@ -890,22 +906,11 @@ inductive StepInstr (st : MachineState) (frame : CallFrame) (callers : List Call
       m1.verifyMemAccess p (st.dataLayout.typeStoreSize ty) (align?.getD (st.dataLayout.typeABIAlign ty)) false = .ok (mo, offset) →
       BytesToValueRel st.dataLayout st.config
         (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty rawVal hasUndef →
-      applyValueAttrsPure st.dataLayout m1 ty rawVal md = .error err →
+      loadValueChecks st.dataLayout m1 ty rawVal hasUndef noundef md = .error err →
       StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md)
         (if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat
           (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty))) else none)
         (Config.ofError err)
-  | load_noundef_ub {ty ptrTy ptrExp align? isVol md as p m1 mo offset rawVal val hasUndef msg} :
-      EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.ok (.ptr as (.value p), m1)) →
-      m1.verifyMemAccess p (st.dataLayout.typeStoreSize ty) (align?.getD (st.dataLayout.typeABIAlign ty)) false = .ok (mo, offset) →
-      BytesToValueRel st.dataLayout st.config
-        (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty)) ty rawVal hasUndef →
-      applyValueAttrsPure st.dataLayout m1 ty rawVal md = .ok val →
-      (hasUndef = true ∨ val.containsPoison = true) →
-      StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol true md)
-        (if isVol then some (.volatileLoad mo.addrSpace p.addr.toNat
-          (MemoryState.readObjectBytes mo offset (st.dataLayout.typeStoreSize ty))) else none)
-        (.ub msg)
   | load_ptr_err {ty ptrTy ptrExp align? isVol noundef md err} :
       EvalExp st.dataLayout st.config frame.registers st.memory ptrTy ptrExp (.error err) →
       StepInstr st frame callers iid rest (.load ty ptrTy ptrExp align? isVol noundef md) none (Config.ofError err)
@@ -1453,7 +1458,7 @@ theorem StepInstr.preserves_wf {st frame callers iid rest instr ev c'}
       | none => rw [hcnt.2]; exact hwf
       | some p => obtain ⟨_, _, he, _⟩ := hcnt; exact EvalExp.preserves_wf hwf he
     exact finishRegInstr_wf (hspec.preserves_wf hm1)
-  | load_ok h1 _ _ _ _ => exact finishRegInstr_wf (MemoryState.bindWildcard_preserves_wf (EvalExp.preserves_wf hwf h1) _ _)
+  | load_ok h1 _ _ _ => exact finishRegInstr_wf (MemoryState.bindWildcard_preserves_wf (EvalExp.preserves_wf hwf h1) _ _)
   | store_ok h1 h2 _ =>
     exact MemoryState.writeObjectBytes_preserves_wf (MemoryState.bindWildcard_preserves_wf (EvalExp.preserves_wf (EvalExp.preserves_wf hwf h1) h2) _ _) _ _ _
   | gep_ok h1 h2 _ => exact finishRegInstr_wf (EvalExpList.preserves_wf (EvalExp.preserves_wf hwf h1) h2)

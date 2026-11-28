@@ -254,8 +254,7 @@ theorem ret_x_refines_alloca_store_load_i8 :
                   (EvalExp.leaf_ok (by llvm_step; exact ⟨rfl, rfl⟩))
                   (by simpa [typeStoreSize_i8, hb, hbw1] using hverLoad)
                   (by simpa [typeStoreSize_i8] using hbtv)
-                  rfl
-                  (by intro h; cases h)))
+                  rfl))
               (StarStep.step (ev := none)
                 (Step.term rfl rfl rfl
                   (StepTerm.ret_ok rfl
