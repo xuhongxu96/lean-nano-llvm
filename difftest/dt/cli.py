@@ -284,7 +284,7 @@ def cmd_cases(args) -> int:
 
 def cmd_run_llubi(args) -> int:
     w = _work(args)
-    out = w / "results" / "llubi.jsonl"
+    out = w / "results" / f"{args.results_name}.jsonl"
     done = _resume(out, "run_id")
     seeds = [int(s) for s in args.seeds.split(",")]
     todo = []
@@ -526,6 +526,8 @@ def main(argv: list[str]) -> int:
             s.add_argument("--seeds", default="0,1")
             s.add_argument("--timeout", type=float, default=60)
             s.add_argument("--keep-outputs", choices=["all", "mismatch", "none"], default="mismatch")
+            s.add_argument("--results-name", default="llubi",
+                           help="results/<name>.jsonl (a separate set, e.g. a run on newer code)")
         if name == "run-alive2":
             s.add_argument("--config", choices=list(oracle_alive2.CONFIGS), default="no-undef-input")
             s.add_argument("--smt-timeout", type=int, default=10000, help="ms")
