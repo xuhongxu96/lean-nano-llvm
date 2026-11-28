@@ -173,4 +173,48 @@ example : ¬ ([llvm-definition|
       }
     ]) := by llvm_disprove
 
+
+/-- Parameter attributes in `llvm_refine`: `noundef` and `range` on parameters are evaluated at
+function entry (`applySingleAttrPure_*` in the symbolic executor's simp set). These pairs, which
+Alive2 proves, used to leave `applySingleAttrPure` unreduced. -/
+example : [llvm-definition|
+      define i8 @f(i8 noundef %x) {
+      entry:
+        %r = add i8 %x, 0
+        ret i8 %r
+      }
+    ] ⊒ [llvm-definition|
+      define i8 @f(i8 noundef %x) {
+      entry:
+        ret i8 %x
+      }
+    ] := by llvm_refine
+
+example : [llvm-definition|
+      define i1 @f(i8 range(0, 10) %x) {
+      entry:
+        %c = icmp ult i8 %x, 10
+        ret i1 %c
+      }
+    ] ⊒ [llvm-definition|
+      define i1 @f(i8 range(0, 10) %x) {
+      entry:
+        ret i1 true
+      }
+    ] := by llvm_refine
+
+example : [llvm-definition|
+      define i8 @f(i8 noundef range(0, 10) %x) {
+      entry:
+        %c = icmp ult i8 %x, 10
+        %r = select i1 %c, i8 %x, i8 0
+        ret i8 %r
+      }
+    ] ⊒ [llvm-definition|
+      define i8 @f(i8 noundef range(0, 10) %x) {
+      entry:
+        ret i8 %x
+      }
+    ] := by llvm_refine
+
 end LeanNanoLlvm.Tests.Refinement.Difftest

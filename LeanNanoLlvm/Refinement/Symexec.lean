@@ -165,6 +165,8 @@ elab "llvm_intro" : tactic => do
     simp only [initCallConfig, mkEntryFrameWithMem, mkEntryFrame, bindFrameArgs, bindFrameArgs.go,
       applyByValCopies, applyByValCopies.go, splitPhis,
       RegisterValue.matchesType, byvalDeferredAttrs, applyValueAttrsPure, applyValueAttrsSeq, reduceOrderValueAttrs,
+      applySingleAttrPure_noundef_bv_value, applySingleAttrPure_noundef_bv_poison,
+      applySingleAttrPure_range_bv_value, applySingleAttrPure_range_bv_poison, except_bind_ok, except_bind_error,
       withSiteAttrs_nil,
       List.length_nil, List.length_cons, List.any_nil, List.any_cons,
       List.getD, List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil,
@@ -511,6 +513,18 @@ private def tryFinishHalted : TacticM Bool := do
       restoreState s2
       return false
 
+/-- Evaluate value attributes (`applySingleAttrPure`) left in the goal once their value is
+concrete enough: after an argument is split into `.poison`/`.value`, or a `range` condition is
+decided. Only runs when the goal mentions `applySingleAttrPure` (the simp is not free on large
+goals). -/
+private def simpValueAttrs : TacticM Unit := do
+  let hasAttr ← withMainContext do
+    return ((← instantiateMVars (← getMainTarget)).find? (·.isConstOf ``applySingleAttrPure)).isSome
+  if hasAttr then
+    try evalStep (← `(tactic| simp only [applySingleAttrPure_noundef_bv_value,
+      applySingleAttrPure_noundef_bv_poison, applySingleAttrPure_range_bv_value,
+      applySingleAttrPure_range_bv_poison, except_bind_ok, except_bind_error])) catch _ => pure ()
+
 /-- Try splitting a single `PoisonOr` hypothesis (used when symbolic `condBr`, `freeze`, or
     `evalDivRemUB` needs to inspect whether a symbolic operand is `.poison` or `.value`). -/
 private def trySplitOnePoisonOr : TacticM Bool := do
@@ -536,6 +550,8 @@ private def trySplitOnePoisonOr : TacticM Bool := do
     let mut out : List MVarId := []
     for g in gs do
       setGoals [g]
+      -- parameter attributes become evaluable once the argument is `.poison` or `.value`
+      simpValueAttrs
       try evalStep (← `(tactic| llvm_simp)) catch _ => pure ()
       simpAfterStep
       out := out ++ (← getGoals)
@@ -784,6 +800,7 @@ private def symexecLoop (fuel : Nat) : TacticM Unit := do
                             for sg in gs do
                               setGoals [sg]
                               try evalStep (← `(tactic| simp only [$hName:ident, ↓reduceIte, not_false_eq_true])) catch _ => pure ()
+                              simpValueAttrs
                               simpAfterStep
                               out := out ++ (← getGoals)
                             setGoals out
